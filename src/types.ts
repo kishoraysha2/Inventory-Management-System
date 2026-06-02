@@ -1,0 +1,81 @@
+export interface ActivityLog {
+  id: string;
+  itemId: string;
+  itemName: string;
+  type: 'add' | 'edit' | 'delete' | 'stock_change';
+  description: string;
+  quantityDifference?: number;
+  timestamp: string;
+}
+
+export interface Supplier {
+  id: string;
+  name: string;
+  contactPerson?: string;
+  email?: string;
+  phone: string;
+  category?: string;
+  address?: string;
+  paymentType?: 'Cash' | 'Credit';
+  dueBalance?: number;
+  createdDate?: string;
+}
+
+export interface Customer {
+  id: string;
+  name: string;
+  phone: string;
+  address: string;
+  customerType: 'Cash' | 'Credit';
+  dueBalance: number;
+  createdDate: string;
+}
+
+export interface Product {
+  id: string;
+  name: string;
+  sku: string;
+  category: string;
+  purchasePrice: number;
+  sellingPrice: number;
+  currentStock: number;
+  minimumStockAlert: number;
+  createdDate: string;
+  status?: 'active' | 'inactive';
+  location?: string;
+  supplierName?: string;
+  supplierEmail?: string;
+  description?: string;
+}
+
+export interface Sale {
+  id: string;
+  customerId: string;
+  customerName: string;
+  productId: string;
+  productName: string;
+  quantity: number;
+  sellingPrice: number;
+  unitPrice?: number;
+  subtotal?: number;
+  taxRatePercent?: number;
+  taxAmount?: number;
+  totalAmount: number;
+  paymentType: 'Cash' | 'Credit';
+  saleDate: string;
+  timestamp?: string;
+}
+
+export interface Purchase {
+  id: string;
+  supplierId: string;
+  supplierName: string;
+  productId: string;
+  productName: string;
+  quantity: number;
+  purchasePrice: number;
+  totalAmount: number;
+  paymentType: 'Cash' | 'Credit';
+  purchaseDate: string;
+}
+

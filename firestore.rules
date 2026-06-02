@@ -1,0 +1,204 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Helper to validate complete InventoryItem schema
+    function isValidItem(data) {
+      return data.keys().hasAll(['id', 'name', 'sku', 'category', 'price', 'quantity', 'minQuantity', 'supplierName', 'supplierEmail', 'location', 'description', 'lastUpdated'])
+          && data.keys().size() == 12
+          && data.id is string && data.id.size() <= 128
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 200
+          && data.sku is string && data.sku.size() > 0 && data.sku.size() <= 100
+          && data.category is string && data.category.size() > 0 && data.category.size() <= 100
+          && (data.price is number || data.price is int) && data.price >= 0
+          && data.quantity is int && data.quantity >= 0
+          && data.minQuantity is int && data.minQuantity >= 0
+          && data.supplierName is string && data.supplierName.size() <= 200
+          && data.supplierEmail is string && data.supplierEmail.size() <= 200
+          && data.location is string && data.location.size() <= 200
+          && data.description is string && data.description.size() <= 1000
+          && data.lastUpdated is string;
+    }
+
+    // Helper to validate complete ActivityLog schema
+    function isValidLog(data) {
+      return data.keys().hasAll(['id', 'itemId', 'itemName', 'type', 'description', 'timestamp'])
+          && (data.keys().size() == 6 || data.keys().size() == 7)
+          && data.id is string && data.id.size() <= 128
+          && data.itemId is string && data.itemId.size() <= 128
+          && data.itemName is string && data.itemName.size() <= 200
+          && data.type is string && (data.type == 'add' || data.type == 'edit' || data.type == 'delete' || data.type == 'stock_change')
+          && data.description is string && data.description.size() <= 500
+          && data.timestamp is string;
+    }
+
+    // Helper to validate complete SystemLog schema
+    function isValidSystemLog(data) {
+      return data.keys().hasAll(['id', 'action', 'user', 'timestamp', 'details'])
+          && data.keys().size() == 5
+          && data.id is string && data.id.size() <= 128
+          && data.action is string && data.action.size() <= 100
+          && data.user is string && data.user.size() <= 200
+          && data.timestamp is string
+          && data.details is string && data.details.size() <= 2000;
+    }
+
+    // Helper to validate complete Supplier schema
+    function isValidSupplier(data) {
+      return data.keys().hasAll(['id', 'name', 'phone'])
+          && data.id is string && data.id.size() <= 128
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 200
+          && data.phone is string && data.phone.size() > 0 && data.phone.size() <= 50
+          && (!data.keys().hasAny(['contactPerson']) || data.contactPerson is string)
+          && (!data.keys().hasAny(['email']) || data.email is string)
+          && (!data.keys().hasAny(['category']) || data.category is string)
+          && (!data.keys().hasAny(['address']) || (data.address is string && data.address.size() <= 500))
+          && (!data.keys().hasAny(['paymentType']) || (data.paymentType is string && (data.paymentType == 'Cash' || data.paymentType == 'Credit')))
+          && (!data.keys().hasAny(['dueBalance']) || (data.dueBalance is number || data.dueBalance is int))
+          && (!data.keys().hasAny(['createdDate']) || data.createdDate is string);
+    }
+
+    // Helper to validate complete Customer schema
+    function isValidCustomer(data) {
+      return data.keys().hasAll(['id', 'name', 'phone', 'address', 'customerType', 'dueBalance', 'createdDate'])
+          && data.keys().size() == 7
+          && data.id is string && data.id.size() <= 128
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 200
+          && data.phone is string && data.phone.size() > 0 && data.phone.size() <= 50
+          && data.address is string && data.address.size() <= 500
+          && data.customerType is string && (data.customerType == 'Cash' || data.customerType == 'Credit')
+          && (data.dueBalance is number || data.dueBalance is int)
+          && data.createdDate is string;
+    }
+
+    // Helper to validate complete Product schema
+    function isValidProduct(data) {
+      return data.keys().hasAll(['id', 'name', 'sku', 'category', 'purchasePrice', 'sellingPrice', 'currentStock', 'minimumStockAlert'])
+          && (data.keys().size() == 8 || data.keys().size() == 9 || data.keys().size() == 10)
+          && data.id is string && data.id.size() <= 128
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 200
+          && data.sku is string && data.sku.size() > 0 && data.sku.size() <= 100
+          && data.category is string && data.category.size() > 0 && data.category.size() <= 100
+          && (data.purchasePrice is number || data.purchasePrice is int) && data.purchasePrice >= 0
+          && (data.sellingPrice is number || data.sellingPrice is int) && data.sellingPrice >= 0
+          && (data.currentStock is number || data.currentStock is int) && data.currentStock >= 0
+          && (data.minimumStockAlert is number || data.minimumStockAlert is int) && data.minimumStockAlert >= 0
+          && (!data.keys().hasAny(['createdDate']) || data.createdDate is string)
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'inactive')));
+    }
+
+    // Helper to validate complete Sale schema
+    function isValidSale(data) {
+      return data.keys().hasAll(['id', 'customerId', 'customerName', 'productId', 'productName', 'quantity', 'sellingPrice', 'unitPrice', 'subtotal', 'taxRatePercent', 'taxAmount', 'totalAmount', 'paymentType', 'saleDate', 'timestamp'])
+          && data.keys().size() == 15
+          && data.id is string && data.id.size() <= 128
+          && data.customerId is string && data.customerId.size() <= 128
+          && data.customerName is string && data.customerName.size() > 0 && data.customerName.size() <= 200
+          && data.productId is string && data.productId.size() <= 128
+          && data.productName is string && data.productName.size() > 0 && data.productName.size() <= 200
+          && (data.quantity is number || data.quantity is int) && data.quantity > 0
+          && (data.sellingPrice is number || data.sellingPrice is int) && data.sellingPrice >= 0
+          && (data.unitPrice is number || data.unitPrice is int) && data.unitPrice >= 0
+          && (data.subtotal is number || data.subtotal is int) && data.subtotal >= 0
+          && (data.taxRatePercent is number || data.taxRatePercent is int) && data.taxRatePercent >= 0
+          && (data.taxAmount is number || data.taxAmount is int) && data.taxAmount >= 0
+          && (data.totalAmount is number || data.totalAmount is int) && data.totalAmount >= 0
+          && data.paymentType is string && (data.paymentType == 'Cash' || data.paymentType == 'Credit')
+          && data.saleDate is string
+          && data.timestamp is string;
+    }
+
+    // Helper to validate complete Purchase schema
+    function isValidPurchase(data) {
+      return data.keys().hasAll(['id', 'supplierId', 'supplierName', 'productId', 'productName', 'quantity', 'purchasePrice', 'totalAmount', 'paymentType', 'purchaseDate'])
+          && data.keys().size() == 10
+          && data.id is string && data.id.size() <= 128
+          && data.supplierId is string && data.supplierId.size() <= 128
+          && data.supplierName is string && data.supplierName.size() > 0 && data.supplierName.size() <= 200
+          && data.productId is string && data.productId.size() <= 128
+          && data.productName is string && data.productName.size() > 0 && data.productName.size() <= 200
+          && (data.quantity is number || data.quantity is int) && data.quantity > 0
+          && (data.purchasePrice is number || data.purchasePrice is int) && data.purchasePrice >= 0
+          && (data.totalAmount is number || data.totalAmount is int) && data.totalAmount >= 0
+          && data.paymentType is string && (data.paymentType == 'Cash' || data.paymentType == 'Credit')
+          && data.purchaseDate is string;
+    }
+
+    // Items Collection
+    match /items/{itemId} {
+      allow read: if true;
+      allow create: if isValidId(itemId) && isValidItem(request.resource.data);
+      allow update: if isValidId(itemId) && isValidItem(request.resource.data);
+      allow delete: if isValidId(itemId);
+    }
+
+    // Logs Collection
+    match /logs/{logId} {
+      allow read: if true;
+      allow create: if isValidId(logId) && isValidLog(request.resource.data);
+      allow update: if false; // Logs are immutable
+      allow delete: if true; // Clear logs
+    }
+
+    // System Logs Collection
+    match /Logs/{logId} {
+      allow read: if true;
+      allow create: if isValidId(logId) && isValidSystemLog(request.resource.data);
+      allow update: if false; // Logs are immutable
+      allow delete: if true; // Clear logs
+    }
+
+    // Suppliers Collection
+    match /suppliers/{supplierId} {
+      allow read: if true;
+      allow create: if isValidId(supplierId) && isValidSupplier(request.resource.data);
+      allow update: if isValidId(supplierId) && isValidSupplier(request.resource.data);
+      allow delete: if isValidId(supplierId);
+    }
+
+    // Customers Collection
+    match /customers/{customerId} {
+      allow read: if true;
+      allow create: if isValidId(customerId) && isValidCustomer(request.resource.data);
+      allow update: if isValidId(customerId) && isValidCustomer(request.resource.data);
+      allow delete: if isValidId(customerId);
+    }
+
+    // Products Collection
+    match /products/{productId} {
+      allow read: if true;
+      allow create: if isValidId(productId) && isValidProduct(request.resource.data);
+      allow update: if isValidId(productId) && isValidProduct(request.resource.data);
+      allow delete: if isValidId(productId);
+    }
+
+    // Sales Collection
+    match /sales/{saleId} {
+      allow read: if true;
+      allow create: if isValidId(saleId) 
+                    && isValidSale(request.resource.data)
+                    && exists(/databases/$(database)/documents/products/$(request.resource.data.productId))
+                    && get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data.currentStock >= request.resource.data.quantity
+                    && (!('status' in get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data) || get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data.status != 'inactive');
+      allow update: if false; // Sales records are completely immutable to protect financial data integrity
+      allow delete: if isValidId(saleId);
+    }
+
+    // Purchases Collection
+    match /purchases/{purchaseId} {
+      allow read: if true;
+      allow create: if isValidId(purchaseId) && isValidPurchase(request.resource.data);
+      allow update: if isValidId(purchaseId) && isValidPurchase(request.resource.data);
+      allow delete: if isValidId(purchaseId);
+    }
+  }
+}

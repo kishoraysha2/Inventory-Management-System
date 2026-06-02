@@ -1,0 +1,6 @@
+{
+  "name": "Inventory Management",
+  "description": "A clean, responsive single-screen dashboard to manage products, monitor stock levels, filter categories, and track inventory metrics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,177 @@
+{
+  "entities": {
+    "InventoryItem": {
+      "title": "InventoryItem",
+      "description": "An item in the inventory catalog.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "sku": { "type": "string" },
+        "category": { "type": "string" },
+        "price": { "type": "number" },
+        "quantity": { "type": "number" },
+        "minQuantity": { "type": "number" },
+        "supplierName": { "type": "string" },
+        "supplierEmail": { "type": "string" },
+        "location": { "type": "string" },
+        "description": { "type": "string" },
+        "lastUpdated": { "type": "string" }
+      },
+      "required": ["id", "name", "sku", "category", "price", "quantity", "minQuantity"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Log of stock activity or changes.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "itemId": { "type": "string" },
+        "itemName": { "type": "string" },
+        "type": { "type": "string", "enum": ["add", "edit", "delete", "stock_change"] },
+        "description": { "type": "string" },
+        "quantityDifference": { "type": "number" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "itemId", "itemName", "type", "description", "timestamp"]
+    },
+    "SystemLog": {
+      "title": "SystemLog",
+      "description": "A system activity log entry tracking core operations.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "action": { "type": "string" },
+        "user": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "details": { "type": "string" }
+      },
+      "required": ["id", "action", "user", "timestamp", "details"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Supplier accounts with trade terms and record-keeping properties.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "contactPerson": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "category": { "type": "string" },
+        "address": { "type": "string" },
+        "paymentType": { "type": "string", "enum": ["Cash", "Credit"] },
+        "dueBalance": { "type": "number" },
+        "createdDate": { "type": "string" }
+      },
+      "required": ["id", "name", "phone"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Customer record with trade/credit terms and balance tracker.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "customerType": { "type": "string", "enum": ["Cash", "Credit"] },
+        "dueBalance": { "type": "number" },
+        "createdDate": { "type": "string" }
+      },
+      "required": ["id", "name", "phone", "address", "customerType", "dueBalance", "createdDate"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "A manufactured, ordered, or distributed stock unit with distinct custom specs.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "sku": { "type": "string" },
+        "category": { "type": "string" },
+        "purchasePrice": { "type": "number" },
+        "sellingPrice": { "type": "number" },
+        "currentStock": { "type": "number" },
+        "minimumStockAlert": { "type": "number" },
+        "createdDate": { "type": "string" }
+      },
+      "required": ["id", "name", "sku", "category", "purchasePrice", "sellingPrice", "currentStock", "minimumStockAlert"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "A ledger record tracking product sales to customers.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "productId": { "type": "string" },
+        "productName": { "type": "string" },
+        "quantity": { "type": "number" },
+        "sellingPrice": { "type": "number" },
+        "unitPrice": { "type": "number" },
+        "subtotal": { "type": "number" },
+        "taxRatePercent": { "type": "number" },
+        "taxAmount": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "paymentType": { "type": "string", "enum": ["Cash", "Credit"] },
+        "saleDate": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "customerId", "customerName", "productId", "productName", "quantity", "sellingPrice", "unitPrice", "subtotal", "taxRatePercent", "taxAmount", "totalAmount", "paymentType", "saleDate", "timestamp"]
+    },
+    "Purchase": {
+      "title": "Purchase",
+      "description": "A ledger record tracking product purchases from suppliers.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "supplierName": { "type": "string" },
+        "productId": { "type": "string" },
+        "productName": { "type": "string" },
+        "quantity": { "type": "number" },
+        "purchasePrice": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "paymentType": { "type": "string", "enum": ["Cash", "Credit"] },
+        "purchaseDate": { "type": "string" }
+      },
+      "required": ["id", "supplierId", "supplierName", "productId", "productName", "quantity", "purchasePrice", "totalAmount", "paymentType", "purchaseDate"]
+    }
+  },
+  "firestore": {
+    "items": {
+      "schema": "InventoryItem",
+      "description": "Store all inventory items."
+    },
+    "logs": {
+      "schema": "ActivityLog",
+      "description": "Store system audit logs."
+    },
+    "Logs": {
+      "schema": "SystemLog",
+      "description": "Store the new complete system activity logs."
+    },
+    "suppliers": {
+      "schema": "Supplier",
+      "description": "Store supplier details."
+    },
+    "customers": {
+      "schema": "Customer",
+      "description": "Store customer accounts."
+    },
+    "products": {
+      "schema": "Product",
+      "description": "Store product management records."
+    },
+    "sales": {
+      "schema": "Sale",
+      "description": "Store sale transactions and records."
+    },
+    "purchases": {
+      "schema": "Purchase",
+      "description": "Store purchase transactions and records from suppliers."
+    }
+  }
+}
