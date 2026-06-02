@@ -138,6 +138,38 @@
         "purchaseDate": { "type": "string" }
       },
       "required": ["id", "supplierId", "supplierName", "productId", "productName", "quantity", "purchasePrice", "totalAmount", "paymentType", "purchaseDate"]
+    },
+    "CustomerPayment": {
+      "title": "CustomerPayment",
+      "description": "A ledger record tracking customer's due payments.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "amountPaid": { "type": "number" },
+        "previousDue": { "type": "number" },
+        "remainingDue": { "type": "number" },
+        "paymentDate": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "required": ["id", "customerId", "amountPaid", "previousDue", "remainingDue", "paymentDate"]
+    },
+    "SupplierPayment": {
+      "title": "SupplierPayment",
+      "description": "A ledger record tracking supplier default/due payments.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "supplierName": { "type": "string" },
+        "amountPaid": { "type": "number" },
+        "previousDue": { "type": "number" },
+        "remainingDue": { "type": "number" },
+        "paymentDate": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "required": ["id", "supplierId", "amountPaid", "previousDue", "remainingDue", "paymentDate"]
     }
   },
   "firestore": {
@@ -172,6 +204,14 @@
     "purchases": {
       "schema": "Purchase",
       "description": "Store purchase transactions and records from suppliers."
+    },
+    "customerPayments": {
+      "schema": "CustomerPayment",
+      "description": "Store customer payment ledger entries."
+    },
+    "supplierPayments": {
+      "schema": "SupplierPayment",
+      "description": "Store supplier payment ledger entries."
     }
   }
 }

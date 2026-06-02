@@ -133,6 +133,35 @@ service cloud.firestore {
           && data.purchaseDate is string;
     }
 
+    // Helper to validate complete CustomerPayment schema
+    function isValidCustomerPayment(data) {
+      return data.keys().hasAll(['id', 'customerId', 'amountPaid', 'previousDue', 'remainingDue', 'paymentDate'])
+          && (data.keys().size() == 6 || data.keys().size() == 7 || data.keys().size() == 8)
+          && data.id is string && data.id.size() <= 128
+          && data.customerId is string && data.customerId.size() <= 128
+          && (!data.keys().hasAny(['customerName']) || (data.customerName is string && data.customerName.size() <= 200))
+          && (data.amountPaid is number || data.amountPaid is int) && data.amountPaid >= 0
+          && (data.previousDue is number || data.previousDue is int) && data.previousDue >= 0
+          && (data.remainingDue is number || data.remainingDue is int) && data.remainingDue >= 0
+          && data.paymentDate is string
+          && (!data.keys().hasAny(['notes']) || (data.notes is string && data.notes.size() <= 1000));
+    }
+
+    // Helper to validate complete SupplierPayment schema
+    function isValidSupplierPayment(data) {
+      return data.keys().hasAll(['id', 'supplierId', 'amountPaid', 'previousDue', 'remainingDue', 'paymentDate'])
+          && (data.keys().size() == 6 || data.keys().size() == 7 || data.keys().size() == 8)
+          && data.id is string && data.id.size() <= 128
+          && data.supplierId is string && data.supplierId.size() <= 128
+          && (!data.keys().hasAny(['supplierName']) || (data.supplierName is string && data.supplierName.size() <= 200))
+          && (data.amountPaid is number || data.amountPaid is int) && data.amountPaid >= 0
+          && (data.previousDue is number || data.previousDue is int) && data.previousDue >= 0
+          && (data.remainingDue is number || data.remainingDue is int) && data.remainingDue >= 0
+          && data.paymentDate is string
+          && (!data.keys().hasAny(['notes']) || (data.notes is string && data.notes.size() <= 1000));
+    }
+
+
     // Items Collection
     match /items/{itemId} {
       allow read: if true;
@@ -199,6 +228,22 @@ service cloud.firestore {
       allow create: if isValidId(purchaseId) && isValidPurchase(request.resource.data);
       allow update: if isValidId(purchaseId) && isValidPurchase(request.resource.data);
       allow delete: if isValidId(purchaseId);
+    }
+
+    // Customer Payments Collection
+    match /customerPayments/{paymentId} {
+      allow read: if true;
+      allow create: if isValidId(paymentId) && isValidCustomerPayment(request.resource.data);
+      allow update: if isValidId(paymentId) && isValidCustomerPayment(request.resource.data);
+      allow delete: if isValidId(paymentId);
+    }
+
+    // Supplier Payments Collection
+    match /supplierPayments/{paymentId} {
+      allow read: if true;
+      allow create: if isValidId(paymentId) && isValidSupplierPayment(request.resource.data);
+      allow update: if isValidId(paymentId) && isValidSupplierPayment(request.resource.data);
+      allow delete: if isValidId(paymentId);
     }
   }
 }

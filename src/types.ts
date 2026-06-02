@@ -79,3 +79,25 @@ export interface Purchase {
   purchaseDate: string;
 }
 
+export interface CustomerPayment {
+  id: string;
+  customerId: string;
+  customerName?: string;
+  amountPaid: number;
+  previousDue: number;
+  remainingDue: number;
+  paymentDate: string;
+  notes: string;
+}
+
+export interface SupplierPayment {
+  id: string;
+  supplierId: string;
+  supplierName?: string;
+  amountPaid: number;
+  previousDue: number;
+  remainingDue: number;
+  paymentDate: string;
+  notes: string;
+}
+

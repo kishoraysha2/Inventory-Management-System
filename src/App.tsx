@@ -25,6 +25,7 @@ import {
   LayoutDashboard,
   BarChart3,
   ShoppingCart,
+  CreditCard,
 } from 'lucide-react';
 
 import { Product, ActivityLog, Supplier } from './types';
@@ -35,6 +36,7 @@ import ActivityHistory from './components/ActivityHistory';
 import SupplierContact from './components/SupplierContact';
 import CustomerManagement from './components/CustomerManagement';
 import SupplierManagement from './components/SupplierManagement';
+import PaymentLedger from './components/PaymentLedger';
 import ProductManagement from './components/ProductManagement';
 import SalesManagement from './components/SalesManagement';
 import ProcurementManagement from './components/ProcurementManagement';
@@ -73,7 +75,7 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'products' | 'sales' | 'procurement' | 'reports'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports'>('dashboard');
 
   // --- Reference Nodes ---
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -762,6 +764,18 @@ export default function App() {
         </button>
         <button
           type="button"
+          onClick={() => setActiveTab('ledger')}
+          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
+            activeTab === 'ledger'
+              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
+              : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <CreditCard className="h-4 w-4" />
+          <span>Due Ledger</span>
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveTab('products')}
           className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
             activeTab === 'products'
@@ -1192,6 +1206,8 @@ export default function App() {
         <CustomerManagement />
       ) : activeTab === 'suppliers' ? (
         <SupplierManagement />
+      ) : activeTab === 'ledger' ? (
+        <PaymentLedger />
       ) : activeTab === 'products' ? (
         <ProductManagement />
       ) : activeTab === 'sales' ? (
