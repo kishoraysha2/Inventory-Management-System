@@ -134,22 +134,8 @@ export default function ProductManagement() {
         setProducts(productList);
         setLoading(false);
       } else {
-        // Seed with defaults if empty
-        const seedPromises = INITIAL_PRODUCTS.map(async (prod) => {
-          try {
-            await setDoc(doc(db, 'products', prod.id), prod);
-          } catch (e) {
-            console.error("Failed to seed products inside Firestore", e);
-          }
-        });
-        Promise.all(seedPromises).then(() => {
-          setProducts(INITIAL_PRODUCTS);
-          setLoading(false);
-        }).catch((err) => {
-          console.error("Failed to fully seed products", err);
-          setProducts(INITIAL_PRODUCTS);
-          setLoading(false);
-        });
+        setProducts([]);
+        setLoading(false);
       }
     }, (err) => {
       console.error("Products sync error:", err);
@@ -643,7 +629,7 @@ export default function ProductManagement() {
                   <div className="w-14 h-14 bg-slate-50 border border-slate-100 rounded-full flex items-center justify-center text-slate-400 mb-3">
                     <ShoppingBag className="h-6 w-6" />
                   </div>
-                  <p className="text-sm font-semibold text-slate-650 text-slate-700">No Catalog Products Found</p>
+                  <p className="text-sm font-semibold text-slate-650 text-slate-700">No products found</p>
                   <p className="text-xs text-slate-400 mt-1 max-w-sm">
                     {searchQuery ? 'Double check search parameters or reset limits' : 'Start registering and indexing items to construct the database'}
                   </p>

@@ -49,17 +49,17 @@ export default function App() {
   // --- Core Persistent State ---
   const [products, setProducts] = useState<Product[]>(() => {
     const saved = localStorage.getItem('inventory_products');
-    return saved ? JSON.parse(saved) : INITIAL_PRODUCTS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [suppliers, setSuppliers] = useState<Supplier[]>(() => {
     const saved = localStorage.getItem('inventory_suppliers');
-    return saved ? JSON.parse(saved) : INITIAL_SUPPLIERS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [logs, setLogs] = useState<ActivityLog[]>(() => {
     const saved = localStorage.getItem('inventory_logs');
-    return saved ? JSON.parse(saved) : INITIAL_LOGS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   // --- Search, Filter & Sort State ---
@@ -89,19 +89,7 @@ export default function App() {
         productsList.push(docSnap.data() as Product);
       });
       
-      if (productsList.length > 0) {
-        setProducts(productsList);
-      } else {
-        // If Firestore is empty, bootstrap with standard products
-        INITIAL_PRODUCTS.forEach(async (prod) => {
-          try {
-            await setDoc(doc(db, 'products', prod.id), prod);
-          } catch (e) {
-            console.error("Failed to seed products to Firestore", e);
-          }
-        });
-        setProducts(INITIAL_PRODUCTS);
-      }
+      setProducts(productsList);
     }, (error) => {
       try {
         handleFirestoreError(error, OperationType.LIST, 'products');
@@ -117,18 +105,7 @@ export default function App() {
         suppliersList.push(docSnap.data() as Supplier);
       });
       
-      if (suppliersList.length > 0) {
-        setSuppliers(suppliersList);
-      } else {
-        INITIAL_SUPPLIERS.forEach(async (supplier) => {
-          try {
-            await setDoc(doc(db, 'suppliers', supplier.id), supplier);
-          } catch (e) {
-            console.error("Failed to seed suppliers", e);
-          }
-        });
-        setSuppliers(INITIAL_SUPPLIERS);
-      }
+      setSuppliers(suppliersList);
     }, (error) => {
       try {
         handleFirestoreError(error, OperationType.LIST, 'suppliers');
@@ -144,19 +121,8 @@ export default function App() {
         logsList.push(docSnap.data() as ActivityLog);
       });
       
-      if (logsList.length > 0) {
-        const sorted = logsList.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-        setLogs(sorted);
-      } else {
-        INITIAL_LOGS.forEach(async (log) => {
-          try {
-            await setDoc(doc(db, 'logs', log.id), log);
-          } catch (e) {
-            console.error("Failed to seed logs", e);
-          }
-        });
-        setLogs(INITIAL_LOGS);
-      }
+      const sorted = logsList.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      setLogs(sorted);
     }, (error) => {
       try {
         handleFirestoreError(error, OperationType.LIST, 'logs');

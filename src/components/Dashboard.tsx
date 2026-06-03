@@ -621,7 +621,7 @@ export default function Dashboard() {
           <div className="space-y-3 max-h-[340px] overflow-y-auto pr-1">
             {systemLogs.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center text-slate-400 border border-dashed border-slate-200 rounded-2xl">
-                <p className="text-xs font-bold text-slate-500">No system activities logged yet!</p>
+                <p className="text-xs font-bold text-slate-500">No logs found</p>
                 <p className="text-[10px] text-slate-400 mt-0.5">Live Firestore connection has no audit telemetry stored.</p>
               </div>
             ) : (

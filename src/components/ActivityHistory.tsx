@@ -89,7 +89,7 @@ export default function ActivityHistory({
         {sortedLogs.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-10 text-center text-slate-500">
             <RefreshCcw className="h-8 w-8 text-slate-700 animate-spin mb-2" style={{ animationDuration: '4s' }} />
-            <p className="text-xs font-semibold text-slate-400">No recent mutations recorded</p>
+            <p className="text-xs font-semibold text-slate-400">No logs found</p>
             <p className="text-[10px] text-slate-500 mt-0.5">Adjustments will log automatically</p>
           </div>
         ) : (

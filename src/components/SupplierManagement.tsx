@@ -496,7 +496,7 @@ export default function SupplierManagement() {
                   <div className="w-12 h-12 bg-slate-50 border border-slate-100 rounded-full flex items-center justify-center text-slate-350 mb-3 block">
                     <Truck className="h-6 w-6 text-slate-400" />
                   </div>
-                  <p className="text-sm font-semibold text-slate-600 font-sans">No Suppliers Identified</p>
+                  <p className="text-sm font-semibold text-slate-600 font-sans">No suppliers found</p>
                   <p className="text-xs text-slate-400 mt-1 max-w-sm">
                     {searchQuery ? 'Adjust search inputs or apply empty filter parameters' : 'Begin registering channels to establish trade history ledgers'}
                   </p>

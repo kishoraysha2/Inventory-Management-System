@@ -118,22 +118,8 @@ export default function SalesManagement() {
         setSales(salesList);
         setLoading(false);
       } else {
-        // Seed default sales if collection empty
-        const seedPromises = INITIAL_SALES.map(async (sale) => {
-          try {
-            await setDoc(doc(db, 'sales', sale.id), sale);
-          } catch (e) {
-            console.error("Failed to seed initial sale inside Firestore", e);
-          }
-        });
-        Promise.all(seedPromises).then(() => {
-          setSales(INITIAL_SALES);
-          setLoading(false);
-        }).catch((err) => {
-          console.error("Failed to fully seed sales", err);
-          setSales(INITIAL_SALES);
-          setLoading(false);
-        });
+        setSales([]);
+        setLoading(false);
       }
     }, (err) => {
       console.error("Sales sync error:", err);
@@ -609,7 +595,9 @@ export default function SalesManagement() {
                   <div className="w-14 h-14 bg-slate-50 border border-slate-100 rounded-full flex items-center justify-center mb-3">
                     <ShoppingBag className="h-6 w-6 text-slate-400" />
                   </div>
-                  <p className="text-sm font-semibold text-slate-700">No matching sales logged</p>
+                  <p className="text-sm font-semibold text-slate-700">
+                    {sales.length === 0 ? 'No sales found' : 'No matching sales logged'}
+                  </p>
                   <p className="text-xs text-slate-400 mt-1 max-w-sm">
                     {searchQuery ? 'Double check spelling or swap filters' : 'Start logging sales transactions to configure financial calculations'}
                   </p>
