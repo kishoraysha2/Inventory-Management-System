@@ -19,6 +19,7 @@ export interface Supplier {
   paymentType?: 'Cash' | 'Credit';
   dueBalance?: number;
   createdDate?: string;
+  status?: 'active' | 'inactive';
 }
 
 export interface Customer {
@@ -29,6 +30,7 @@ export interface Customer {
   customerType: 'Cash' | 'Credit';
   dueBalance: number;
   createdDate: string;
+  status?: 'active' | 'inactive';
 }
 
 export interface Product {
@@ -64,6 +66,10 @@ export interface Sale {
   paymentType: 'Cash' | 'Credit';
   saleDate: string;
   timestamp?: string;
+  productPurchasePriceAtSale?: number;
+  productSellingPriceAtSale?: number;
+  costOfGoodsSold?: number;
+  grossProfit?: number;
 }
 
 export interface Purchase {

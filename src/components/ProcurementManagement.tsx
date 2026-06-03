@@ -697,7 +697,7 @@ export default function ProcurementManagement() {
                         }`}
                       >
                         <option value="">-- Choose Supplier --</option>
-                        {suppliers.map(s => (
+                        {suppliers.filter(s => s.status !== 'inactive').map(s => (
                           <option key={s.id} value={s.id}>
                             {s.name} ({s.category || 'Trading Channel'})
                           </option>

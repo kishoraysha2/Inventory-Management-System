@@ -44,7 +44,11 @@ export const INITIAL_SALES: Sale[] = [
     totalAmount: 253.00,
     paymentType: "Cash",
     saleDate: "2026-05-28T10:15:00Z",
-    timestamp: "2026-05-28T10:15:00Z"
+    timestamp: "2026-05-28T10:15:00Z",
+    productPurchasePriceAtSale: 45.00,
+    productSellingPriceAtSale: 110.00,
+    costOfGoodsSold: 90.00,
+    grossProfit: 130.00
   },
   {
     id: "sale-2",
@@ -61,7 +65,11 @@ export const INITIAL_SALES: Sale[] = [
     totalAmount: 161.00,
     paymentType: "Credit",
     saleDate: "2026-05-29T14:45:00Z",
-    timestamp: "2026-05-29T14:45:00Z"
+    timestamp: "2026-05-29T14:45:00Z",
+    productPurchasePriceAtSale: 12.00,
+    productSellingPriceAtSale: 28.00,
+    costOfGoodsSold: 60.00,
+    grossProfit: 80.00
   }
 ];
 
@@ -348,8 +356,21 @@ export default function SalesManagement() {
         }
 
         // E. WRITE: Log sale ledger block
+        const purchasePriceAtSale = productData.purchasePrice ?? 0;
+        const sellingPriceAtSale = productData.sellingPrice ?? 0;
+        const costOfGoodsSold = purchasePriceAtSale * numQty;
+        const grossProfit = subtotal - costOfGoodsSold;
+
+        const finalizedSaleWithSnapshot: Sale = {
+          ...finalizedSaleData,
+          productPurchasePriceAtSale: purchasePriceAtSale,
+          productSellingPriceAtSale: sellingPriceAtSale,
+          costOfGoodsSold: costOfGoodsSold,
+          grossProfit: grossProfit
+        };
+
         const saleRef = doc(db, 'sales', saleId);
-        transaction.set(saleRef, finalizedSaleData);
+        transaction.set(saleRef, finalizedSaleWithSnapshot);
       });
 
       // Log activity to the Logs collection
@@ -767,7 +788,7 @@ export default function SalesManagement() {
                       }`}
                     >
                       <option value="">-- Choose Customer profile --</option>
-                      {customers.map((cust) => (
+                      {customers.filter(cust => cust.status !== 'inactive').map((cust) => (
                         <option key={cust.id} value={cust.id}>
                           {cust.name} ({cust.customerType} - Due: ${cust.dueBalance.toFixed(2)})
                         </option>

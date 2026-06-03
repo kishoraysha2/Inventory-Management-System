@@ -39,24 +39,31 @@ export default function ReportsPage() {
   const [activeReport, setActiveReport] = useState<ReportType>('sales');
 
   // --- Date Range Constants & States (Reference date 2026-06-01) ---
-  const defaultEndDate = "2026-06-01";
-  const defaultStartDate = "2026-05-01"; // Default last 30 days
-  const [startDate, setStartDate] = useState(defaultStartDate);
-  const [endDate, setEndDate] = useState(defaultEndDate);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Debugging log for Reports Sales Data
+  console.log("Reports Sales Data:", sales);
 
   const setQuickRange = (range: '30_days' | '90_days' | 'this_year' | 'all_time') => {
     const end = "2026-06-01";
     let start = "2026-05-01";
     if (range === '90_days') {
       start = "2026-03-01";
+      setStartDate(start);
+      setEndDate(end);
     } else if (range === 'this_year') {
       start = "2026-01-01";
+      setStartDate(start);
+      setEndDate(end);
     } else if (range === 'all_time') {
-      start = "2020-01-01";
+      setStartDate("");
+      setEndDate("");
+    } else {
+      setStartDate(start);
+      setEndDate(end);
     }
-    setStartDate(start);
-    setEndDate(end);
   };
 
   // Local settings for VAT calculation model
@@ -122,24 +129,40 @@ export default function ReportsPage() {
   // --- Filter Implementation by Date Limits ---
   const isDateInRange = (dateStr: string) => {
     if (!dateStr) return false;
+    if (!startDate && !endDate) return true; // If no filter is applied, show all data
+
     const itemDate = new Date(dateStr.split('T')[0]).getTime();
+    
+    if (startDate && !endDate) {
+      const start = new Date(startDate).getTime();
+      return itemDate >= start;
+    }
+    if (!startDate && endDate) {
+      const end = new Date(endDate).getTime();
+      return itemDate <= end;
+    }
+
     const start = new Date(startDate).getTime();
     const end = new Date(endDate).getTime();
     return itemDate >= start && itemDate <= end;
   };
 
   const filteredSales = sales.filter(s => isDateInRange(s.saleDate)).map(s => {
-    const isUpgraded = s.subtotal !== undefined;
-    const subtotal = isUpgraded ? s.subtotal! : s.totalAmount;
-    const taxRatePercent = isUpgraded ? s.taxRatePercent! : 15;
-    const taxAmount = isUpgraded ? s.taxAmount! : (subtotal * taxRatePercent) / 100;
-    const totalAmount = isUpgraded ? s.totalAmount : subtotal + taxAmount;
+    const subtotal = s.subtotal !== undefined ? s.subtotal : (s.totalAmount - (s.taxAmount ?? 0));
+    const totalAmount = s.totalAmount !== undefined ? s.totalAmount : subtotal;
+    const taxAmount = s.taxAmount !== undefined ? s.taxAmount : (totalAmount - subtotal);
+    const costOfGoodsSold = s.costOfGoodsSold !== undefined ? s.costOfGoodsSold : (s.productPurchasePriceAtSale !== undefined ? s.productPurchasePriceAtSale : s.sellingPrice * 0.6) * s.quantity;
+    const grossProfit = s.grossProfit !== undefined ? s.grossProfit : (subtotal - costOfGoodsSold);
+    const saleDate = s.saleDate;
+    
     return {
       ...s,
       subtotal,
-      taxRatePercent,
+      totalAmount,
+      costOfGoodsSold,
+      grossProfit,
       taxAmount,
-      totalAmount
+      saleDate
     };
   });
   
@@ -164,7 +187,7 @@ export default function ReportsPage() {
   // --- Active Calculations Data Models ---
 
   // 1. Sales Report Math
-  const totalItemsSold = filteredSales.reduce((sum, s) => sum + s.quantity, 0);
+  const totalItemsSold = filteredSales.reduce((sum, s) => sum + (s.quantity ?? 0), 0);
   const totalRevenue = filteredSales.reduce((sum, s) => sum + s.totalAmount, 0);
   const avgOrderValue = filteredSales.length > 0 ? totalRevenue / filteredSales.length : 0;
   const cashSalesTotal = filteredSales.filter(s => s.paymentType === 'Cash').reduce((sum, s) => sum + s.totalAmount, 0);
@@ -181,14 +204,10 @@ export default function ReportsPage() {
   const unrealizedProfitValuation = potentialSellingValue - totalPurchaseValue;
 
   // 3. Profit / Loss Report Math
-  // COGS = quantity sold * purchasePrice of that product
-  const costOfGoodsSold = filteredSales.reduce((sum, s) => {
-    const matched = products.find(p => p.id === s.productId);
-    const purchaseCost = matched ? matched.purchasePrice : s.sellingPrice * 0.6; // 40% default margin fallback
-    return sum + (purchaseCost * s.quantity);
-  }, 0);
-  const grossProfit = totalRevenue - costOfGoodsSold;
-  const marginPercentage = totalRevenue > 0 ? (grossProfit / totalRevenue) * 100 : 0;
+  const costOfGoodsSold = filteredSales.reduce((sum, s) => sum + s.costOfGoodsSold, 0);
+  const totalSubtotal = filteredSales.reduce((sum, s) => sum + s.subtotal, 0);
+  const grossProfit = filteredSales.reduce((sum, s) => sum + s.grossProfit, 0);
+  const marginPercentage = totalSubtotal > 0 ? (grossProfit / totalSubtotal) * 100 : 0;
 
   // 4. Customer Due Math (Direct Outstanding Receivables)
   const customersWithDue = customers.filter(c => c.dueBalance > 0);
@@ -199,9 +218,9 @@ export default function ReportsPage() {
   const totalSupplierDueOutstanding = suppliers.reduce((sum, s) => sum + (s.dueBalance ?? 0), 0);
 
   // 6. Regional VAT / Tax Math
-  const totalTaxableNet = filteredSales.reduce((sum, s) => sum + s.subtotal, 0);
+  const totalTaxableNet = totalSubtotal;
   const calculatedTaxCollected = filteredSales.reduce((sum, s) => sum + s.taxAmount, 0);
-  const grossRevenueWithTax = filteredSales.reduce((sum, s) => sum + s.totalAmount, 0);
+  const grossRevenueWithTax = totalRevenue;
 
   // --- Action: Beautiful CSV Generator (Excel Native Compatible Format) ---
   const handleExportCSV = () => {
@@ -228,8 +247,8 @@ export default function ReportsPage() {
     } 
     else if (activeReport === 'profit_loss') {
       csvContent = "Financial Indicator Metric,Calculated Value ($),Proportion Ratio (%)\n";
-      csvContent += `"Gross Total Revenue",${totalRevenue},100%\n`;
-      csvContent += `"Cost of Goods Sold (COGS)",${costOfGoodsSold},${totalRevenue > 0 ? ((costOfGoodsSold / totalRevenue) * 100).toFixed(1) : '0'}%\n`;
+      csvContent += `"Gross Revenue (Excluding Tax)",${totalSubtotal},100%\n`;
+      csvContent += `"Cost of Goods Sold (COGS)",${costOfGoodsSold},${totalSubtotal > 0 ? ((costOfGoodsSold / totalSubtotal) * 100).toFixed(1) : '0'}%\n`;
       csvContent += `"Net Gross Margin/Profit Balance",${grossProfit},${marginPercentage.toFixed(1)}%\n`;
       csvContent += `"Asset Stock Value Added",${totalPurchaseValue},-\n`;
     } 
@@ -417,7 +436,7 @@ export default function ReportsPage() {
       doc.setFillColor(255, 255, 255);
 
       const items = [
-        { label: "1. Gross Corporate Revenue (Sales Total)", value: totalRevenue, color: [15, 23, 42] },
+        { label: "1. Gross Corporate Revenue (Excluding Tax)", value: totalSubtotal, color: [15, 23, 42] },
         { label: "2. Cost of Goods Sold (COGS)", value: -costOfGoodsSold, color: [225, 29, 72] },
         { label: "3. Net Margins / Operating Profits", value: grossProfit, color: [5, 150, 105], bold: true },
         { label: "4. Internal Inventory Active Purchase Stock Assets", value: totalPurchaseValue, color: [71, 85, 105] }
@@ -658,6 +677,76 @@ export default function ReportsPage() {
            p.category.toLowerCase().includes(searchQuery.toLowerCase());
   });
 
+  // --- Beautiful Chart Coordinates calculations for the Reports Page ---
+  const reportsSalesMap: Record<string, { sales: number; profit: number }> = {};
+  const sortedSalesForTrend = [...filteredSales].sort((a, b) => new Date(a.saleDate).getTime() - new Date(b.saleDate).getTime());
+  
+  sortedSalesForTrend.forEach(s => {
+    if (!s.saleDate) return;
+    const dateStr = s.saleDate.split('T')[0];
+    if (!reportsSalesMap[dateStr]) {
+      reportsSalesMap[dateStr] = { sales: 0, profit: 0 };
+    }
+    reportsSalesMap[dateStr].sales += s.totalAmount ?? 0;
+    reportsSalesMap[dateStr].profit += s.grossProfit ?? 0;
+  });
+
+  const trendDataList = Object.entries(reportsSalesMap).map(([date, val]) => ({
+    label: new Date(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+    salesValue: val.sales,
+    profitValue: val.profit
+  })).slice(-10); // show last 10 points for elegance
+
+  const trendWidthSvg = 540;
+  const trendHeightSvg = 160;
+  const trendPaddingX = 40;
+  const trendPaddingY = 20;
+  
+  const maxSalesVal = Math.max(...trendDataList.map(d => d.salesValue), 100);
+  
+  const salesPoints = trendDataList.map((d, index) => {
+    const x = trendPaddingX + (index * (trendWidthSvg - trendPaddingX * 2)) / Math.max(trendDataList.length - 1, 1);
+    const y = trendHeightSvg - trendPaddingY - (d.salesValue / maxSalesVal) * (trendHeightSvg - trendPaddingY * 2);
+    return `${x},${y}`;
+  }).join(' ');
+
+  const profitPoints = trendDataList.map((d, index) => {
+    const x = trendPaddingX + (index * (trendWidthSvg - trendPaddingX * 2)) / Math.max(trendDataList.length - 1, 1);
+    const y = trendHeightSvg - trendPaddingY - (d.profitValue / maxSalesVal) * (trendHeightSvg - trendPaddingY * 2);
+    return `${x},${y}`;
+  }).join(' ');
+
+  const salesAreaPoints = salesPoints ? `${trendPaddingX},${trendHeightSvg - trendPaddingY} ${salesPoints} ${trendWidthSvg - trendPaddingX},${trendHeightSvg - trendPaddingY}` : '';
+
+  // Requirement 8: If no sales exist -> show "No sales data available" empty state page
+  if (sales.length === 0 && !loading) {
+    return (
+      <div id="nexus-reports-root" className="space-y-8 animate-fade-in font-sans pb-12 print:space-y-4 print:pb-0">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 print:border-b print:pb-3">
+          <div>
+            <h2 className="text-xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 animate-pulse print:hidden"></span>
+              Operational Intelligence Reports
+            </h2>
+            <p className="text-xs text-slate-400 mt-1 uppercase tracking-wider font-semibold font-mono print:text-slate-500">
+              Custom filters • Multiple layout exports • Professional Print Engine ready
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-col items-center justify-center py-24 bg-white border border-slate-200 rounded-[2.5rem] p-8 shadow-2xs">
+          <div className="w-16 h-16 bg-slate-50 rounded-2xl border border-slate-150 flex items-center justify-center mb-4">
+            <ShoppingBag className="w-8 h-8 text-slate-400" />
+          </div>
+          <h3 className="text-base font-bold text-slate-950">No sales data available</h3>
+          <p className="text-xs text-slate-400 mt-1 max-w-sm text-center">
+            Currently, there are no recorded transactions across the system. Log some sales in order to view analytical insights.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div id="nexus-reports-root" className="space-y-8 animate-fade-in font-sans pb-12 print:space-y-4 print:pb-0">
       
@@ -892,8 +981,8 @@ export default function ReportsPage() {
               {activeReport === 'profit_loss' && (
                 <>
                   <div className="space-y-1">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Reconciled Sales Revenue</span>
-                    <p className="text-2xl font-black text-slate-900">${totalRevenue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Reconciled Sales Subtotal (Excl. Tax)</span>
+                    <p className="text-2xl font-black text-slate-900">${totalSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
                     <p className="text-[10px] text-slate-400">Within filtered dates</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
@@ -994,6 +1083,118 @@ export default function ReportsPage() {
               )}
 
             </div>
+
+            {/* Trend Graphs Section */}
+            {(activeReport === 'sales' || activeReport === 'profit_loss') && trendDataList.length > 0 && (
+              <div className="mt-8 border-t border-slate-100 pt-6 space-y-4 print:hidden">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-950 uppercase tracking-widest flex items-center gap-1.5">
+                      <TrendingUp className="w-3.5 h-3.5 text-indigo-500" />
+                      {activeReport === 'sales' ? 'Revenue Timeline Trend' : 'Profit vs Cost Timeline Trend'}
+                    </h4>
+                    <p className="text-[10px] text-slate-400 font-medium">Visualization of metrics grouped by sale dates</p>
+                  </div>
+                  <div className="flex items-center gap-3 text-[10px] font-bold">
+                    <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-indigo-600 block"></span> Revenue</span>
+                    <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500 block"></span> Profit</span>
+                  </div>
+                </div>
+
+                <div className="relative pt-2">
+                  <svg viewBox={`0 0 ${trendWidthSvg} ${trendHeightSvg}`} className="w-full h-[140px] max-h-[140px] overflow-visible">
+                    <defs>
+                      <linearGradient id="reports-indigo-grad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#4f46e5" stopOpacity="0.25" />
+                        <stop offset="100%" stopColor="#4f46e5" stopOpacity="0.0" />
+                      </linearGradient>
+                      <linearGradient id="reports-emerald-grad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#10b981" stopOpacity="0.2" />
+                        <stop offset="100%" stopColor="#10b981" stopOpacity="0.0" />
+                      </linearGradient>
+                    </defs>
+
+                    {/* Grid lines */}
+                    <line x1={trendPaddingX} y1={trendPaddingY} x2={trendWidthSvg - trendPaddingX} y2={trendPaddingY} stroke="#f8fafc" strokeDasharray="3" />
+                    <line x1={trendPaddingX} y1={trendHeightSvg / 2} x2={trendWidthSvg - trendPaddingX} y2={trendHeightSvg / 2} stroke="#f8fafc" strokeDasharray="3" />
+                    <line x1={trendPaddingX} y1={trendHeightSvg - trendPaddingY} x2={trendWidthSvg - trendPaddingX} y2={trendHeightSvg - trendPaddingY} stroke="#f1f5f9" />
+
+                    {/* Shaded Area fill under revenue curve */}
+                    <polygon points={salesAreaPoints} fill="url(#reports-indigo-grad)" />
+
+                    {/* Revenue Line Path */}
+                    <polyline
+                      fill="none"
+                      stroke="#4f46e5"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      points={salesPoints}
+                    />
+
+                    {/* Profit Line Path (for Profit Loss Report) */}
+                    {activeReport === 'profit_loss' && (
+                      <>
+                        <polygon points={profitPoints ? `${trendPaddingX},${trendHeightSvg - trendPaddingY} ${profitPoints} ${trendWidthSvg - trendPaddingX},${trendHeightSvg - trendPaddingY}` : ''} fill="url(#reports-emerald-grad)" />
+                        <polyline
+                          fill="none"
+                          stroke="#10b981"
+                          strokeWidth="2.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          points={profitPoints}
+                        />
+                      </>
+                    )}
+
+                    {/* Points Circles */}
+                    {trendDataList.map((d, index) => {
+                      const x = trendPaddingX + (index * (trendWidthSvg - trendPaddingX * 2)) / Math.max(trendDataList.length - 1, 1);
+                      const ySales = trendHeightSvg - trendPaddingY - (d.salesValue / maxSalesVal) * (trendHeightSvg - trendPaddingY * 2);
+                      const yProfit = trendHeightSvg - trendPaddingY - (d.profitValue / maxSalesVal) * (trendHeightSvg - trendPaddingY * 2);
+                      
+                      return (
+                        <g key={index} className="group">
+                          <circle
+                            cx={x}
+                            cy={ySales}
+                            r="3.5"
+                            fill="#ffffff"
+                            stroke="#4f46e5"
+                            strokeWidth="2"
+                            className="transition duration-150 cursor-pointer hover:scale-125"
+                          />
+                          {activeReport === 'profit_loss' && (
+                            <circle
+                              cx={x}
+                              cy={yProfit}
+                              r="3.5"
+                              fill="#ffffff"
+                              stroke="#10b981"
+                              strokeWidth="2"
+                              className="transition duration-150 cursor-pointer hover:scale-125"
+                            />
+                          )}
+                          
+                          {/* Label Texts */}
+                          {trendDataList.length > 0 && (index === 0 || index === trendDataList.length - 1 || index % 2 === 0) && (
+                            <text
+                              x={x}
+                              y={trendHeightSvg - 2}
+                              textAnchor="middle"
+                              className="text-[8px] font-bold font-mono fill-slate-400"
+                            >
+                              {d.label}
+                            </text>
+                          )}
+                          <title>{`${d.label} - Revenue: $${d.salesValue.toFixed(2)}${activeReport === 'profit_loss' ? `, Profit: $${d.profitValue.toFixed(2)}` : ''}`}</title>
+                        </g>
+                      );
+                    })}
+                  </svg>
+                </div>
+              </div>
+            )}
 
           </div>
 
@@ -1130,8 +1331,8 @@ export default function ReportsPage() {
 
                   <div className="space-y-2">
                     <div className="flex justify-between items-center py-3 border-b border-slate-100 text-xs font-bold">
-                      <span className="text-slate-500">Gross Sales Income:</span>
-                      <span className="text-slate-900">${totalRevenue.toFixed(2)}</span>
+                      <span className="text-slate-500">Gross Sales Income (Excluding Tax):</span>
+                      <span className="text-slate-900">${totalSubtotal.toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between items-center py-3 border-b border-slate-100 text-xs font-bold">
                       <span className="text-slate-500">Cost of Goods Sold (cogs):</span>

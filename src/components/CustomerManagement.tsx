@@ -19,7 +19,7 @@ import {
   ChevronRight
 } from 'lucide-react';
 import { db, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
-import { collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
+import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { Customer } from '../types';
 
 export default function CustomerManagement() {
@@ -41,7 +41,8 @@ export default function CustomerManagement() {
     phone: '',
     address: '',
     customerType: 'Cash' as 'Cash' | 'Credit',
-    dueBalance: ''
+    dueBalance: '',
+    status: 'active' as 'active' | 'inactive'
   });
   
   // --- Validation Errors State ---
@@ -99,7 +100,8 @@ export default function CustomerManagement() {
         phone: customer.phone,
         address: customer.address,
         customerType: customer.customerType,
-        dueBalance: customer.dueBalance.toString()
+        dueBalance: customer.dueBalance.toString(),
+        status: customer.status || 'active'
       });
     } else {
       setEditingCustomer(null);
@@ -108,7 +110,8 @@ export default function CustomerManagement() {
         phone: '',
         address: '',
         customerType: 'Cash',
-        dueBalance: '0'
+        dueBalance: '0',
+        status: 'active'
       });
     }
     setErrors({});
@@ -159,7 +162,8 @@ export default function CustomerManagement() {
       address: formData.address.trim(),
       customerType: formData.customerType,
       dueBalance: dueBalanceValue,
-      createdDate: editingCustomer ? editingCustomer.createdDate : timestamp
+      createdDate: editingCustomer ? editingCustomer.createdDate : timestamp,
+      status: formData.status
     };
 
     try {
@@ -207,18 +211,58 @@ export default function CustomerManagement() {
 
     setIsSaving(true);
     try {
-      await deleteDoc(doc(db, 'customers', id));
-      await logSystemActivity(
-        "Customer deleted",
-        `Permanently purged customer account: ${name}`
-      );
-      setFeedback({ message: `Customer record "${name}" has been permanently purged.`, type: 'success' });
+      // 1. Live Firestore existing sales history check
+      const salesRef = collection(db, 'sales');
+      const salesQuery = query(salesRef, where('customerId', '==', id));
+      const salesSnapshot = await getDocs(salesQuery);
+
+      // 2. Live Firestore existing payment history check
+      const paymentsRef = collection(db, 'customerPayments');
+      const paymentsQuery = query(paymentsRef, where('customerId', '==', id));
+      const paymentsSnapshot = await getDocs(paymentsQuery);
+
+      const hasSales = !salesSnapshot.empty;
+      const hasPayments = !paymentsSnapshot.empty;
+      const hasBalance = (customerToDelete.dueBalance ?? 0) > 0;
+
+      if (hasSales || hasPayments || hasBalance) {
+        // Has history or balance - mark as inactive
+        const updatedCustomer: Customer = {
+          ...customerToDelete,
+          status: 'inactive'
+        };
+        await setDoc(doc(db, 'customers', id), updatedCustomer);
+
+        const reasons: string[] = [];
+        if (hasSales) reasons.push("sales history");
+        if (hasPayments) reasons.push("payment history");
+        if (hasBalance) reasons.push(`outstanding due balance ($${customerToDelete.dueBalance.toFixed(2)})`);
+
+        const reasonText = reasons.join(", ");
+
+        await logSystemActivity(
+          "Customer inactivated",
+          `Marked customer "${name}" (ID: ${id}) as inactive because it contains ${reasonText}.`
+        );
+        setFeedback({ 
+          message: `Customer "${name}" has associated ${reasonText} and has been safely marked as "inactive" instead of being deleted.`, 
+          type: 'success' 
+        });
+      } else {
+        // No history and dueBalance == 0 - permanently purge
+        await deleteDoc(doc(db, 'customers', id));
+        await logSystemActivity(
+          "Customer deleted",
+          `Permanently purged customer account: ${name}`
+        );
+        setFeedback({ message: `Customer record "${name}" has been permanently purged.`, type: 'success' });
+      }
     } catch (err: any) {
       console.error("Delete customer error:", err);
       try {
         handleFirestoreError(err, OperationType.WRITE, `customers/${id}`);
       } catch (dbErr: any) {
-        setFeedback({ message: `Purge unsuccessful: ${dbErr.message}`, type: 'error' });
+        setFeedback({ message: `Purge/Inactivation unsuccessful: ${dbErr.message}`, type: 'error' });
       }
     } finally {
       setIsSaving(false);
@@ -466,6 +510,15 @@ export default function CustomerManagement() {
                           }`}>
                             {customer.customerType} Account
                           </span>
+                          {customer.status === 'inactive' ? (
+                            <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-100 text-slate-500 border border-slate-200">
+                              Inactive
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
+                              Active
+                            </span>
+                          )}
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 text-xs text-slate-500">
@@ -715,6 +768,22 @@ export default function CustomerManagement() {
                   {errors.dueBalance && <p className="text-[10px] font-bold text-rose-500">{errors.dueBalance}</p>}
                   <p className="text-[10px] text-slate-425 text-slate-400 font-sans mt-1">Record unpaid account entries here. Default is 0.00.</p>
                 </div>
+
+                {/* Show status selection only when editing an existing customer */}
+                {editingCustomer && (
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Customer Status *</label>
+                    <select
+                      disabled={isSaving}
+                      value={formData.status}
+                      onChange={(e) => setFormData({ ...formData, status: e.target.value as 'active' | 'inactive' })}
+                      className="w-full rounded-xl border border-slate-200 py-2.5 px-3.5 text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition cursor-pointer disabled:opacity-60 disabled:bg-slate-50 text-slate-700 bg-white"
+                    >
+                      <option value="active">Active (Available for transactions)</option>
+                      <option value="inactive">Inactive (Suspended / Read-only)</option>
+                    </select>
+                  </div>
+                )}
 
                 {/* Action buttons footer */}
                 <div className="flex justify-end items-center gap-3 pt-4 border-t border-slate-100">

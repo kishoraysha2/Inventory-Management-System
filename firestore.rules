@@ -64,20 +64,22 @@ service cloud.firestore {
           && (!data.keys().hasAny(['address']) || (data.address is string && data.address.size() <= 500))
           && (!data.keys().hasAny(['paymentType']) || (data.paymentType is string && (data.paymentType == 'Cash' || data.paymentType == 'Credit')))
           && (!data.keys().hasAny(['dueBalance']) || (data.dueBalance is number || data.dueBalance is int))
-          && (!data.keys().hasAny(['createdDate']) || data.createdDate is string);
+          && (!data.keys().hasAny(['createdDate']) || data.createdDate is string)
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'inactive')));
     }
 
     // Helper to validate complete Customer schema
     function isValidCustomer(data) {
       return data.keys().hasAll(['id', 'name', 'phone', 'address', 'customerType', 'dueBalance', 'createdDate'])
-          && data.keys().size() == 7
+          && (data.keys().size() == 7 || data.keys().size() == 8)
           && data.id is string && data.id.size() <= 128
           && data.name is string && data.name.size() > 0 && data.name.size() <= 200
           && data.phone is string && data.phone.size() > 0 && data.phone.size() <= 50
           && data.address is string && data.address.size() <= 500
           && data.customerType is string && (data.customerType == 'Cash' || data.customerType == 'Credit')
           && (data.dueBalance is number || data.dueBalance is int)
-          && data.createdDate is string;
+          && data.createdDate is string
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'inactive')));
     }
 
     // Helper to validate complete Product schema
@@ -99,7 +101,7 @@ service cloud.firestore {
     // Helper to validate complete Sale schema
     function isValidSale(data) {
       return data.keys().hasAll(['id', 'customerId', 'customerName', 'productId', 'productName', 'quantity', 'sellingPrice', 'unitPrice', 'subtotal', 'taxRatePercent', 'taxAmount', 'totalAmount', 'paymentType', 'saleDate', 'timestamp'])
-          && data.keys().size() == 15
+          && (data.keys().size() >= 15 && data.keys().size() <= 19)
           && data.id is string && data.id.size() <= 128
           && data.customerId is string && data.customerId.size() <= 128
           && data.customerName is string && data.customerName.size() > 0 && data.customerName.size() <= 200
@@ -114,7 +116,11 @@ service cloud.firestore {
           && (data.totalAmount is number || data.totalAmount is int) && data.totalAmount >= 0
           && data.paymentType is string && (data.paymentType == 'Cash' || data.paymentType == 'Credit')
           && data.saleDate is string
-          && data.timestamp is string;
+          && data.timestamp is string
+          && (!data.keys().hasAny(['productPurchasePriceAtSale']) || (data.productPurchasePriceAtSale is number || data.productPurchasePriceAtSale is int))
+          && (!data.keys().hasAny(['productSellingPriceAtSale']) || (data.productSellingPriceAtSale is number || data.productSellingPriceAtSale is int))
+          && (!data.keys().hasAny(['costOfGoodsSold']) || (data.costOfGoodsSold is number || data.costOfGoodsSold is int))
+          && (!data.keys().hasAny(['grossProfit']) || (data.grossProfit is number || data.grossProfit is int));
     }
 
     // Helper to validate complete Purchase schema
@@ -175,7 +181,7 @@ service cloud.firestore {
       allow read: if true;
       allow create: if isValidId(logId) && isValidLog(request.resource.data);
       allow update: if false; // Logs are immutable
-      allow delete: if true; // Clear logs
+      allow delete: if false; // Logs are strictly read-and-create only (never deletable)
     }
 
     // System Logs Collection
@@ -183,7 +189,7 @@ service cloud.firestore {
       allow read: if true;
       allow create: if isValidId(logId) && isValidSystemLog(request.resource.data);
       allow update: if false; // Logs are immutable
-      allow delete: if true; // Clear logs
+      allow delete: if false; // Logs are strictly read-and-create only (never deletable)
     }
 
     // Suppliers Collection

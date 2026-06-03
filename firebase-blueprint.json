@@ -62,7 +62,8 @@
         "address": { "type": "string" },
         "paymentType": { "type": "string", "enum": ["Cash", "Credit"] },
         "dueBalance": { "type": "number" },
-        "createdDate": { "type": "string" }
+        "createdDate": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "inactive"] }
       },
       "required": ["id", "name", "phone"]
     },
@@ -77,7 +78,8 @@
         "address": { "type": "string" },
         "customerType": { "type": "string", "enum": ["Cash", "Credit"] },
         "dueBalance": { "type": "number" },
-        "createdDate": { "type": "string" }
+        "createdDate": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "inactive"] }
       },
       "required": ["id", "name", "phone", "address", "customerType", "dueBalance", "createdDate"]
     },
@@ -117,7 +119,11 @@
         "totalAmount": { "type": "number" },
         "paymentType": { "type": "string", "enum": ["Cash", "Credit"] },
         "saleDate": { "type": "string" },
-        "timestamp": { "type": "string" }
+        "timestamp": { "type": "string" },
+        "productPurchasePriceAtSale": { "type": "number" },
+        "productSellingPriceAtSale": { "type": "number" },
+        "costOfGoodsSold": { "type": "number" },
+        "grossProfit": { "type": "number" }
       },
       "required": ["id", "customerId", "customerName", "productId", "productName", "quantity", "sellingPrice", "unitPrice", "subtotal", "taxRatePercent", "taxAmount", "totalAmount", "paymentType", "saleDate", "timestamp"]
     },

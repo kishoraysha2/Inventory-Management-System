@@ -130,13 +130,11 @@ export default function Dashboard() {
     return d.getMonth() === currentMonthNum && d.getFullYear() === currentYearNum;
   }).reduce((sum, s) => sum + s.totalAmount, 0);
 
-  // 3. Total Profit (based on product purchase prices)
+  // 3. Total Profit (based strictly on subtotal minus costOfGoodsSold, excluding tax)
   const salesProfitValue = sales.reduce((sum, s) => {
-    const matchedProduct = products.find(p => p.id === s.productId);
-    const purchaseCostPrice = matchedProduct ? matchedProduct.purchasePrice : s.sellingPrice * 0.6; // fallback 40% margin
-    const itemProfit = s.sellingPrice - purchaseCostPrice;
-    const totalItemProfit = itemProfit * s.quantity;
-    return sum + totalItemProfit;
+    const saleSubtotal = s.subtotal ?? (s.quantity * (s.unitPrice ?? s.sellingPrice));
+    const saleCOGS = s.costOfGoodsSold !== undefined ? s.costOfGoodsSold : (s.productPurchasePriceAtSale !== undefined ? s.productPurchasePriceAtSale : s.sellingPrice * 0.6) * s.quantity;
+    return sum + (saleSubtotal - saleCOGS);
   }, 0);
 
   // 4. Total Purchase (Valuation of stock currently acquired in our inventory)
@@ -154,9 +152,9 @@ export default function Dashboard() {
   const lowStockProductsList = products.filter(p => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert);
   const lowStockCount = lowStockProductsList.length;
 
-  // Additional stats: Overall profit margin percentage
-  const overallSalesTotal = sales.reduce((sum, s) => sum + s.totalAmount, 0);
-  const averageProfitMargin = overallSalesTotal > 0 ? (salesProfitValue / overallSalesTotal) * 100 : 0;
+  // Additional stats: Overall profit margin percentage (excluding tax)
+  const overallSalesSubtotal = sales.reduce((sum, s) => sum + (s.subtotal ?? (s.quantity * (s.unitPrice ?? s.sellingPrice))), 0);
+  const averageProfitMargin = overallSalesSubtotal > 0 ? (salesProfitValue / overallSalesSubtotal) * 100 : 0;
 
   // --- Dynamic Graph Coordinates Processing (Pure Vector Line Graphs) ---
   // Generate beautiful line coordinates for daily sales trend

@@ -839,13 +839,13 @@ export default function PaymentLedger() {
                   >
                     <option value="">{activeSegment === 'customers' ? '-- Select a client account --' : '-- Select a supplier account --'}</option>
                     {activeSegment === 'customers' ? (
-                      customers.map((c) => (
+                      customers.filter(c => c.status !== 'inactive').map((c) => (
                         <option key={c.id} value={c.id}>
                           {c.name} (Outstanding receivable: ${c.dueBalance.toFixed(2)})
                         </option>
                       ))
                     ) : (
-                      suppliers.map((s) => (
+                      suppliers.filter(s => s.status !== 'inactive').map((s) => (
                         <option key={s.id} value={s.id}>
                           {s.name} (Outstanding trade payable: ${(s.dueBalance ?? 0).toFixed(2)})
                         </option>

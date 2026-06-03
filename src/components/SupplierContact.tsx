@@ -66,7 +66,7 @@ export default function SupplierContact({
               onChange={(e) => setSelectedSupplierId(e.target.value)}
               className="w-full rounded-xl border border-slate-200 text-xs px-3 py-2 outline-none bg-white font-medium text-slate-700 transition focus:border-slate-400"
             >
-              {suppliers.map((s) => (
+              {suppliers.filter(s => s.status !== 'inactive').map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name} ({s.category})
                 </option>
