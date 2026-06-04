@@ -286,6 +286,24 @@ export default function ProcurementManagement() {
 
         // D. Commit final purchase ledger
         transaction.set(purchaseRef, finalizedPurchaseData);
+
+        // --- E. Cash & Capital Accounting Layer ---
+        const cashLedgerId = `cl-${purchaseId}`;
+        const cashLedgerRef = doc(db, 'cashLedger', cashLedgerId);
+        if (formData.paymentType === 'Cash') {
+          transaction.set(cashLedgerRef, {
+            id: cashLedgerId,
+            type: 'outflow',
+            source: 'purchase',
+            amount: totalCalc,
+            referenceId: purchaseId,
+            description: `Procured x${numQty} "${chosenProduct.name}" from "${chosenSupplier.name}"`,
+            timestamp: new Date(formData.purchaseDate).toISOString()
+          });
+        } else {
+          // If edited and changed from Cash to Credit, delete the CashLedger entry
+          transaction.delete(cashLedgerRef);
+        }
       });
 
       // Log system operations
@@ -363,6 +381,9 @@ export default function ProcurementManagement() {
 
         const purchaseRef = doc(db, 'purchases', purchase.id);
         transaction.delete(purchaseRef);
+
+        const cashLedgerRef = doc(db, 'cashLedger', `cl-${purchase.id}`);
+        transaction.delete(cashLedgerRef);
       });
 
       // Log deletions

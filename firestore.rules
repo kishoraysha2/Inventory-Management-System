@@ -167,6 +167,31 @@ service cloud.firestore {
           && (!data.keys().hasAny(['notes']) || (data.notes is string && data.notes.size() <= 1000));
     }
 
+    // Helper to validate complete CashLedgerEntry schema
+    function isValidCashLedgerEntry(data) {
+      return data.keys().hasAll(['id', 'type', 'source', 'amount', 'description', 'timestamp'])
+          && (data.keys().size() == 6 || data.keys().size() == 7)
+          && data.id is string && data.id.size() <= 128
+          && data.type is string && (data.type == 'inflow' || data.type == 'outflow')
+          && data.source is string && (data.source == 'sale' || data.source == 'purchase' || data.source == 'payment' || data.source == 'manual')
+          && (data.amount is number || data.amount is int) && data.amount >= 0
+          && data.description is string && data.description.size() <= 1000
+          && data.timestamp is string
+          && (!data.keys().hasAny(['referenceId']) || (data.referenceId is string && data.referenceId.size() <= 128));
+    }
+
+    // Helper to validate complete Capital schema
+    function isValidCapital(data) {
+      return data.keys().hasAll(['id', 'amount', 'date', 'createdBy'])
+          && (data.keys().size() == 4 || data.keys().size() == 5)
+          && data.id is string && data.id.size() <= 128
+          && (data.amount is number || data.amount is int) && data.amount >= 0
+          && data.date is string
+          && data.createdBy is string
+          && (!data.keys().hasAny(['note']) || (data.note is string && data.note.size() <= 1000));
+    }
+
+
 
     // Items Collection
     match /items/{itemId} {
@@ -250,6 +275,22 @@ service cloud.firestore {
       allow create: if isValidId(paymentId) && isValidSupplierPayment(request.resource.data);
       allow update: if isValidId(paymentId) && isValidSupplierPayment(request.resource.data);
       allow delete: if isValidId(paymentId);
+    }
+
+    // Cash Ledger Collection
+    match /cashLedger/{entryId} {
+      allow read: if true;
+      allow create: if isValidId(entryId) && isValidCashLedgerEntry(request.resource.data);
+      allow update: if isValidId(entryId) && isValidCashLedgerEntry(request.resource.data);
+      allow delete: if isValidId(entryId);
+    }
+
+    // Capital Collection
+    match /capital/{capitalId} {
+      allow read: if true;
+      allow create: if isValidId(capitalId) && isValidCapital(request.resource.data);
+      allow update: if isValidId(capitalId) && isValidCapital(request.resource.data);
+      allow delete: if isValidId(capitalId);
     }
   }
 }

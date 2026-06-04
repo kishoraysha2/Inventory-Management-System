@@ -28,8 +28,8 @@ import {
   CreditCard,
 } from 'lucide-react';
 
-import { Product, ActivityLog, Supplier } from './types';
-import { INITIAL_PRODUCTS, INITIAL_LOGS, INITIAL_SUPPLIERS } from './data';
+import { Product, ActivityLog, Supplier, CashLedgerEntry, Capital } from './types';
+import { INITIAL_PRODUCTS, INITIAL_LOGS, INITIAL_SUPPLIERS, INITIAL_CASH_LEDGER, INITIAL_CAPITAL } from './data';
 import MetricCard from './components/MetricCard';
 import ItemForm from './components/ItemForm';
 import ActivityHistory from './components/ActivityHistory';
@@ -59,6 +59,16 @@ export default function App() {
 
   const [logs, setLogs] = useState<ActivityLog[]>(() => {
     const saved = localStorage.getItem('inventory_logs');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  const [cashLedger, setCashLedger] = useState<CashLedgerEntry[]>(() => {
+    const saved = localStorage.getItem('inventory_cash_ledger');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  const [capital, setCapital] = useState<Capital[]>(() => {
+    const saved = localStorage.getItem('inventory_capital');
     return saved ? JSON.parse(saved) : [];
   });
 
@@ -131,10 +141,46 @@ export default function App() {
       }
     });
 
+    // 4. Cash Ledger Sync
+    const unsubCashLedger = onSnapshot(collection(db, 'cashLedger'), (snapshot) => {
+       const ledgerList: CashLedgerEntry[] = [];
+       snapshot.forEach((docSnap) => {
+         ledgerList.push(docSnap.data() as CashLedgerEntry);
+       });
+       
+       const sorted = ledgerList.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+       setCashLedger(sorted);
+     }, (error) => {
+       try {
+         handleFirestoreError(error, OperationType.LIST, 'cashLedger');
+       } catch (err: any) {
+         console.error("Cash Ledger Sync Error", err);
+       }
+     });
+
+    // 5. Capital Sync
+    const unsubCapital = onSnapshot(collection(db, 'capital'), (snapshot) => {
+       const capitalList: Capital[] = [];
+       snapshot.forEach((docSnap) => {
+         capitalList.push(docSnap.data() as Capital);
+       });
+       
+       const sorted = capitalList.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+       setCapital(sorted);
+     }, (error) => {
+       try {
+         handleFirestoreError(error, OperationType.LIST, 'capital');
+       } catch (err: any) {
+         console.error("Capital Sync Error", err);
+       }
+     });
+
     return () => {
       unsubProducts();
       unsubSuppliers();
       unsubLogs();
+      unsubCashLedger();
+      unsubCapital();
     };
   }, []);
 
@@ -150,6 +196,14 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('inventory_logs', JSON.stringify(logs));
   }, [logs]);
+
+  useEffect(() => {
+    localStorage.setItem('inventory_cash_ledger', JSON.stringify(cashLedger));
+  }, [cashLedger]);
+
+  useEffect(() => {
+    localStorage.setItem('inventory_capital', JSON.stringify(capital));
+  }, [capital]);
 
   // --- Feedback timer ---
   useEffect(() => {
@@ -414,6 +468,16 @@ export default function App() {
             await deleteDoc(doc(db, 'logs', log.id));
           } catch (err) {}
         }
+        for (const entry of cashLedger) {
+          try {
+            await deleteDoc(doc(db, 'cashLedger', entry.id));
+          } catch (err) {}
+        }
+        for (const capItem of capital) {
+          try {
+            await deleteDoc(doc(db, 'capital', capItem.id));
+          } catch (err) {}
+        }
 
         // Write initial defaults to Firestore
         for (const product of INITIAL_PRODUCTS) {
@@ -424,6 +488,12 @@ export default function App() {
         }
         for (const log of INITIAL_LOGS) {
           await setDoc(doc(db, 'logs', log.id), log);
+        }
+        for (const entry of INITIAL_CASH_LEDGER) {
+          await setDoc(doc(db, 'cashLedger', entry.id), entry);
+        }
+        for (const capItem of INITIAL_CAPITAL) {
+          await setDoc(doc(db, 'capital', capItem.id), capItem);
         }
 
         localStorage.clear();

@@ -204,6 +204,18 @@ export default function PaymentLedger() {
         };
         await setDoc(doc(db, 'customers', targetCust.id), updatedCustomer);
 
+        // Link with Cash / Capital Accounting Layer
+        const cashLedgerId = `cl-${paymentId}`;
+        await setDoc(doc(db, 'cashLedger', cashLedgerId), {
+          id: cashLedgerId,
+          type: 'inflow',
+          source: 'payment',
+          amount: amountVal,
+          referenceId: paymentId,
+          description: `Collected customer payment from "${targetCust.name}"`,
+          timestamp: new Date().toISOString()
+        });
+
         // System Log
         await logSystemActivity(
           "Customer payment",
@@ -240,6 +252,18 @@ export default function PaymentLedger() {
           dueBalance: remDue
         };
         await setDoc(doc(db, 'suppliers', targetSupp.id), updatedSupplier);
+
+        // Link with Cash / Capital Accounting Layer
+        const cashLedgerId = `cl-${paymentId}`;
+        await setDoc(doc(db, 'cashLedger', cashLedgerId), {
+          id: cashLedgerId,
+          type: 'outflow',
+          source: 'payment',
+          amount: amountVal,
+          referenceId: paymentId,
+          description: `Disbursed supplier payment to "${targetSupp.name}"`,
+          timestamp: new Date().toISOString()
+        });
 
         // System Log
         await logSystemActivity(

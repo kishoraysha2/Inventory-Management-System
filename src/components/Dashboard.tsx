@@ -17,11 +17,16 @@ import {
   PieChart as PieIcon, 
   BarChart as BarIcon,
   ChevronRight,
-  RefreshCw
+  RefreshCw,
+  Plus,
+  X,
+  CheckCircle2,
+  AlertCircle,
+  Trash2
 } from 'lucide-react';
 import { db, OperationType, handleFirestoreError } from '../lib/firebase';
-import { collection, onSnapshot } from 'firebase/firestore';
-import { Sale, Customer, Product, Supplier } from '../types';
+import { collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
+import { Sale, Customer, Product, Supplier, Capital, CashLedgerEntry } from '../types';
 
 export default function Dashboard() {
   // --- States ---
@@ -30,8 +35,76 @@ export default function Dashboard() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [systemLogs, setSystemLogs] = useState<any[]>([]);
+  const [cashLedger, setCashLedger] = useState<any[]>([]);
+  const [capital, setCapital] = useState<Capital[]>([]);
   const [loading, setLoading] = useState(true);
   const [timePeriod, setTimePeriod] = useState<'all' | 'thirty_days'>('all');
+
+  // --- Simulated Identity Policy Control ---
+  const [userRole, setUserRole] = useState<'admin' | 'employee'>('admin');
+  const [isCapitalModalOpen, setIsCapitalModalOpen] = useState(false);
+  const [newCapAmount, setNewCapAmount] = useState('');
+  const [newCapDate, setNewCapDate] = useState(new Date().toISOString().split('T')[0]);
+  const [newCapNote, setNewCapNote] = useState('');
+  const [capFeedback, setCapFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  const handleSaveCapital = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (userRole !== 'admin') {
+      setCapFeedback({ message: 'Access Denied: Only Administrator users can add or modify business Capital.', type: 'error' });
+      return;
+    }
+    const amt = parseFloat(newCapAmount);
+    if (isNaN(amt) || amt <= 0) {
+      setCapFeedback({ message: 'Please enter a valid capital investment amount.', type: 'error' });
+      return;
+    }
+    try {
+      const capId = `cap-${Date.now()}`;
+      await setDoc(doc(db, 'capital', capId), {
+        id: capId,
+        amount: amt,
+        date: newCapDate,
+        note: newCapNote,
+        createdBy: 'admin_01'
+      });
+      setCapFeedback({ message: 'Capital investment successfully logged & synchronized!', type: 'success' });
+      setNewCapAmount('');
+      setNewCapNote('');
+      // Log this system operation
+      await setDoc(doc(db, 'Logs', `log-${Date.now()}`), {
+        id: `log-${Date.now()}`,
+        action: 'Capital contribution',
+        user: 'admin_01',
+        timestamp: new Date().toISOString(),
+        details: `Injected manual capital contribution of $${amt.toLocaleString()} on ${newCapDate} (${newCapNote || 'No notes'})`
+      });
+    } catch (err: any) {
+      setCapFeedback({ message: `Failed to save Capital: ${err.message}`, type: 'error' });
+    }
+  };
+
+  const handleDeleteCapital = async (id: string) => {
+    if (userRole !== 'admin') {
+      alert('Access Denied: Only administrators can modify or delete seed capital investments.');
+      return;
+    }
+    if (confirm('Delete this capital contribution record?')) {
+      try {
+        await deleteDoc(doc(db, 'capital', id));
+        // Log this system operation
+        await setDoc(doc(db, 'Logs', `log-${Date.now()}`), {
+          id: `log-${Date.now()}`,
+          action: 'Capital deletion',
+          user: 'admin_01',
+          timestamp: new Date().toISOString(),
+          details: `Deleted capital contribution record: ${id}`
+        });
+      } catch (err: any) {
+        alert(`Failed to delete: ${err.message}`);
+      }
+    }
+  };
 
   // --- Real-time Sync listeners ---
   useEffect(() => {
@@ -92,9 +165,35 @@ export default function Dashboard() {
       // Sort by timestamp desc and keep the most recent ones
       const sortedLogs = logsList.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
       setSystemLogs(sortedLogs);
-      setLoading(false);
     }, (err) => {
       console.error("Dashboard error syncing Logs collection", err);
+    });
+
+    // 6. Sync Cash Ledger
+    const unsubCashLedger = onSnapshot(collection(db, 'cashLedger'), (snapshot) => {
+      const list: any[] = [];
+      snapshot.forEach((docSnap) => {
+        if (docSnap.exists()) {
+          list.push(docSnap.data());
+        }
+      });
+      setCashLedger(list);
+    }, (err) => {
+      console.error("Dashboard error syncing cashLedger", err);
+    });
+
+    // 7. Sync Capital Collection
+    const unsubCapital = onSnapshot(collection(db, 'capital'), (snapshot) => {
+      const list: Capital[] = [];
+      snapshot.forEach((docSnap) => {
+        if (docSnap.exists()) {
+          list.push(docSnap.data() as Capital);
+        }
+      });
+      setCapital(list);
+      setLoading(false);
+    }, (err) => {
+      console.error("Dashboard error syncing capital", err);
       setLoading(false);
     });
 
@@ -104,6 +203,8 @@ export default function Dashboard() {
       unsubCustomers();
       unsubSuppliers();
       unsubLogs();
+      unsubCashLedger();
+      unsubCapital();
     };
   }, []);
 
@@ -147,6 +248,21 @@ export default function Dashboard() {
 
   // 6. Supplier Due (Sum of payables)
   const totalSupplierDue = suppliers.reduce((sum, s) => sum + (s.dueBalance || 0), 0);
+
+  // 7. Cash accounting calculations with capital support
+  const startingCapital = capital.reduce((sum, entry) => sum + entry.amount, 0);
+  const initialCapital = startingCapital;
+
+  const totalInflow = cashLedger
+    .filter(entry => entry.type === 'inflow')
+    .reduce((sum, entry) => sum + entry.amount, 0);
+
+  const totalOutflow = cashLedger
+    .filter(entry => entry.type === 'outflow')
+    .reduce((sum, entry) => sum + entry.amount, 0);
+
+  const cashInHand = initialCapital + totalInflow - totalOutflow;
+  const netMovement = totalInflow - totalOutflow;
 
   // 7. Low Stock Products list and count
   const lowStockProductsList = products.filter(p => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert);
@@ -219,7 +335,95 @@ export default function Dashboard() {
           <span>Last automated sync: {loading ? 'Computing...' : 'Now'}</span>
           {loading && <RefreshCw className="w-3 h-3 text-indigo-500 animate-spin ml-2" />}
         </div>
-      </div>      {/* 
+      </div>
+
+      {/* --- CASH & CAPITAL ACCOUNTING LIQUIDITY DESK --- */}
+      <div id="liquidity-desk-widget" className="bg-gradient-to-r from-emerald-50/70 to-teal-50/30 rounded-[2rem] border border-emerald-100 p-6 md:p-8 shadow-2xs flex flex-col xl:flex-row justify-between items-stretch gap-6">
+        <div className="space-y-4 flex flex-col justify-between xl:w-1/4">
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span className="text-[10px] font-black tracking-widest text-emerald-800 uppercase">Capital Liquidity Desk</span>
+            </div>
+            <h3 className="text-xs text-slate-500 font-medium leading-relaxed">
+              Real-time balance sheets monitoring owner starting capital, net trading movements, and instant liquid vault reserves.
+            </h3>
+          </div>
+          
+          <div className="space-y-2 pt-2">
+            <div className="text-xs text-slate-500 flex items-center gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Simulating:</span>
+              <select 
+                value={userRole} 
+                onChange={(e) => setUserRole(e.target.value as 'admin' | 'employee')}
+                className="bg-white border border-slate-200 text-slate-700 font-bold rounded-lg px-2 py-1 text-xs focus:ring-1 focus:ring-emerald-400 cursor-pointer"
+              >
+                <option value="admin">System Admin</option>
+                <option value="employee">Standard Employee</option>
+              </select>
+            </div>
+            <button 
+              onClick={() => setIsCapitalModalOpen(true)}
+              className="w-full flex items-center justify-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs px-4 py-2.5 rounded-xl transition shadow-3xs"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Modify Capital</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 xl:w-3/4">
+          {/* Starting Capital Widget */}
+          <div className="bg-white rounded-2xl p-5 border border-emerald-100/60 shadow-3xs flex flex-col justify-between">
+            <div>
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Starting Capital</span>
+              <p className="text-2xl font-black text-slate-900 mt-2 font-mono tracking-tight">
+                ${startingCapital.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </p>
+            </div>
+            <div className="mt-3 pt-2.5 border-t border-slate-100 flex justify-between items-center text-[10px]">
+              <span className="text-slate-400 font-medium font-sans">Owner Corporate Equity</span>
+              <span className="text-emerald-700 font-bold bg-emerald-50 px-1.5 py-0.5 rounded text-[8px] font-mono">
+                {capital.length} Injections
+              </span>
+            </div>
+          </div>
+
+          {/* Current Cash Widget */}
+          <div className="bg-white rounded-2xl p-5 border border-emerald-100/60 shadow-3xs flex flex-col justify-between">
+            <div>
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block font-sans">Current Cash</span>
+              <p className="text-2xl font-black text-slate-900 mt-2 font-mono tracking-tight">
+                ${cashInHand.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </p>
+            </div>
+            <div className="mt-3 pt-2.5 border-t border-slate-100 flex justify-between items-center text-[10px]">
+              <span className="text-slate-400 font-medium font-sans">Liquid Vault Reserves</span>
+              <span className={`font-black px-1.5 py-0.5 rounded text-[9px] font-mono ${cashInHand >= 0 ? "bg-teal-50 text-teal-700" : "bg-rose-50 text-rose-700"}`}>
+                {cashInHand >= 0 ? "SURPLUS" : "DEFICIT"}
+              </span>
+            </div>
+          </div>
+
+          {/* Net Movement Widget */}
+          <div className="bg-white rounded-2xl p-5 border border-emerald-100/60 shadow-3xs flex flex-col justify-between">
+            <div>
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block font-sans">Net Movement</span>
+              <p className={`text-2xl font-black mt-2 font-mono tracking-tight ${netMovement >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                {netMovement >= 0 ? '+' : ''}${netMovement.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </p>
+            </div>
+            <div className="mt-3 pt-2.5 border-t border-slate-100 flex justify-between items-center text-[10px]">
+              <span className="text-slate-400 font-medium font-sans">Combined Trade Cashflow</span>
+              <span className={`font-black px-1.5 py-0.5 rounded text-[8px] font-mono ${netMovement >= 0 ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
+                {netMovement >= 0 ? "INCREASING ▲" : "DECREASING ▼"}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 
         8 BENTO METRICS GRID (Showcasing all calculations requested)
       */}
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
@@ -666,6 +870,203 @@ export default function Dashboard() {
 
       </div>
 
+      {/* --- BUSINESS CAPITAL RESERVES & INVESTMENT BOARD MODAL --- */}
+      <AnimatePresence>
+        {isCapitalModalOpen && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-[2rem] shadow-2xl w-full max-w-4xl overflow-hidden border border-slate-100 flex flex-col max-h-[85vh]"
+            >
+              <div className="bg-slate-900 text-white px-6 py-5 flex items-center justify-between">
+                <div>
+                  <h3 className="text-base font-bold flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Corporate Equity & Capital Desk
+                  </h3>
+                  <p className="text-[10px] text-slate-400 font-medium tracking-wide mt-1">Manual ledger injection of starting capital reserves and owner seed investments.</p>
+                </div>
+                <button 
+                  onClick={() => {
+                    setIsCapitalModalOpen(false);
+                    setCapFeedback(null);
+                  }}
+                  className="p-1.5 hover:bg-white/10 rounded-xl transition text-slate-400 hover:text-white"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-6 overflow-y-auto space-y-6 flex-1">
+                {/* Simulated Identity Control info */}
+                <div className={`p-4 rounded-2xl flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 border ${
+                  userRole === 'admin' ? 'bg-emerald-50/50 border-emerald-100' : 'bg-amber-50/50 border-amber-100'
+                }`}>
+                  <div className="space-y-1">
+                    <p className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                      <AlertTriangle className={`w-4 h-4 ${userRole === 'admin' ? 'text-emerald-600' : 'text-amber-600'}`} />
+                      <span>Security Clearance Auditing</span>
+                    </p>
+                    <p className="text-[11px] text-slate-500 leading-relaxed">
+                      {userRole === 'admin' 
+                        ? 'Simulating User: admin_01 (Administrator authorized to write/edit initial business capital policies).'
+                        : 'Simulating User: Standard Employee (Read-only clearance. Capital write capability restricted).'
+                      }
+                    </p>
+                  </div>
+                  <div className="shrink-0 flex items-center gap-1.5">
+                    <span className="text-[10px] uppercase font-bold text-slate-400">Swap Role:</span>
+                    <select 
+                      value={userRole} 
+                      onChange={(e) => {
+                        setUserRole(e.target.value as 'admin' | 'employee');
+                        setCapFeedback(null);
+                      }}
+                      className="bg-white border border-slate-200 text-slate-850 font-bold rounded-lg px-2.5 py-1.5 text-xs focus:ring-1 focus:ring-slate-400 cursor-pointer text-slate-800"
+                    >
+                      <option value="admin">System Admin</option>
+                      <option value="employee">Standard Employee</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Subtitle Form to Add Investment */}
+                <div className="bg-slate-50 rounded-2xl p-5 border border-slate-100/80 space-y-4">
+                  <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">Log New Capital Contribution</h4>
+                  
+                  {capFeedback && (
+                    <div className={`p-3.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                      capFeedback.type === 'success' ? 'bg-emerald-50 border-emerald-100 text-emerald-800' : 'bg-rose-50 border-rose-100 text-rose-800'
+                    }`}>
+                      {capFeedback.type === 'success' ? <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" /> : <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />}
+                      <span>{capFeedback.message}</span>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleSaveCapital} className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                    <div>
+                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">Amount ($ USD)</label>
+                      <div className="relative">
+                        <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                        <input 
+                          type="number"
+                          step="0.01"
+                          required
+                          placeholder="50,000.00"
+                          value={newCapAmount}
+                          onChange={(e) => setNewCapAmount(e.target.value)}
+                          disabled={userRole !== 'admin'}
+                          className="w-full bg-white border border-slate-200 rounded-xl pl-9 pr-4 py-2.5 text-xs font-semibold text-slate-900 focus:outline-hidden focus:border-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">Contribution Date</label>
+                      <input 
+                        type="date"
+                        required
+                        value={newCapDate}
+                        onChange={(e) => setNewCapDate(e.target.value)}
+                        disabled={userRole !== 'admin'}
+                        className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-xs font-semibold text-slate-900 focus:outline-hidden focus:border-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">Source Note / Equity Reference</label>
+                      <input 
+                        type="text"
+                        placeholder="e.g. Series A seed round, cash injection"
+                        value={newCapNote}
+                        onChange={(e) => setNewCapNote(e.target.value)}
+                        disabled={userRole !== 'admin'}
+                        className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-xs font-semibold text-slate-900 focus:outline-hidden focus:border-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                      />
+                    </div>
+
+                    <div className="md:col-span-3 flex justify-end">
+                      <button 
+                        type="submit"
+                        disabled={userRole !== 'admin'}
+                        className="bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs px-5 py-2.5 rounded-xl transition shadow-3xs disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Inflow Capital Investment
+                      </button>
+                    </div>
+                  </form>
+                </div>
+
+                {/* Historic Equity Injections List */}
+                <div className="space-y-3">
+                  <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">Equity Injection Registers</h4>
+                  
+                  <div className="border border-slate-100 rounded-2xl overflow-hidden bg-white">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-100 text-slate-400 font-bold uppercase tracking-wider text-[9px]">
+                          <th className="p-4">Investment ID</th>
+                          <th className="p-4">Effective Date</th>
+                          <th className="p-4 text-right">Injected Capital</th>
+                          <th className="p-4">Assigned Originator</th>
+                          <th className="p-4">Official Log Note</th>
+                          <th className="p-4 text-center">Manage</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {capital.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="p-8 text-center text-slate-400">
+                              No Capital reserves configured yet. Set an initial capital investment above.
+                            </td>
+                          </tr>
+                        ) : (
+                          capital.map((cap) => (
+                            <tr key={cap.id} className="border-b border-slate-50 hover:bg-slate-50/30 transition text-slate-750">
+                              <td className="p-4 font-bold font-mono text-slate-800">{cap.id}</td>
+                              <td className="p-4 font-mono font-bold">{cap.date}</td>
+                              <td className="p-4 text-right font-black font-mono text-[13px] text-emerald-700">${cap.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                              <td className="p-4 font-semibold text-indigo-650">
+                                <span className="bg-indigo-50 text-indigo-750 px-1.5 py-0.5 rounded text-[9.5px] font-bold font-mono">
+                                  {cap.createdBy || 'System'}
+                                </span>
+                              </td>
+                              <td className="p-4 text-slate-500 max-w-xs truncate" title={cap.note}>{cap.note || 'None'}</td>
+                              <td className="p-4 text-center">
+                                <button 
+                                  onClick={() => handleDeleteCapital(cap.id)}
+                                  disabled={userRole !== 'admin'}
+                                  className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer inline-block"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+              </div>
+              <div className="bg-slate-50 px-6 py-4 flex justify-end border-t border-slate-100">
+                <button 
+                  onClick={() => {
+                    setIsCapitalModalOpen(false);
+                    setCapFeedback(null);
+                  }}
+                  className="bg-white border border-slate-200 text-slate-705 text-slate-700 hover:bg-slate-50 font-bold text-xs px-5 py-2.5 rounded-xl transition cursor-pointer"
+                >
+                  Close Desk
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

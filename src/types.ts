@@ -107,3 +107,22 @@ export interface SupplierPayment {
   notes: string;
 }
 
+export interface CashLedgerEntry {
+  id: string;
+  type: 'inflow' | 'outflow';
+  source: 'sale' | 'purchase' | 'payment' | 'manual';
+  amount: number;
+  referenceId?: string;
+  description: string;
+  timestamp: string;
+}
+
+export interface Capital {
+  id: string;
+  amount: number;
+  date: string;
+  note?: string;
+  createdBy: string;
+}
+
+

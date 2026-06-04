@@ -357,6 +357,20 @@ export default function SalesManagement() {
 
         const saleRef = doc(db, 'sales', saleId);
         transaction.set(saleRef, finalizedSaleWithSnapshot);
+
+        if (formData.paymentType === 'Cash') {
+          const cashLedgerId = `cl-${saleId}`;
+          const cashLedgerRef = doc(db, 'cashLedger', cashLedgerId);
+          transaction.set(cashLedgerRef, {
+            id: cashLedgerId,
+            type: 'inflow',
+            source: 'sale',
+            amount: totalAmount,
+            referenceId: saleId,
+            description: `Cash sale of x${numQty} "${chosenProd.name}" to "${chosenCust.name}"`,
+            timestamp: new Date(formData.saleDate).toISOString()
+          });
+        }
       });
 
       // Log activity to the Logs collection

@@ -176,6 +176,34 @@
         "notes": { "type": "string" }
       },
       "required": ["id", "supplierId", "amountPaid", "previousDue", "remainingDue", "paymentDate"]
+    },
+    "CashLedgerEntry": {
+      "title": "CashLedgerEntry",
+      "description": "A ledger record tracking real cash inflows and outflows in the system.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["inflow", "outflow"] },
+        "source": { "type": "string", "enum": ["sale", "purchase", "payment", "manual"] },
+        "amount": { "type": "number" },
+        "referenceId": { "type": "string" },
+        "description": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "type", "source", "amount", "description", "timestamp"]
+    },
+    "Capital": {
+      "title": "Capital",
+      "description": "An investment or capital entry made into the business.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "amount": { "type": "number" },
+        "date": { "type": "string" },
+        "note": { "type": "string" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["id", "amount", "date", "createdBy"]
     }
   },
   "firestore": {
@@ -218,6 +246,14 @@
     "supplierPayments": {
       "schema": "SupplierPayment",
       "description": "Store supplier payment ledger entries."
+    },
+    "cashLedger": {
+      "schema": "CashLedgerEntry",
+      "description": "Store cash ledger transaction entries."
+    },
+    "capital": {
+      "schema": "Capital",
+      "description": "Store initial business capital investments."
     }
   }
 }

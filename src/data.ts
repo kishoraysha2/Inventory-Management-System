@@ -210,3 +210,25 @@ export const INITIAL_LOGS: ActivityLog[] = [
     timestamp: '2026-05-27T13:10:00Z',
   }
 ];
+
+export const INITIAL_CASH_LEDGER: any[] = [
+  {
+    id: 'cl-init-setup',
+    type: 'outflow',
+    source: 'manual',
+    amount: 5000.00,
+    description: 'Initial Office & Warehouse Setup Procurement',
+    timestamp: '2026-05-02T00:00:00Z'
+  }
+];
+
+export const INITIAL_CAPITAL: any[] = [
+  {
+    id: 'cap-init-seed',
+    amount: 100000.00,
+    date: '2026-05-01',
+    note: 'Initial Seed Investment from Owner Equity',
+    createdBy: 'admin_01'
+  }
+];
+
