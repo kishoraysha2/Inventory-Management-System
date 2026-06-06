@@ -120,6 +120,23 @@ export default function App() {
   const userRole = permissions.role;
   const canEditInventory = permissions.canEditInventory;
 
+  const checkAndLogLogin = async (uid: string, email: string, name: string, role: string) => {
+    if (sessionStorage.getItem('just_logged_in') === 'true') {
+      sessionStorage.removeItem('just_logged_in');
+      const timestamp = new Date().toISOString();
+      const details = [
+        `User successfully established system session clearance.`,
+        `- Action: User Login`,
+        `- User ID: ${uid}`,
+        `- User Name: ${name}`,
+        `- User Email: ${email}`,
+        `- User Role: ${role.toUpperCase()}`,
+        `- Timestamp: ${timestamp}`
+      ].join('\n');
+      await logSystemActivity("User Login", details);
+    }
+  };
+
   // --- Observe Authentication State ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -127,12 +144,15 @@ export default function App() {
       if (user) {
         if (user.isAnonymous) {
           const savedRole = localStorage.getItem('demo_user_role') || 'viewer';
+          const name = savedRole === 'admin' ? 'Kishor Aysha (Admin Bypass)' : 'Demo Guest';
+          const email = savedRole === 'admin' ? 'kishor.aysha2@gmail.com' : 'demo-guest@example.com';
           setCurrentUserProfile({
             role: savedRole as any,
-            name: savedRole === 'admin' ? 'Kishor Aysha (Admin Bypass)' : 'Demo Guest',
-            email: savedRole === 'admin' ? 'kishor.aysha2@gmail.com' : 'demo-guest@example.com'
+            name,
+            email
           });
           setIsAuthLoading(false);
+          await checkAndLogLogin(user.uid, email, name, savedRole);
           return;
         }
 
@@ -143,17 +163,25 @@ export default function App() {
             const data = docSnap.data();
             if (user.email === 'kishor.aysha2@gmail.com' && data.role !== 'admin') {
               await setDoc(userRef, { role: 'admin' }, { merge: true });
+              const name = data.name || 'Kishor Aysha (Admin)';
+              const email = user.email || 'kishor.aysha2@gmail.com';
+              const role = 'admin';
               setCurrentUserProfile({
-                role: 'admin',
-                name: data.name || 'Kishor Aysha (Admin)',
-                email: user.email
+                role,
+                name,
+                email
               });
+              await checkAndLogLogin(user.uid, email, name, role);
             } else {
+              const role = data.role || 'viewer';
+              const name = data.name || user.email?.split('@')[0] || 'User';
+              const email = data.email || user.email || '';
               setCurrentUserProfile({
-                role: data.role || 'viewer',
-                name: data.name || user.email?.split('@')[0] || 'User',
-                email: data.email || user.email || ''
+                role,
+                name,
+                email
               });
+              await checkAndLogLogin(user.uid, email, name, role);
             }
           } else {
             const defaultRole = user.email === 'kishor.aysha2@gmail.com' ? 'admin' : 'viewer';
@@ -168,19 +196,26 @@ export default function App() {
               await updateDoc(userRef, { role: 'admin' });
             }
 
+            const name = user.email === 'kishor.aysha2@gmail.com' ? 'Kishor Aysha (Admin)' : (user.email?.split('@')[0] || 'User');
+            const email = user.email || '';
             setCurrentUserProfile({
               role: defaultRole as any,
-              name: user.email === 'kishor.aysha2@gmail.com' ? 'Kishor Aysha (Admin)' : (user.email?.split('@')[0] || 'User'),
-              email: user.email || ''
+              name,
+              email
             });
+            await checkAndLogLogin(user.uid, email, name, defaultRole);
           }
         } catch (err) {
           console.error("Failed to load user profile document:", err);
+          const role = user.email === 'kishor.aysha2@gmail.com' ? 'admin' : 'viewer';
+          const name = user.email?.split('@')[0] || 'User';
+          const email = user.email || '';
           setCurrentUserProfile({
-            role: user.email === 'kishor.aysha2@gmail.com' ? 'admin' : 'viewer',
-            name: user.email?.split('@')[0] || 'User',
-            email: user.email || ''
+            role,
+            name,
+            email
           });
+          await checkAndLogLogin(user.uid, email, name, role);
         }
       } else {
         setCurrentUserProfile(null);
@@ -202,6 +237,7 @@ export default function App() {
 
     setIsAuthSubmitLoading(true);
     try {
+      sessionStorage.setItem('just_logged_in', 'true');
       if (isSignUpMode) {
         await createUserWithEmailAndPassword(auth, authEmail.trim(), authPassword);
         setFeedback({ message: 'Welcome! Your user profile has been created successfully.', type: 'success' });
@@ -210,6 +246,7 @@ export default function App() {
         setFeedback({ message: 'Access granted! Signed in successfully.', type: 'success' });
       }
     } catch (err: any) {
+      sessionStorage.removeItem('just_logged_in');
       console.error("Email/Password Auth Exception:", err);
       let errMsg = 'An unexpected credential authentication issue has occurred.';
       const errorCode = err.code;
@@ -240,9 +277,11 @@ export default function App() {
     try {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
+      sessionStorage.setItem('just_logged_in', 'true');
       await signInWithPopup(auth, provider);
       setFeedback({ message: 'Welcome! Signed in successfully with Google.', type: 'success' });
     } catch (err: any) {
+      sessionStorage.removeItem('just_logged_in');
       console.error("Google Auth Exception:", err);
       let errMsg = err.message || 'An unexpected Google login error occurred.';
       if (err.code === 'auth/popup-closed-by-user') {
@@ -258,21 +297,39 @@ export default function App() {
     setAuthFeedback(null);
     try {
       localStorage.setItem('demo_user_role', 'viewer');
+      sessionStorage.setItem('just_logged_in', 'true');
       await signInAnonymously(auth);
       setFeedback({ message: 'Anonymous session established. Welcome Guest!', type: 'success' });
     } catch (err: any) {
+      sessionStorage.removeItem('just_logged_in');
       console.error("Anonymous Auth Exception:", err);
+      const uid = 'offline-guest-uid';
+      const email = 'guest@example.com';
+      const name = 'Guest Viewer';
+      const role = 'viewer';
+      const timestamp = new Date().toISOString();
+      const details = [
+        `Offline system session established.`,
+        `- Action: User Login`,
+        `- User ID: ${uid}`,
+        `- User Name: ${name}`,
+        `- User Email: ${email}`,
+        `- User Role: ${role.toUpperCase()}`,
+        `- Timestamp: ${timestamp}`
+      ].join('\n');
+      
       // Fallback to local state-only mock if completely offline or blocked
       setCurrentUser({
-        uid: 'offline-guest-uid',
-        email: 'guest@example.com',
-        displayName: 'Guest Viewer'
+        uid: uid,
+        email: email,
+        displayName: name
       } as any);
       setCurrentUserProfile({
-        role: 'viewer',
-        name: 'Guest Viewer',
-        email: 'guest@example.com'
+        role: role,
+        name: name,
+        email: email
       });
+      await logSystemActivity("User Login", details);
       setFeedback({ message: 'Offline guest session established.', type: 'success' });
     }
   };
@@ -281,27 +338,64 @@ export default function App() {
     setAuthFeedback(null);
     try {
       localStorage.setItem('demo_user_role', 'admin');
+      sessionStorage.setItem('just_logged_in', 'true');
       await signInAnonymously(auth);
       setFeedback({ message: 'Sandbox Admin session established via secure gateway.', type: 'success' });
     } catch (err: any) {
+      sessionStorage.removeItem('just_logged_in');
       console.error("Demo Admin Auth Exception:", err);
+      const uid = 'offline-admin-uid';
+      const email = 'kishor.aysha2@gmail.com';
+      const name = 'Kishor Aysha (Admin Bypass)';
+      const role = 'admin';
+      const timestamp = new Date().toISOString();
+      const details = [
+        `Offline Sandbox Admin system session established.`,
+        `- Action: User Login`,
+        `- User ID: ${uid}`,
+        `- User Name: ${name}`,
+        `- User Email: ${email}`,
+        `- User Role: ${role.toUpperCase()}`,
+        `- Timestamp: ${timestamp}`
+      ].join('\n');
+
       // Fallback to local state-only mock if completely offline or blocked
       setCurrentUser({
-        uid: 'offline-admin-uid',
-        email: 'kishor.aysha2@gmail.com',
-        displayName: 'Kishor Aysha (Admin Bypass)'
+        uid: uid,
+        email: email,
+        displayName: name
       } as any);
       setCurrentUserProfile({
-        role: 'admin',
-        name: 'Kishor Aysha (Admin Bypass)',
-        email: 'kishor.aysha2@gmail.com'
+        role: role,
+        name: name,
+        email: email
       });
+      await logSystemActivity("User Login", details);
       setFeedback({ message: 'Offline Sandbox Admin session established.', type: 'success' });
     }
   };
 
   const handleSignOut = async () => {
     try {
+      if (currentUser) {
+        const uid = currentUser.uid;
+        const email = currentUser.email || '';
+        const name = currentUserProfile?.name || currentUser.displayName || email.split('@')[0] || 'User';
+        const role = currentUserProfile?.role || 'viewer';
+        const timestamp = new Date().toISOString();
+
+        const details = [
+          `User successfully logged out of the system.`,
+          `- Action: User Logout`,
+          `- User ID: ${uid}`,
+          `- User Name: ${name}`,
+          `- User Email: ${email}`,
+          `- User Role: ${role.toUpperCase()}`,
+          `- Timestamp: ${timestamp}`
+        ].join('\n');
+
+        await logSystemActivity("User Logout", details);
+      }
       await signOut(auth);
       setActiveTab('dashboard');
       setFeedback({ message: 'Logged out successfully.', type: 'success' });
@@ -1084,62 +1178,43 @@ export default function App() {
               </div>
             </div>
 
-            <div className="pt-2 flex flex-col sm:flex-row gap-3">
-              {/* Log In Button */}
+            <div className="pt-2 flex flex-col gap-3">
+              {/* Primary Submit Button */}
               <button
-                id="auth-login-submit-btn"
-                type="button"
-                onClick={() => {
-                  setIsSignUpMode(false);
-                  setTimeout(() => {
-                    const form = document.getElementById('auth-email-password-form') as HTMLFormElement;
-                    if (form) form.requestSubmit();
-                  }, 20);
-                }}
+                id="auth-submit-btn"
+                type="submit"
                 disabled={isAuthSubmitLoading}
-                className={`flex-1 inline-flex items-center justify-center gap-2 rounded-2xl px-5 py-3.5 text-xs sm:text-sm font-bold transition shadow-xs hover:shadow-md cursor-pointer transition-all duration-200 disabled:opacity-50 ${
-                  !isSignUpMode
-                    ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
-                    : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
-                }`}
+                className="w-full inline-flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-3.5 text-xs sm:text-sm font-bold transition shadow-xs hover:shadow-md cursor-pointer transition-all duration-200 disabled:opacity-50"
               >
-                {!isSignUpMode && isAuthSubmitLoading ? (
+                {isAuthSubmitLoading ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
-                  <span>Log In</span>
+                  <span>{isSignUpMode ? 'Create Corporate Account' : 'Sign In to Workstation'}</span>
                 )}
               </button>
 
-              {/* Sign Up Button */}
-              <button
-                id="auth-signup-submit-btn"
-                type="button"
-                onClick={() => {
-                  setIsSignUpMode(true);
-                  setTimeout(() => {
-                    const form = document.getElementById('auth-email-password-form') as HTMLFormElement;
-                    if (form) form.requestSubmit();
-                  }, 20);
-                }}
-                disabled={isAuthSubmitLoading}
-                className={`flex-1 inline-flex items-center justify-center gap-2 rounded-2xl px-5 py-3.5 text-xs sm:text-sm font-bold transition shadow-xs hover:shadow-md cursor-pointer transition-all duration-200 disabled:opacity-50 ${
-                  isSignUpMode
-                    ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
-                    : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
-                }`}
-              >
-                {isSignUpMode && isAuthSubmitLoading ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <span>Sign Up</span>
-                )}
-              </button>
+              {/* Toggle Link to switch modes without submitting */}
+              <div className="text-center pt-1">
+                <button
+                  id="auth-mode-toggle-btn"
+                  type="button"
+                  onClick={() => {
+                    setIsSignUpMode(!isSignUpMode);
+                    setAuthFeedback(null);
+                  }}
+                  className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 transition cursor-pointer"
+                >
+                  {isSignUpMode 
+                    ? "Already have an account? Sign In" 
+                    : "Don't have a secure workstation account? Register here"}
+                </button>
+              </div>
             </div>
           </form>
 
           {/* Fallback Google Authentication option */}
-          <div id="google-sso-bypass" className="pt-2 flex flex-col gap-2">
-            <div className="relative flex py-1 items-center">
+          <div id="google-sso-bypass" className="pt-2 flex flex-col gap-2.5">
+            <div className="relative flex py-1 items-center font-sans">
               <div className="flex-grow border-t border-slate-200"></div>
               <span className="flex-shrink mx-4 text-[10px] text-slate-400 font-bold uppercase tracking-widest bg-white px-2">or single sign-on</span>
               <div className="flex-grow border-t border-slate-200"></div>
@@ -1159,6 +1234,37 @@ export default function App() {
               </svg>
               <span>Continue with Google</span>
             </button>
+          </div>
+
+          {/* Quick Demo Sandbox Access */}
+          <div id="sandbox-direct-access" className="pt-1 flex flex-col gap-2.5">
+            <div className="relative flex py-1 items-center font-sans">
+              <div className="flex-grow border-t border-slate-200"></div>
+              <span className="flex-shrink mx-4 text-[10px] text-slate-400 font-bold uppercase tracking-widest bg-white px-2">or quick sandbox access</span>
+              <div className="flex-grow border-t border-slate-200"></div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                id="auth-sandbox-admin-btn"
+                type="button"
+                onClick={handleDemoAdminSignIn}
+                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white px-4 py-3 text-xs font-bold transition cursor-pointer shadow-xs"
+              >
+                <Shield className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Sandbox Admin</span>
+              </button>
+
+              <button
+                id="auth-anonymous-guest-btn"
+                type="button"
+                onClick={handleAnonymousSignIn}
+                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-4 py-3 text-xs font-bold transition cursor-pointer shadow-xs"
+              >
+                <Users className="w-3.5 h-3.5 text-slate-400" />
+                <span>Guest Viewer</span>
+              </button>
+            </div>
           </div>
 
           <div className="p-4 bg-slate-50 border border-slate-100 rounded-2xl">
