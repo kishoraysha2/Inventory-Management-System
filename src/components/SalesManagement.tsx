@@ -23,7 +23,7 @@ import {
   ArrowUpRight,
   FileText
 } from 'lucide-react';
-import { db, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
+import { db, auth, OperationType, handleFirestoreError, logSystemActivity, logFinancialAudit } from '../lib/firebase';
 import { collection, onSnapshot, doc, runTransaction, setDoc } from 'firebase/firestore';
 import { Sale, Customer, Product } from '../types';
 import TaxInvoiceModal from './TaxInvoiceModal';
@@ -73,7 +73,7 @@ export const INITIAL_SALES: Sale[] = [
   }
 ];
 
-export default function SalesManagement() {
+export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- States ---
   const [sales, setSales] = useState<Sale[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -87,8 +87,148 @@ export default function SalesManagement() {
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [selectedSaleForInvoice, setSelectedSaleForInvoice] = useState<Sale | null>(null);
+  const [voidConfirmationSale, setVoidConfirmationSale] = useState<Sale | null>(null);
 
-  // --- Form Field States ---
+  // --- Transaction Voiding securely via Transactions (instead of deletions) ---
+  const voidTransaction = async (saleId: string) => {
+    console.log("VOID triggered", saleId);
+    const sale = sales.find(s => s.id === saleId);
+    if (!sale) {
+      console.error("Sale not found for voiding:", saleId);
+      return;
+    }
+    setVoidConfirmationSale(sale);
+  };
+
+  const handleVoidSale = async (sale: Sale) => {
+    console.log("handleVoidSale direct invocation for:", sale.id);
+    setFeedback(null);
+    try {
+      if (!auth.currentUser) {
+        // Local Void Fallback
+        const savedSales = localStorage.getItem('inventory_sales') || '[]';
+        let salesList: Sale[] = JSON.parse(savedSales);
+
+        const savedProducts = localStorage.getItem('inventory_products') || '[]';
+        let productsList: Product[] = JSON.parse(savedProducts);
+
+        const savedCustomers = localStorage.getItem('inventory_customers') || '[]';
+        let customersList: Customer[] = JSON.parse(savedCustomers);
+
+        // Restore product stock
+        productsList = productsList.map(p => {
+          if (p.id === sale.productId) {
+            return { ...p, currentStock: (p.currentStock ?? 0) + sale.quantity };
+          }
+          return p;
+        });
+
+        // If credit, rollback customer due balance
+        if (sale.paymentType === 'Credit') {
+          customersList = customersList.map(c => {
+            if (c.id === sale.customerId) {
+              return { ...c, dueBalance: Math.max(0, (c.dueBalance ?? 0) - sale.totalAmount) };
+            }
+            return c;
+          });
+        }
+
+        // Void the Sale
+        salesList = salesList.map(s => s.id === sale.id ? { ...s, status: 'VOID' } : s);
+
+        // Void in Cash Ledger
+        if (sale.paymentType === 'Cash') {
+          const savedLedger = localStorage.getItem('inventory_cash_ledger') || '[]';
+          let ledgerList = JSON.parse(savedLedger);
+          ledgerList = ledgerList.map((l: any) => l.id === `cl-${sale.id}` ? { ...l, status: 'VOID' } : l);
+          localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
+        }
+
+        // Save collections
+        localStorage.setItem('inventory_sales', JSON.stringify(salesList));
+        localStorage.setItem('inventory_products', JSON.stringify(productsList));
+        localStorage.setItem('inventory_customers', JSON.stringify(customersList));
+
+        setSales(salesList);
+        setProducts(productsList);
+        setCustomers(customersList);
+
+        setFeedback({
+          message: `Sales transaction "${sale.id}" has been voided locally. Restored stocks and liabilities.`,
+          type: 'success'
+        });
+        return;
+      }
+
+      await runTransaction(db, async (transaction) => {
+        const productRef = doc(db, 'products', sale.productId);
+        const customerRef = doc(db, 'customers', sale.customerId);
+
+        // -- 1. Gather all READS first --
+        const productSnap = await transaction.get(productRef);
+        let customerSnap = null;
+        if (sale.paymentType === 'Credit') {
+          customerSnap = await transaction.get(customerRef);
+        }
+
+        // -- 2. Perform WRITES --
+        if (productSnap.exists()) {
+          const productData = productSnap.data() as Product;
+          transaction.update(productRef, {
+            currentStock: (productData.currentStock ?? 0) + sale.quantity
+          });
+        }
+
+        if (sale.paymentType === 'Credit' && customerSnap && customerSnap.exists()) {
+          const customerData = customerSnap.data() as Customer;
+          transaction.update(customerRef, {
+            dueBalance: Math.max(0, (customerData.dueBalance ?? 0) - sale.totalAmount)
+          });
+        }
+
+        const saleRef = doc(db, 'sales', sale.id);
+        transaction.update(saleRef, { status: 'VOID' });
+
+        if (sale.paymentType === 'Cash') {
+          const cashLedgerRef = doc(db, 'cashLedger', `cl-${sale.id}`);
+          transaction.update(cashLedgerRef, { status: 'VOID' });
+        }
+      });
+
+      // Log financial Audit
+      await logFinancialAudit(
+        'VOID',
+        sale.id,
+        sale,
+        { ...sale, status: 'VOID' },
+        {
+          cash: sale.paymentType === 'Cash' ? -sale.totalAmount : 0,
+          stock: sale.quantity, // increase stock (rolling back the sale)
+          due: sale.paymentType === 'Credit' ? -sale.totalAmount : 0
+        }
+      );
+
+      // Log deletions/voids in system activity
+      await logSystemActivity(
+        "Sale Voided",
+        `Permanently marked sales invoice ID: ${sale.id} as VOID. Restored associated stock levels and reversed customer liabilities.`
+      );
+
+      setFeedback({
+        message: `Sales transaction "${sale.id}" has been successfully VOIDED. Stock and credit ledger balances rolls back safely.`,
+        type: 'success'
+      });
+    } catch (err: any) {
+      console.error("Void operations abort:", err);
+      let errMsg = 'Failed to void the sales transaction.';
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, `sales/${sale.id}`);
+      } catch (dbErr: any) {
+        errMsg = dbErr.message;
+      }
+      setFeedback({ message: `Access Abort: ${errMsg}`, type: 'error' });
+    }
+  };
   const [formData, setFormData] = useState({
     customerId: '',
     productId: '',
@@ -104,6 +244,21 @@ export default function SalesManagement() {
 
   // --- Real-time Firestore Sync for Sales, Customers, and Products ---
   useEffect(() => {
+    if (!auth.currentUser) {
+      // Local fallback
+      const savedSales = localStorage.getItem('inventory_sales');
+      setSales(savedSales ? JSON.parse(savedSales) : INITIAL_SALES);
+
+      const savedCustomers = localStorage.getItem('inventory_customers');
+      setCustomers(savedCustomers ? JSON.parse(savedCustomers) : []);
+
+      const savedProducts = localStorage.getItem('inventory_products');
+      setProducts(savedProducts ? JSON.parse(savedProducts) : []);
+
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     // 1. Sync Sales
@@ -298,6 +453,94 @@ export default function SalesManagement() {
 
     setIsSaving(true);
     try {
+      if (!auth.currentUser) {
+        // Offline / local storage setup
+        const savedSales = localStorage.getItem('inventory_sales') || '[]';
+        let salesList: Sale[] = JSON.parse(savedSales);
+
+        const savedProducts = localStorage.getItem('inventory_products') || '[]';
+        let productsList: Product[] = JSON.parse(savedProducts);
+
+        const savedCustomers = localStorage.getItem('inventory_customers') || '[]';
+        let customersList: Customer[] = JSON.parse(savedCustomers);
+
+        const testProductIndex = productsList.findIndex(p => p.id === chosenProd.id);
+        if (testProductIndex === -1) {
+          throw new Error(`Product "${chosenProd.name}" no longer exists locally.`);
+        }
+        const prodData = productsList[testProductIndex];
+        const liveStock = prodData.currentStock ?? 0;
+
+        if (liveStock < numQty) {
+          throw new Error(`Insufficient stock level. Current limit: ${liveStock}, Requested Quantity: ${numQty}`);
+        }
+
+        // Calculations
+        const purchasePriceAtSale = prodData.purchasePrice ?? 0;
+        const sellingPriceAtSale = prodData.sellingPrice ?? 0;
+        const costOfGoodsSold = purchasePriceAtSale * numQty;
+        const grossProfit = subtotal - costOfGoodsSold;
+
+        const finalizedSaleWithSnapshot: Sale = {
+          ...finalizedSaleData,
+          productPurchasePriceAtSale: purchasePriceAtSale,
+          productSellingPriceAtSale: sellingPriceAtSale,
+          costOfGoodsSold: costOfGoodsSold,
+          grossProfit: grossProfit
+        };
+
+        // Update product stock
+        productsList[testProductIndex] = {
+          ...prodData,
+          currentStock: liveStock - numQty
+        };
+
+        // If Credit, update customer due balance
+        if (formData.paymentType === 'Credit') {
+          customersList = customersList.map(c => {
+            if (c.id === chosenCust.id) {
+              return { ...c, dueBalance: (c.dueBalance ?? 0) + totalAmount };
+            }
+            return c;
+          });
+        }
+
+        // Add to Cash Ledger if Cash
+        if (formData.paymentType === 'Cash') {
+          const savedLedger = localStorage.getItem('inventory_cash_ledger') || '[]';
+          const ledgerList = JSON.parse(savedLedger);
+          const cashLedgerId = `cl-${saleId}`;
+          ledgerList.unshift({
+            id: cashLedgerId,
+            type: 'inflow',
+            source: 'sale',
+            amount: totalAmount,
+            referenceId: saleId,
+            description: `Sold product "${chosenProd.name}" to customer "${chosenCust.name}"`,
+            timestamp: new Date().toISOString()
+          });
+          localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
+        }
+
+        salesList.unshift(finalizedSaleWithSnapshot);
+
+        localStorage.setItem('inventory_sales', JSON.stringify(salesList));
+        localStorage.setItem('inventory_products', JSON.stringify(productsList));
+        localStorage.setItem('inventory_customers', JSON.stringify(customersList));
+
+        setSales(salesList);
+        setProducts(productsList);
+        setCustomers(customersList);
+
+        setFeedback({
+          message: `Successfully logged offline sale of $${totalAmount.toFixed(2)} to "${chosenCust.name}".`,
+          type: 'success'
+        });
+        setIsFormOpen(false);
+        setIsSaving(false);
+        return;
+      }
+
       // Execute Atomic Database Updates
       await runTransaction(db, async (transaction) => {
         // A. Verify and read Product stock live in transaction
@@ -404,11 +647,12 @@ export default function SalesManagement() {
   };
 
   // --- Calculate Dynamic Metrics ---
-  const totalSalesRevenue = sales.reduce((sum, s) => sum + s.totalAmount, 0);
-  const totalSalesCount = sales.length;
-  const cashSalesTotal = sales.filter(s => s.paymentType === 'Cash').reduce((sum, s) => sum + s.totalAmount, 0);
-  const creditSalesTotal = sales.filter(s => s.paymentType === 'Credit').reduce((sum, s) => sum + s.totalAmount, 0);
-  const totalItemsSold = sales.reduce((sum, s) => sum + s.quantity, 0);
+  const activeSales = sales.filter(s => s.status !== 'voided' && s.status !== 'VOID');
+  const totalSalesRevenue = activeSales.reduce((sum, s) => sum + s.totalAmount, 0);
+  const totalSalesCount = activeSales.length;
+  const cashSalesTotal = activeSales.filter(s => s.paymentType === 'Cash').reduce((sum, s) => sum + s.totalAmount, 0);
+  const creditSalesTotal = activeSales.filter(s => s.paymentType === 'Credit').reduce((sum, s) => sum + s.totalAmount, 0);
+  const totalItemsSold = activeSales.reduce((sum, s) => sum + s.quantity, 0);
 
   // --- Filter and Search matching ---
   const filteredSalesList = sales.filter((sale) => {
@@ -532,14 +776,16 @@ export default function SalesManagement() {
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={openForm}
-                className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
-              >
-                <Plus className="h-4 w-4" />
-                <span>Record New Sale</span>
-              </button>
+              {userRole !== 'viewer' && (
+                <button
+                  type="button"
+                  onClick={openForm}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
+                >
+                  <Plus className="h-4 w-4" />
+                  <span>Record New Sale</span>
+                </button>
+              )}
             </div>
 
             {/* Filters panel */}
@@ -622,7 +868,9 @@ export default function SalesManagement() {
                     <motion.div
                       key={sale.id}
                       layoutId={`sale-card-${sale.id}`}
-                      className="border border-slate-200 rounded-2xl p-5 hover:border-indigo-200 hover:shadow-xs transition duration-300 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                      className={`border border-slate-200 rounded-2xl p-5 hover:border-indigo-200 hover:shadow-xs transition duration-300 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+                        sale.status === 'voided' || sale.status === 'VOID' ? 'opacity-45 bg-slate-50 line-through text-slate-400' : ''
+                      }`}
                     >
                       <div className="space-y-2 min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
@@ -669,14 +917,32 @@ export default function SalesManagement() {
                           </span>
                         </div>
                         
-                        <button
-                          type="button"
-                          onClick={() => setSelectedSaleForInvoice(sale)}
-                          className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-205 border-indigo-200 bg-indigo-50/50 hover:bg-indigo-50 px-3.5 py-2 text-xs font-bold text-indigo-600 hover:text-indigo-700 transition cursor-pointer shrink-0"
-                        >
-                          <FileText className="h-3.5 w-3.5" />
-                          <span>Tax Invoice</span>
-                        </button>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedSaleForInvoice(sale)}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50/50 hover:bg-indigo-50 px-3.5 py-2 text-xs font-bold text-indigo-600 hover:text-indigo-700 transition cursor-pointer shrink-0"
+                          >
+                            <FileText className="h-3.5 w-3.5" />
+                            <span>Tax Invoice</span>
+                          </button>
+                          {sale.status === 'voided' || sale.status === 'VOID' ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-3 py-1.5 text-[9px] font-mono font-bold text-slate-400 select-none">
+                              VOIDED
+                            </span>
+                          ) : (
+                            userRole === 'admin' && (
+                              <button
+                                type="button"
+                                onClick={() => voidTransaction(sale.id)}
+                                className="inline-flex items-center gap-1 p-2 rounded-xl border border-rose-200 bg-rose-50/50 hover:bg-rose-50 text-xs font-bold text-rose-600 hover:text-rose-700 transition cursor-pointer shrink-0"
+                                title="Void sale transaction"
+                              >
+                                <span>Void</span>
+                              </button>
+                            )
+                          )}
+                        </div>
                       </div>
                     </motion.div>
                   ))}
@@ -1017,6 +1283,59 @@ export default function SalesManagement() {
             products={products}
             onClose={() => setSelectedSaleForInvoice(null)}
           />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {voidConfirmationSale && (
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-md rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-xl"
+            >
+              <div className="flex items-start gap-4">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-50 text-rose-500">
+                  <AlertTriangle className="h-5 w-5" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="font-sans text-sm font-bold tracking-tight text-slate-850">
+                    Confirm Void Transaction
+                  </h3>
+                  <p className="text-xs text-slate-550 leading-relaxed">
+                    Are you sure you want to VOID this sales transaction? This will mark it as VOID, reverse customer due balances, rollback stock levels, and flag the transaction in the ledger. This action is irreversible.
+                  </p>
+                  <div className="text-[10px] font-mono text-slate-400 bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-1">
+                    <div><span className="font-bold">Transaction ID:</span> {voidConfirmationSale.id}</div>
+                    <div><span className="font-bold">Customer:</span> {voidConfirmationSale.customerName}</div>
+                    <div><span className="font-bold">Product:</span> {voidConfirmationSale.productName} (x{voidConfirmationSale.quantity})</div>
+                    <div><span className="font-bold">Total Amount:</span> ${voidConfirmationSale.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-6 flex justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setVoidConfirmationSale(null)}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const saleToVoid = voidConfirmationSale;
+                    setVoidConfirmationSale(null);
+                    await handleVoidSale(saleToVoid);
+                  }}
+                  className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 transition cursor-pointer shadow-xs"
+                >
+                  Yes, Void Transaction
+                </button>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
 

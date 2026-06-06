@@ -204,9 +204,25 @@
         "createdBy": { "type": "string" }
       },
       "required": ["id", "amount", "date", "createdBy"]
+    },
+    "User": {
+      "title": "User",
+      "description": "User profile with role details.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "accountant", "cashier", "viewer"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "email", "role"]
     }
   },
   "firestore": {
+    "users": {
+      "schema": "User",
+      "description": "User profiles tracking Role-Based Access Control permissions."
+    },
     "items": {
       "schema": "InventoryItem",
       "description": "Store all inventory items."

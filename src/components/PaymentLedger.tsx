@@ -22,11 +22,11 @@ import {
   RotateCcw,
   Phone
 } from 'lucide-react';
-import { db, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
-import { collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
+import { db, auth, OperationType, handleFirestoreError, logSystemActivity, logFinancialAudit } from '../lib/firebase';
+import { collection, onSnapshot, doc, setDoc, deleteDoc, runTransaction } from 'firebase/firestore';
 import { Customer, Supplier, CustomerPayment, SupplierPayment } from '../types';
 
-export default function PaymentLedger() {
+export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- Core State ---
   const [activeSegment, setActiveSegment] = useState<'customers' | 'suppliers'>('customers');
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -38,6 +38,155 @@ export default function PaymentLedger() {
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [voidConfirmationPayment, setVoidConfirmationPayment] = useState<CustomerPayment | SupplierPayment | null>(null);
+
+  // --- Void Payments securely via Transactions (instead of deletions) ---
+  const voidTransaction = async (paymentId: string) => {
+    console.log("VOID triggered", paymentId);
+    const payment = [...customerPayments, ...supplierPayments].find(p => p.id === paymentId);
+    if (!payment) {
+      console.error("Payment not found for voiding:", paymentId);
+      return;
+    }
+    setVoidConfirmationPayment(payment);
+  };
+
+  const handleVoidPayment = async (payment: CustomerPayment | SupplierPayment) => {
+    console.log("handleVoidPayment direct invocation for:", payment.id);
+    setFeedback(null);
+    setIsSaving(true);
+    try {
+      if (!auth.currentUser) {
+        // Local Voiding Fallback
+        if (activeSegment === 'customers') {
+          const cp = payment as CustomerPayment;
+          
+          // Update Customers list
+          const savedCustomers = localStorage.getItem('inventory_customers') || '[]';
+          let customersList = JSON.parse(savedCustomers);
+          customersList = customersList.map((c: any) => c.id === cp.customerId ? { ...c, dueBalance: (c.dueBalance ?? 0) + cp.amountPaid } : c);
+          localStorage.setItem('inventory_customers', JSON.stringify(customersList));
+          setCustomers(customersList);
+
+          // Update Customer Payments status
+          const savedPayments = localStorage.getItem('inventory_customer_payments') || '[]';
+          let paymentsList = JSON.parse(savedPayments);
+          paymentsList = paymentsList.map((p: any) => p.id === cp.id ? { ...p, status: 'VOID' } : p);
+          localStorage.setItem('inventory_customer_payments', JSON.stringify(paymentsList));
+          setCustomerPayments(paymentsList);
+
+          // Update Cash Ledger status
+          const savedLedger = localStorage.getItem('inventory_cash_ledger') || '[]';
+          let ledgerList = JSON.parse(savedLedger);
+          ledgerList = ledgerList.map((l: any) => l.id === `cl-${cp.id}` ? { ...l, status: 'VOID' } : l);
+          localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
+
+        } else {
+          const sp = payment as SupplierPayment;
+
+          // Update Suppliers list
+          const savedSuppliers = localStorage.getItem('inventory_suppliers') || '[]';
+          let suppliersList = JSON.parse(savedSuppliers);
+          suppliersList = suppliersList.map((s: any) => s.id === sp.supplierId ? { ...s, dueBalance: (s.dueBalance ?? 0) + sp.amountPaid } : s);
+          localStorage.setItem('inventory_suppliers', JSON.stringify(suppliersList));
+          setSuppliers(suppliersList);
+
+          // Update Supplier Payments status
+          const savedPayments = localStorage.getItem('inventory_supplier_payments') || '[]';
+          let paymentsList = JSON.parse(savedPayments);
+          paymentsList = paymentsList.map((p: any) => p.id === sp.id ? { ...p, status: 'VOID' } : p);
+          localStorage.setItem('inventory_supplier_payments', JSON.stringify(paymentsList));
+          setSupplierPayments(paymentsList);
+
+          // Update Cash Ledger status
+          const savedLedger = localStorage.getItem('inventory_cash_ledger') || '[]';
+          let ledgerList = JSON.parse(savedLedger);
+          ledgerList = ledgerList.map((l: any) => l.id === `cl-${sp.id}` ? { ...l, status: 'VOID' } : l);
+          localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
+        }
+
+        setFeedback({
+          message: 'Payment settlement successfully voided locally and dues restored.',
+          type: 'success'
+        });
+        setIsSaving(false);
+        return;
+      }
+
+      await runTransaction(db, async (transaction) => {
+        if (activeSegment === 'customers') {
+          const cp = payment as CustomerPayment;
+          const customerRef = doc(db, 'customers', cp.customerId);
+          const customerSnap = await transaction.get(customerRef);
+
+          if (customerSnap.exists()) {
+            const customerData = customerSnap.data() as Customer;
+            transaction.update(customerRef, {
+              dueBalance: (customerData.dueBalance ?? 0) + cp.amountPaid
+            });
+          }
+
+          const paymentRef = doc(db, 'customerPayments', cp.id);
+          transaction.update(paymentRef, { status: 'VOID' });
+
+          const cashLedgerRef = doc(db, 'cashLedger', `cl-${cp.id}`);
+          transaction.update(cashLedgerRef, { status: 'VOID' });
+        } else {
+          const sp = payment as SupplierPayment;
+          const supplierRef = doc(db, 'suppliers', sp.supplierId);
+          const supplierSnap = await transaction.get(supplierRef);
+
+          if (supplierSnap.exists()) {
+            const supplierData = supplierSnap.data() as Supplier;
+            transaction.update(supplierRef, {
+              dueBalance: (supplierData.dueBalance ?? 0) + sp.amountPaid
+            });
+          }
+
+          const paymentRef = doc(db, 'supplierPayments', sp.id);
+          transaction.update(paymentRef, { status: 'VOID' });
+
+          const cashLedgerRef = doc(db, 'cashLedger', `cl-${sp.id}`);
+          transaction.update(cashLedgerRef, { status: 'VOID' });
+        }
+      });
+
+      // Log financial Audit
+      await logFinancialAudit(
+        'VOID',
+        payment.id,
+        payment,
+        { ...payment, status: 'VOID' },
+        {
+          cash: activeSegment === 'customers' ? -payment.amountPaid : payment.amountPaid, // Reversing previous cash flow
+          stock: 0,
+          due: payment.amountPaid
+        }
+      );
+
+      // Log system activity
+      await logSystemActivity(
+        "Payment Voided",
+        `Permanently marked payment record ID: ${payment.id} as VOID in ledger. Rolled back dues and reconciled allocations.`
+      );
+
+      setFeedback({
+        message: 'Payment settlement successfully voided and account liabilities restored.',
+        type: 'success'
+      });
+    } catch (err: any) {
+      console.error('Void payment error:', err);
+      let errMsg = 'Failed to void the payment record.';
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, `${activeSegment}Payments/${payment.id}`);
+      } catch (dbErr: any) {
+        errMsg = dbErr.message;
+      }
+      setFeedback({ message: `Access Abort: ${errMsg}`, type: 'error' });
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   // --- Filtering & Searching State ---
   const [personFilter, setPersonFilter] = useState('');
@@ -56,6 +205,24 @@ export default function PaymentLedger() {
 
   // --- Real-time Firestore Sync ---
   useEffect(() => {
+    if (!auth.currentUser) {
+      // Local fallback
+      const savedCustomers = localStorage.getItem('inventory_customers');
+      setCustomers(savedCustomers ? JSON.parse(savedCustomers) : []);
+
+      const savedSuppliers = localStorage.getItem('inventory_suppliers');
+      setSuppliers(savedSuppliers ? JSON.parse(savedSuppliers) : []);
+
+      const savedCustomerPayments = localStorage.getItem('inventory_customer_payments');
+      setCustomerPayments(savedCustomerPayments ? JSON.parse(savedCustomerPayments) : []);
+
+      const savedSupplierPayments = localStorage.getItem('inventory_supplier_payments');
+      setSupplierPayments(savedSupplierPayments ? JSON.parse(savedSupplierPayments) : []);
+
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
 
     // 1. Customers Sync
@@ -177,6 +344,114 @@ export default function PaymentLedger() {
     const transNotes = formData.notes.trim();
 
     try {
+      if (!auth.currentUser) {
+        // Offline / local storage fallback
+        if (activeSegment === 'customers') {
+          const targetCust = customers.find((c) => c.id === formData.personId)!;
+          const prevDue = targetCust.dueBalance;
+          const remDue = Math.max(0, prevDue - amountVal);
+
+          const paymentId = `cp-${Date.now()}`;
+          const newPayment: CustomerPayment = {
+            id: paymentId,
+            customerId: targetCust.id,
+            customerName: targetCust.name,
+            amountPaid: amountVal,
+            previousDue: prevDue,
+            remainingDue: remDue,
+            paymentDate: transDate,
+            notes: transNotes
+          };
+
+          // Update Customer Payment list
+          const savedPayments = localStorage.getItem('inventory_customer_payments') || '[]';
+          const paymentsList = JSON.parse(savedPayments);
+          paymentsList.unshift(newPayment);
+          localStorage.setItem('inventory_customer_payments', JSON.stringify(paymentsList));
+          setCustomerPayments(paymentsList);
+
+          // Update Customers list
+          const savedCustomers = localStorage.getItem('inventory_customers') || '[]';
+          let customersList = JSON.parse(savedCustomers);
+          customersList = customersList.map((c: any) => c.id === targetCust.id ? { ...c, dueBalance: remDue } : c);
+          localStorage.setItem('inventory_customers', JSON.stringify(customersList));
+          setCustomers(customersList);
+
+          // Update Cash Ledger
+          const savedLedger = localStorage.getItem('inventory_cash_ledger') || '[]';
+          const ledgerList = JSON.parse(savedLedger);
+          const cashLedgerId = `cl-${paymentId}`;
+          ledgerList.unshift({
+            id: cashLedgerId,
+            type: 'inflow',
+            source: 'payment',
+            amount: amountVal,
+            referenceId: paymentId,
+            description: `Collected customer payment from "${targetCust.name}"`,
+            timestamp: new Date().toISOString()
+          });
+          localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
+
+          setFeedback({
+            message: `Recorded customer payment of $${amountVal.toFixed(2)} for "${targetCust.name}" locally`,
+            type: 'success'
+          });
+        } else {
+          const targetSupp = suppliers.find((s) => s.id === formData.personId)!;
+          const prevDue = targetSupp.dueBalance ?? 0;
+          const remDue = Math.max(0, prevDue - amountVal);
+
+          const paymentId = `sp-${Date.now()}`;
+          const newPayment: SupplierPayment = {
+            id: paymentId,
+            supplierId: targetSupp.id,
+            supplierName: targetSupp.name,
+            amountPaid: amountVal,
+            previousDue: prevDue,
+            remainingDue: remDue,
+            paymentDate: transDate,
+            notes: transNotes
+          };
+
+          // Update Supplier Payment list
+          const savedPayments = localStorage.getItem('inventory_supplier_payments') || '[]';
+          const paymentsList = JSON.parse(savedPayments);
+          paymentsList.unshift(newPayment);
+          localStorage.setItem('inventory_supplier_payments', JSON.stringify(paymentsList));
+          setSupplierPayments(paymentsList);
+
+          // Update Suppliers list
+          const savedSuppliers = localStorage.getItem('inventory_suppliers') || '[]';
+          let suppliersList = JSON.parse(savedSuppliers);
+          suppliersList = suppliersList.map((s: any) => s.id === targetSupp.id ? { ...s, dueBalance: remDue } : s);
+          localStorage.setItem('inventory_suppliers', JSON.stringify(suppliersList));
+          setSuppliers(suppliersList);
+
+          // Update Cash Ledger
+          const savedLedger = localStorage.getItem('inventory_cash_ledger') || '[]';
+          const ledgerList = JSON.parse(savedLedger);
+          const cashLedgerId = `cl-${paymentId}`;
+          ledgerList.unshift({
+            id: cashLedgerId,
+            type: 'outflow',
+            source: 'payment',
+            amount: amountVal,
+            referenceId: paymentId,
+            description: `Paid supplier payment to "${targetSupp.name}"`,
+            timestamp: new Date().toISOString()
+          });
+          localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
+
+          setFeedback({
+            message: `Recorded supplier payment of $${amountVal.toFixed(2)} for "${targetSupp.name}" locally`,
+            type: 'success'
+          });
+        }
+        setIsSaving(false);
+        setIsFormOpen(false);
+        return;
+      }
+
       if (activeSegment === 'customers') {
         const targetCust = customers.find((c) => c.id === formData.personId)!;
         const prevDue = targetCust.dueBalance;
@@ -645,7 +920,7 @@ export default function PaymentLedger() {
                               ${c.dueBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                             </span>
                           </div>
-                          {c.dueBalance > 0 && (
+                          {(userRole === 'admin' || userRole === 'accountant') && c.dueBalance > 0 && (
                             <button
                               type="button"
                               onClick={() => handleOpenRecordModal(c.id)}
@@ -692,7 +967,7 @@ export default function PaymentLedger() {
                                 ${owed.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                               </span>
                             </div>
-                            {owed > 0 && (
+                            {(userRole === 'admin' || userRole === 'accountant') && owed > 0 && (
                               <button
                                 type="button"
                                 onClick={() => handleOpenRecordModal(s.id)}
@@ -726,14 +1001,16 @@ export default function PaymentLedger() {
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => handleOpenRecordModal()}
-                className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4.5 py-3 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
-              >
-                <PlusCircle className="h-4 w-4" />
-                <span>{activeSegment === 'customers' ? 'Record Customer Pay' : 'Record Supplier Pay'}</span>
-              </button>
+              {(userRole === 'admin' || userRole === 'accountant') && (
+                <button
+                  type="button"
+                  onClick={() => handleOpenRecordModal()}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4.5 py-3 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
+                >
+                  <PlusCircle className="h-4 w-4" />
+                  <span>{activeSegment === 'customers' ? 'Record Customer Pay' : 'Record Supplier Pay'}</span>
+                </button>
+              )}
             </div>
 
             {/* List container */}
@@ -757,7 +1034,7 @@ export default function PaymentLedger() {
                   {(activeSegment === 'customers' ? filteredCustomerPayments : filteredSupplierPayments).map((p) => (
                     <div 
                       key={p.id} 
-                      className="py-4.5 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-4 group transition"
+                      className={`py-4.5 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-4 group transition ${p.status === 'voided' || p.status === 'VOID' ? 'opacity-45 bg-slate-55 bg-slate-50/70 line-through text-slate-400' : ''}`}
                     >
                       {/* Name / Date details */}
                       <div className="space-y-1.5 min-w-0 flex-1">
@@ -800,9 +1077,28 @@ export default function PaymentLedger() {
                         </div>
 
                         {/* State step progress indicator */}
-                        <div className="text-[10px] text-slate-400 border-l border-slate-100 pl-4 space-y-0.5 min-w-[120px]">
+                        <div className="text-[10px] text-slate-400 border-l border-slate-100 pl-4 space-y-0.5 min-w-[124px]">
                           <div>Owed: <span className="font-bold text-slate-600">${p.previousDue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
                           <div>Rem: <span className="font-bold text-slate-800">${p.remainingDue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
+                        </div>
+
+                        {/* Void Control */}
+                        <div className="border-l border-slate-100 pl-4 flex items-center min-w-[70px]">
+                          {p.status === 'voided' || p.status === 'VOID' ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-2 py-0.5 text-[9px] font-mono font-bold text-slate-400 select-none">
+                              VOIDED
+                            </span>
+                          ) : (
+                            (userRole === 'admin' || userRole === 'accountant') && (
+                              <button
+                                type="button"
+                                onClick={() => voidTransaction(p.id)}
+                                className="px-2 py-1 rounded-lg text-[10px] font-bold text-rose-500 hover:text-rose-705 text-rose-600 hover:bg-rose-50 border border-rose-100 cursor-pointer transition uppercase"
+                              >
+                                Void
+                              </button>
+                            )
+                          )}
                         </div>
                       </div>
                     </div>
@@ -978,6 +1274,61 @@ export default function PaymentLedger() {
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {voidConfirmationPayment && (
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-md rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-xl animate-in duration-200 fade-in zoom-in-95"
+            >
+              <div className="flex items-start gap-4">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-50 text-rose-500">
+                  <AlertTriangle className="h-5 w-5" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="font-sans text-sm font-bold tracking-tight text-slate-850">
+                    Confirm Void Payment
+                  </h3>
+                  <p className="text-xs text-slate-550 leading-relaxed">
+                    Are you sure you want to VOID this payment settlement? This will mark it as VOID, rollback associated due balances, and reverse cash ledger entries. This action is irreversible.
+                  </p>
+                  <div className="text-[10px] font-mono text-slate-400 bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-1">
+                    <div><span className="font-bold">Transaction ID:</span> {voidConfirmationPayment.id}</div>
+                    <div>
+                      <span className="font-bold">Entity:</span> {'customerName' in voidConfirmationPayment ? voidConfirmationPayment.customerName : voidConfirmationPayment.supplierName}
+                    </div>
+                    <div><span className="font-bold">Settlement Date:</span> {voidConfirmationPayment.paymentDate}</div>
+                    <div><span className="font-bold">Amount Settled:</span> ${voidConfirmationPayment.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-6 flex justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setVoidConfirmationPayment(null)}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const payToVoid = voidConfirmationPayment;
+                    setVoidConfirmationPayment(null);
+                    await handleVoidPayment(payToVoid);
+                  }}
+                  className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 transition cursor-pointer shadow-xs"
+                >
+                  Yes, Void Settlement
+                </button>
+              </div>
             </motion.div>
           </div>
         )}

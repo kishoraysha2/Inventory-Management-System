@@ -22,7 +22,7 @@ import {
   Printer
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
-import { db } from '../lib/firebase';
+import { db, auth } from '../lib/firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { Sale, Customer, Product, Supplier } from '../types';
 
@@ -71,6 +71,27 @@ export default function ReportsPage() {
 
   // --- Real-Time Sync Streams ---
   useEffect(() => {
+    if (!auth.currentUser) {
+      // Local fallback
+      const savedSales = localStorage.getItem('inventory_sales');
+      setSales(savedSales ? JSON.parse(savedSales) : []);
+
+      const savedProducts = localStorage.getItem('inventory_products');
+      setProducts(savedProducts ? JSON.parse(savedProducts) : []);
+
+      const savedCustomers = localStorage.getItem('inventory_customers');
+      setCustomers(savedCustomers ? JSON.parse(savedCustomers) : []);
+
+      const savedSuppliers = localStorage.getItem('inventory_suppliers');
+      setSuppliers(savedSuppliers ? JSON.parse(savedSuppliers) : []);
+
+      const savedLogs = localStorage.getItem('inventory_logs');
+      setSystemLogs(savedLogs ? JSON.parse(savedLogs) : []);
+
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
 
     const unsubSales = onSnapshot(collection(db, 'sales'), (snapshot) => {
@@ -147,7 +168,7 @@ export default function ReportsPage() {
     return itemDate >= start && itemDate <= end;
   };
 
-  const filteredSales = sales.filter(s => isDateInRange(s.saleDate)).map(s => {
+  const filteredSales = sales.filter(s => isDateInRange(s.saleDate) && s.status !== 'voided' && s.status !== 'VOID').map(s => {
     const subtotal = s.subtotal !== undefined ? s.subtotal : (s.totalAmount - (s.taxAmount ?? 0));
     const totalAmount = s.totalAmount !== undefined ? s.totalAmount : subtotal;
     const taxAmount = s.taxAmount !== undefined ? s.taxAmount : (totalAmount - subtotal);

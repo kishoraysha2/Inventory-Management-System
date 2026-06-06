@@ -19,11 +19,11 @@ import {
   ChevronRight,
   Package
 } from 'lucide-react';
-import { db, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
+import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { Supplier } from '../types';
 
-export default function SupplierManagement() {
+export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- State ---
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(true);
@@ -51,6 +51,14 @@ export default function SupplierManagement() {
 
   // --- Real-time Firestore Sync ---
   useEffect(() => {
+    if (!auth.currentUser) {
+      // Local fallback
+      const saved = localStorage.getItem('inventory_suppliers');
+      setSuppliers(saved ? JSON.parse(saved) : []);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     const unsub = onSnapshot(collection(db, 'suppliers'), (snapshot) => {
@@ -173,6 +181,28 @@ export default function SupplierManagement() {
     };
 
     try {
+      if (!auth.currentUser) {
+        const saved = localStorage.getItem('inventory_suppliers');
+        let currentList: Supplier[] = saved ? JSON.parse(saved) : [];
+        if (editingSupplier) {
+          currentList = currentList.map(s => s.id === supplierId ? finalSupplierData : s);
+        } else {
+          currentList = [finalSupplierData, ...currentList];
+        }
+        localStorage.setItem('inventory_suppliers', JSON.stringify(currentList));
+        setSuppliers(currentList);
+
+        setFeedback({
+          message: editingSupplier 
+            ? `Successfully updated details for supplier "${finalSupplierData.name}" (Local Only)` 
+            : `Permanently registered supplier profile "${finalSupplierData.name}" locally`,
+          type: 'success'
+        });
+        setIsFormOpen(false);
+        setIsSaving(false);
+        return;
+      }
+
       await setDoc(doc(db, 'suppliers', supplierId), finalSupplierData);
       if (!editingSupplier) {
         await logSystemActivity(
@@ -218,58 +248,74 @@ export default function SupplierManagement() {
 
     setIsSaving(true);
     try {
-      // 1. Live Firestore existing purchases history check
-      const purchasesRef = collection(db, 'purchases');
-      const purchasesQuery = query(purchasesRef, where('supplierId', '==', id));
-      const purchasesSnapshot = await getDocs(purchasesQuery);
+      if (!auth.currentUser) {
+        const saved = localStorage.getItem('inventory_suppliers');
+        let currentList: Supplier[] = saved ? JSON.parse(saved) : [];
 
-      // 2. Live Firestore existing payment history check
-      const paymentsRef = collection(db, 'supplierPayments');
-      const paymentsQuery = query(paymentsRef, where('supplierId', '==', id));
-      const paymentsSnapshot = await getDocs(paymentsQuery);
+        const savedPurchases = localStorage.getItem('inventory_purchases') || '[]';
+        const purchasesList = JSON.parse(savedPurchases);
+        const hasPurchases = purchasesList.some((p: any) => p.supplierId === id);
 
-      const hasPurchases = !purchasesSnapshot.empty;
-      const hasPayments = !paymentsSnapshot.empty;
-      const hasBalance = (supplierToDelete.dueBalance ?? 0) > 0;
+        const savedPayments = localStorage.getItem('inventory_supplier_payments') || '[]';
+        const paymentsList = JSON.parse(savedPayments);
+        const hasPayments = paymentsList.some((p: any) => p.supplierId === id);
 
-      if (hasPurchases || hasPayments || hasBalance) {
-        // Has history or balance - mark as inactive
-        const updatedSupplier: Supplier = {
-          ...supplierToDelete,
-          status: 'inactive'
-        };
-        await setDoc(doc(db, 'suppliers', id), updatedSupplier);
+        const hasBalance = (supplierToDelete.dueBalance ?? 0) > 0;
 
-        const reasons: string[] = [];
-        if (hasPurchases) reasons.push("purchase history");
-        if (hasPayments) reasons.push("payment history");
-        if (hasBalance) reasons.push(`outstanding balance due ($${(supplierToDelete.dueBalance ?? 0).toFixed(2)})`);
+        if (hasPurchases || hasPayments || hasBalance) {
+          const updatedSupplier: Supplier = {
+            ...supplierToDelete,
+            status: 'inactive'
+          };
+          currentList = currentList.map(s => s.id === id ? updatedSupplier : s);
+          localStorage.setItem('inventory_suppliers', JSON.stringify(currentList));
+          setSuppliers(currentList);
 
-        const reasonText = reasons.join(", ");
+          const reasons: string[] = [];
+          if (hasPurchases) reasons.push("purchase history");
+          if (hasPayments) reasons.push("payment history");
+          if (hasBalance) reasons.push(`outstanding balance due ($${(supplierToDelete.dueBalance ?? 0).toFixed(2)})`);
 
-        await logSystemActivity(
-          "Supplier inactivated",
-          `Marked supplier "${name}" (ID: ${id}) as inactive because it contains ${reasonText}.`
-        );
-        setFeedback({ 
-          message: `Supplier "${name}" has associated ${reasonText} and has been safely marked as "inactive" instead of being deleted.`, 
-          type: 'success' 
-        });
-      } else {
-        // No history and dueBalance == 0 - permanently purge
-        await deleteDoc(doc(db, 'suppliers', id));
-        await logSystemActivity(
-          "Supplier deleted",
-          `Permanently purged supplier record: ${name}`
-        );
-        setFeedback({ message: `Supplier record "${name}" has been permanently deleted from directory.`, type: 'success' });
+          const reasonText = reasons.join(", ");
+          setFeedback({ 
+            message: `Supplier "${name}" has associated ${reasonText} and has been safely marked as "inactive" locally.`, 
+            type: 'success' 
+          });
+        } else {
+          const updatedSupplier: Supplier = {
+            ...supplierToDelete,
+            status: 'inactive'
+          };
+          currentList = currentList.map(s => s.id === id ? updatedSupplier : s);
+          localStorage.setItem('inventory_suppliers', JSON.stringify(currentList));
+          setSuppliers(currentList);
+          setFeedback({ message: `Supplier record "${name}" has been safely retired as "inactive" locally.`, type: 'success' });
+        }
+        setIsSaving(false);
+        return;
       }
+
+      // Always soft-delete to preserve business integrity and history reports
+      const updatedSupplier: Supplier = {
+        ...supplierToDelete,
+        status: 'inactive'
+      };
+      await setDoc(doc(db, 'suppliers', id), updatedSupplier);
+
+      await logSystemActivity(
+        "Supplier inactivated",
+        `Marked supplier "${name}" (ID: ${id}) as inactive.`
+      );
+      setFeedback({ 
+        message: `Supplier "${name}" has been safely retired and marked as "inactive".`, 
+        type: 'success' 
+      });
     } catch (err: any) {
       console.error("Delete supplier error:", err);
       try {
         handleFirestoreError(err, OperationType.WRITE, `suppliers/${id}`);
       } catch (dbErr: any) {
-        setFeedback({ message: `Purge/Inactivation unsuccessful: ${dbErr.message}`, type: 'error' });
+        setFeedback({ message: `Inactivation unsuccessful: ${dbErr.message}`, type: 'error' });
       }
     } finally {
       setIsSaving(false);
@@ -278,6 +324,9 @@ export default function SupplierManagement() {
 
   // --- Filtered Suppliers ---
   const filteredSuppliers = suppliers.filter(supplier => {
+    // Hide inactive suppliers from standard listings
+    if (supplier.status === 'inactive') return false;
+
     const matchesSearch = 
       supplier.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       supplier.phone.includes(searchQuery) ||
@@ -290,9 +339,9 @@ export default function SupplierManagement() {
   });
 
   // --- Metric Calculations ---
-  const outstandingCostTotal = suppliers.reduce((sum, item) => sum + (item.dueBalance ?? 0), 0);
-  const creditAccountsCount = suppliers.filter(s => (s.paymentType || 'Cash') === 'Credit').length;
-  const cashAccountsCount = suppliers.filter(s => (s.paymentType || 'Cash') === 'Cash').length;
+  const outstandingCostTotal = suppliers.filter(s => s.status !== 'inactive').reduce((sum, item) => sum + (item.dueBalance ?? 0), 0);
+  const creditAccountsCount = suppliers.filter(s => s.status !== 'inactive' && (s.paymentType || 'Cash') === 'Credit').length;
+  const cashAccountsCount = suppliers.filter(s => s.status !== 'inactive' && (s.paymentType || 'Cash') === 'Cash').length;
 
   return (
     <div id="supplier-registry-view" className="space-y-8 animate-fade-in">
@@ -334,7 +383,7 @@ export default function SupplierManagement() {
             {loading ? (
               <div className="h-9 w-12 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">{suppliers.length}</p>
+              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">{suppliers.filter(s => s.status !== 'inactive').length}</p>
             )}
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400">
@@ -411,14 +460,16 @@ export default function SupplierManagement() {
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => openForm()}
-                className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
-              >
-                <Truck className="h-4 w-4" />
-                <span>New Supplier</span>
-              </button>
+              {userRole === 'admin' && (
+                <button
+                  type="button"
+                  onClick={() => openForm()}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
+                >
+                  <Truck className="h-4 w-4" />
+                  <span>New Supplier</span>
+                </button>
+              )}
             </div>
 
             {/* Filter controls and Search Bar */}
@@ -572,24 +623,26 @@ export default function SupplierManagement() {
                           </span>
                         </div>
 
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => openForm(supplier)}
-                            className="p-2 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition"
-                            title="Edit supplier contract terms"
-                          >
-                            <Edit2 className="h-4 w-4" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteClick(supplier)}
-                            className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition"
-                            title="Delete supplier permanently from channels"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </div>
+                        {userRole === 'admin' && (
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => openForm(supplier)}
+                              className="p-2 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition"
+                              title="Edit supplier contract terms"
+                            >
+                              <Edit2 className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteClick(supplier)}
+                              className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition"
+                              title="Delete supplier permanently from channels"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </motion.div>
                   ))}
@@ -633,12 +686,12 @@ export default function SupplierManagement() {
                 <div>
                   <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
                     <span>Active Credit Ratio</span>
-                    <span className="font-bold">{suppliers.length > 0 ? Math.round((creditAccountsCount / suppliers.length) * 100) : 0}%</span>
+                    <span className="font-bold">{suppliers.filter(s => s.status !== 'inactive').length > 0 ? Math.round((creditAccountsCount / suppliers.filter(s => s.status !== 'inactive').length) * 100) : 0}%</span>
                   </div>
                   <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
                     <div 
                       className="bg-indigo-600 h-1.5 rounded-full transition-all duration-500" 
-                      style={{ width: `${suppliers.length > 0 ? (creditAccountsCount / suppliers.length) * 100 : 0}%` }}
+                      style={{ width: `${suppliers.filter(s => s.status !== 'inactive').length > 0 ? (creditAccountsCount / suppliers.filter(s => s.status !== 'inactive').length) * 100 : 0}%` }}
                     ></div>
                   </div>
                 </div>
@@ -777,7 +830,7 @@ export default function SupplierManagement() {
                       type="number"
                       step="0.01"
                       required
-                      disabled={isSaving}
+                      disabled={isSaving || !!editingSupplier}
                       value={formData.dueBalance}
                       onChange={(e) => setFormData({ ...formData, dueBalance: e.target.value })}
                       className={`w-full rounded-xl border py-2.5 pl-8 pr-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50 ${

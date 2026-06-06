@@ -11,21 +11,13 @@ import {
   onSnapshot
 } from 'firebase/firestore';
 
-const firebaseConfig = {
-  apiKey: "AIzaSyB0-BmSBPwGcgtwuq3myaAQpZWWM7Rqt04",
-  authDomain: "inventoryapp-f76ea.firebaseapp.com",
-  projectId: "inventoryapp-f76ea",
-  storageBucket: "inventoryapp-f76ea.firebasestorage.app",
-  messagingSenderId: "260890658689",
-  appId: "1:260890658689:web:9abaab791557a9365bca80",
-  measurementId: "G-SG8402MGKS"
-};
+import firebaseConfig from '../../firebase-applet-config.json';
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 export const db = initializeFirestore(app, {
   ignoreUndefinedProperties: true
-});
+}, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 
 export enum OperationType {
@@ -107,6 +99,51 @@ export async function logSystemActivity(action: string, details: string) {
     return logId;
   } catch (error) {
     console.error("Failed to write to system Logs: ", error);
+  }
+}
+
+export interface FinancialAuditLog {
+  id: string;
+  actionType: 'SALE' | 'PURCHASE' | 'PAYMENT' | 'VOID' | 'SYSTEM';
+  entityId: string;
+  user: string;
+  timestamp: string;
+  beforeState: string;
+  afterState: string;
+  amountImpact: {
+    cash: number;
+    stock: number;
+    due: number;
+  };
+}
+
+export async function logFinancialAudit(
+  actionType: 'SALE' | 'PURCHASE' | 'PAYMENT' | 'VOID' | 'SYSTEM',
+  entityId: string,
+  beforeState: any,
+  afterState: any,
+  amountImpact: { cash: number; stock: number; due: number }
+) {
+  try {
+    const logId = `finlog-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const user = auth.currentUser?.email || 'admin_01@nexus.erp';
+    const timestamp = new Date().toISOString();
+
+    const payload: FinancialAuditLog = {
+      id: logId,
+      actionType,
+      entityId,
+      user,
+      timestamp,
+      beforeState: JSON.stringify(beforeState || {}),
+      afterState: JSON.stringify(afterState || {}),
+      amountImpact
+    };
+
+    await setDoc(doc(db, 'financialLogs', logId), payload);
+    return logId;
+  } catch (err) {
+    console.error("Failed to write financial audit log:", err);
   }
 }
 

@@ -22,7 +22,7 @@ import {
   Archive,
   BookOpen
 } from 'lucide-react';
-import { db, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
+import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { Product } from '../types';
 
@@ -84,7 +84,7 @@ export const INITIAL_PRODUCTS: Product[] = [
   }
 ];
 
-export default function ProductManagement() {
+export default function ProductManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- States ---
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
@@ -115,6 +115,15 @@ export default function ProductManagement() {
 
   // --- Real-time Firestore Sync ---
   useEffect(() => {
+    if (!auth.currentUser) {
+      // Local fallback
+      const saved = localStorage.getItem('inventory_products');
+      const loadedProducts = saved ? JSON.parse(saved) : INITIAL_PRODUCTS;
+      setProducts(loadedProducts);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     const unsub = onSnapshot(collection(db, 'products'), (snapshot) => {
@@ -264,6 +273,43 @@ export default function ProductManagement() {
     };
 
     try {
+      if (!auth.currentUser) {
+        const saved = localStorage.getItem('inventory_products');
+        let currentList: Product[] = saved ? JSON.parse(saved) : INITIAL_PRODUCTS;
+
+        const isSkuDuplicate = currentList.some(p => p.id !== productId && p.sku === finalizedData.sku);
+        if (isSkuDuplicate) {
+          setErrors(prev => ({ ...prev, sku: 'SKU code already exists for another product. Must be unique.' }));
+          setIsSaving(false);
+          return;
+        }
+
+        const isNameDuplicate = currentList.some(p => p.id !== productId && p.name.toLowerCase() === finalizedData.name.toLowerCase());
+        if (isNameDuplicate) {
+          setErrors(prev => ({ ...prev, name: 'A product with this name already exists.' }));
+          setIsSaving(false);
+          return;
+        }
+
+        if (editingProduct) {
+          currentList = currentList.map(p => p.id === productId ? finalizedData : p);
+        } else {
+          currentList = [finalizedData, ...currentList];
+        }
+        localStorage.setItem('inventory_products', JSON.stringify(currentList));
+        setProducts(currentList);
+
+        setFeedback({
+          message: editingProduct 
+            ? `Successfully synchronized product alterations for "${finalizedData.name}" (Local Only)` 
+            : `Permanently logged product record "${finalizedData.name}" locally.`,
+          type: 'success'
+        });
+        setIsFormOpen(false);
+        setIsSaving(false);
+        return;
+      }
+
       // 1. Live Firestore SKU check (Backend validation bypass protection)
       const productsRef = collection(db, 'products');
       const q = query(productsRef, where('sku', '==', finalizedData.sku));
@@ -333,56 +379,68 @@ export default function ProductManagement() {
 
     setIsSaving(true);
     try {
-      // 1. Live Firestore existing sales history check
-      const salesRef = collection(db, 'sales');
-      const salesQuery = query(salesRef, where('productId', '==', id));
-      const salesSnapshot = await getDocs(salesQuery);
+      if (!auth.currentUser) {
+        const saved = localStorage.getItem('inventory_products');
+        let currentList: Product[] = saved ? JSON.parse(saved) : INITIAL_PRODUCTS;
 
-      // 2. Live Firestore existing purchase history check
-      const purchasesRef = collection(db, 'purchases');
-      const purchasesQuery = query(purchasesRef, where('productId', '==', id));
-      const purchasesSnapshot = await getDocs(purchasesQuery);
+        const savedSales = localStorage.getItem('inventory_sales') || '[]';
+        const salesList = JSON.parse(savedSales);
+        const hasSales = salesList.some((s: any) => s.productId === id);
 
-      const hasSales = !salesSnapshot.empty;
-      const hasPurchases = !purchasesSnapshot.empty;
+        const savedPurchases = localStorage.getItem('inventory_purchases') || '[]';
+        const purchasesList = JSON.parse(savedPurchases);
+        const hasPurchases = purchasesList.some((p: any) => p.productId === id);
 
-      if (hasSales || hasPurchases) {
-        // Has history - mark as inactive
-        const updatedProduct: Product = {
-          ...productToDelete,
-          status: 'inactive'
-        };
-        await setDoc(doc(db, 'products', id), updatedProduct);
+        if (hasSales || hasPurchases) {
+          const updatedProduct: Product = {
+            ...productToDelete,
+            status: 'inactive'
+          };
+          currentList = currentList.map(p => p.id === id ? updatedProduct : p);
+          localStorage.setItem('inventory_products', JSON.stringify(currentList));
+          setProducts(currentList);
 
-        let reason = "";
-        if (hasSales && hasPurchases) {
-          reason = "existing sales and purchase history";
-        } else if (hasSales) {
-          reason = "existing sales history";
+          let reason = "";
+          if (hasSales && hasPurchases) {
+            reason = "existing sales and purchase history";
+          } else if (hasSales) {
+            reason = "existing sales history";
+          } else {
+            reason = "existing purchase history";
+          }
+          setFeedback({ message: `Product record "${name}" has ${reason} and has been safely marked as "inactive" instead of being deleted.`, type: 'success' });
         } else {
-          reason = "existing purchase history";
+          const updatedProduct: Product = {
+            ...productToDelete,
+            status: 'inactive'
+          };
+          currentList = currentList.map(p => p.id === id ? updatedProduct : p);
+          localStorage.setItem('inventory_products', JSON.stringify(currentList));
+          setProducts(currentList);
+          setFeedback({ message: `Product record "${name}" has been safely retired as "inactive" instead of being deleted.`, type: 'success' });
         }
-
-        await logSystemActivity(
-          "Product inactivated",
-          `Marked product "${name}" (ID: ${id}) as inactive because it contains ${reason}.`
-        );
-        setFeedback({ message: `Product record "${name}" has ${reason} and has been safely marked as "inactive" instead of being deleted.`, type: 'success' });
-      } else {
-        // No sales or purchase history - permanently purge
-        await deleteDoc(doc(db, 'products', id));
-        await logSystemActivity(
-          "Product deleted",
-          `Permanently purged product catalog record: ${name}`
-        );
-        setFeedback({ message: `Product record "${name}" has been permanently purged from inventory index.`, type: 'success' });
+        setIsSaving(false);
+        return;
       }
+
+      // Always soft-delete to preserve catalog integrity and history references
+      const updatedProduct: Product = {
+        ...productToDelete,
+        status: 'inactive'
+      };
+      await setDoc(doc(db, 'products', id), updatedProduct);
+
+      await logSystemActivity(
+        "Product inactivated",
+        `Marked product "${name}" (ID: ${id}) as inactive.`
+      );
+      setFeedback({ message: `Product record "${name}" has been safely retired and marked as "inactive".`, type: 'success' });
     } catch (err: any) {
       console.error("Delete product error:", err);
       try {
         handleFirestoreError(err, OperationType.WRITE, `products/${id}`);
       } catch (dbErr: any) {
-        setFeedback({ message: `Purge/Inactivation unsuccessful: ${dbErr.message}`, type: 'error' });
+        setFeedback({ message: `Inactivation unsuccessful: ${dbErr.message}`, type: 'error' });
       }
     } finally {
       setIsSaving(false);
@@ -391,6 +449,9 @@ export default function ProductManagement() {
 
   // --- Filter and Search logic ---
   const filteredProducts = products.filter((prod) => {
+    // Hide inactive/retired products from standard lists
+    if (prod.status === 'inactive') return false;
+
     const matchesSearch = 
       prod.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       prod.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -400,9 +461,9 @@ export default function ProductManagement() {
 
     let matchesStockFilter = true;
     if (stockStatusFilter === 'Alert Only') {
-      matchesStockFilter = prod.status !== 'inactive' && prod.currentStock <= prod.minimumStockAlert;
+      matchesStockFilter = prod.currentStock <= prod.minimumStockAlert;
     } else if (stockStatusFilter === 'In Stock') {
-      matchesStockFilter = prod.status !== 'inactive' && prod.currentStock > prod.minimumStockAlert;
+      matchesStockFilter = prod.currentStock > prod.minimumStockAlert;
     }
 
     return matchesSearch && matchesCategory && matchesStockFilter;
@@ -532,14 +593,16 @@ export default function ProductManagement() {
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => openForm()}
-                className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
-              >
-                <Plus className="h-4 w-4" />
-                <span>Add Product</span>
-              </button>
+              {userRole === 'admin' && (
+                <button
+                  type="button"
+                  onClick={() => openForm()}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
+                >
+                  <Plus className="h-4 w-4" />
+                  <span>Add Product</span>
+                </button>
+              )}
             </div>
 
             {/* Filter controls panel */}
@@ -712,25 +775,26 @@ export default function ProductManagement() {
                             )}
                           </div>
 
-                          {/* Quick buttons */}
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => openForm(product)}
-                              className="p-2.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition"
-                              title="Edit product parameters"
-                            >
-                              <Edit2 className="h-4 w-4" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteTrigger(product)}
-                              className="p-2.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition"
-                              title="Permeantly delete product description"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </div>
+                           {userRole === 'admin' && (
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => openForm(product)}
+                                className="p-2.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition"
+                                title="Edit product parameters"
+                              >
+                                <Edit2 className="h-4 w-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteTrigger(product)}
+                                className="p-2.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition"
+                                title="Permeantly delete product description"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                           )}
                         </div>
                       </motion.div>
                     );
@@ -948,7 +1012,7 @@ export default function ProductManagement() {
                     <input
                       type="number"
                       required
-                      disabled={isSaving}
+                      disabled={isSaving || !!editingProduct}
                       value={formData.currentStock}
                       onChange={(e) => setFormData({ ...formData, currentStock: e.target.value })}
                       className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50/50 ${

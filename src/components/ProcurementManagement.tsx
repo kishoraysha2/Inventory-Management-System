@@ -18,11 +18,11 @@ import {
   Filter
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { db, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
+import { db, auth, OperationType, handleFirestoreError, logSystemActivity, logFinancialAudit } from '../lib/firebase';
 import { collection, onSnapshot, doc, runTransaction, setDoc, deleteDoc } from 'firebase/firestore';
 import { Purchase, Supplier, Product } from '../types';
 
-export default function ProcurementManagement() {
+export default function ProcurementManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- States ---
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -36,6 +36,7 @@ export default function ProcurementManagement() {
   const [searchQuery, setSearchQuery] = useState('');
   const [paymentFilter, setPaymentFilter] = useState<'All' | 'Cash' | 'Credit'>('All');
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [voidConfirmationPurchase, setVoidConfirmationPurchase] = useState<Purchase | null>(null);
 
   // --- Form States ---
   const [formData, setFormData] = useState({
@@ -50,6 +51,20 @@ export default function ProcurementManagement() {
 
   // --- Real-time Firestore Sync ---
   useEffect(() => {
+    if (!auth.currentUser) {
+      // Local fallback
+      const savedPurchases = localStorage.getItem('inventory_purchases');
+      setPurchases(savedPurchases ? JSON.parse(savedPurchases) : []);
+
+      const savedSuppliers = localStorage.getItem('inventory_suppliers');
+      setSuppliers(savedSuppliers ? JSON.parse(savedSuppliers) : []);
+
+      const savedProducts = localStorage.getItem('inventory_products');
+      setProducts(savedProducts ? JSON.parse(savedProducts) : []);
+
+      return;
+    }
+
     // 1. Sync Purchases
     const unsubPurchases = onSnapshot(collection(db, 'purchases'), (snapshot) => {
       const purchaseList: Purchase[] = [];
@@ -188,6 +203,116 @@ export default function ProcurementManagement() {
     setFeedback(null);
 
     try {
+      if (!auth.currentUser) {
+        // Local state rollback/calculations for edit mode
+        const savedPurchases = localStorage.getItem('inventory_purchases') || '[]';
+        let purchasesList: Purchase[] = JSON.parse(savedPurchases);
+
+        const savedProducts = localStorage.getItem('inventory_products') || '[]';
+        let productsList: Product[] = JSON.parse(savedProducts);
+
+        const savedSuppliers = localStorage.getItem('inventory_suppliers') || '[]';
+        let suppliersList: Supplier[] = JSON.parse(savedSuppliers);
+
+        // A. Handle product stock edits & supplier balance adjustments if we are editing an existing purchase
+        if (editingPurchase) {
+          // Rollback old product stock
+          productsList = productsList.map(p => {
+            if (p.id === editingPurchase.productId) {
+              return { ...p, currentStock: Math.max(0, (p.currentStock ?? 0) - editingPurchase.quantity) };
+            }
+            return p;
+          });
+
+          // Rollback old supplier due balance
+          if (editingPurchase.paymentType === 'Credit') {
+            suppliersList = suppliersList.map(s => {
+              if (s.id === editingPurchase.supplierId) {
+                return { ...s, dueBalance: Math.max(0, (s.dueBalance ?? 0) - editingPurchase.totalAmount) };
+              }
+              return s;
+            });
+          }
+
+          // Apply current product stock
+          productsList = productsList.map(p => {
+            if (p.id === chosenProduct.id) {
+              return { ...p, currentStock: (p.currentStock ?? 0) + numQty };
+            }
+            return p;
+          });
+
+          // Apply current supplier due balance
+          if (formData.paymentType === 'Credit') {
+            suppliersList = suppliersList.map(s => {
+              if (s.id === chosenSupplier.id) {
+                return { ...s, dueBalance: (s.dueBalance ?? 0) + totalCalc };
+              }
+              return s;
+            });
+          }
+
+          // Update purchase in list
+          purchasesList = purchasesList.map(p => p.id === purchaseId ? finalizedPurchaseData : p);
+        } else {
+          // Adding a brand new purchase
+          // Increase product stock
+          productsList = productsList.map(p => {
+            if (p.id === chosenProduct.id) {
+              return { ...p, currentStock: (p.currentStock ?? 0) + numQty };
+            }
+            return p;
+          });
+
+          // If credit, increase supplier dueBalance
+          if (formData.paymentType === 'Credit') {
+            suppliersList = suppliersList.map(s => {
+              if (s.id === chosenSupplier.id) {
+                return { ...s, dueBalance: (s.dueBalance ?? 0) + totalCalc };
+              }
+              return s;
+            });
+          }
+
+          // Add to Cash Ledger if it was Cash
+          if (formData.paymentType === 'Cash') {
+            const savedLedger = localStorage.getItem('inventory_cash_ledger') || '[]';
+            const ledgerList = JSON.parse(savedLedger);
+            ledgerList.unshift({
+              id: `cl-${purchaseId}`,
+              type: 'outflow',
+              source: 'procurement',
+              amount: totalCalc,
+              referenceId: purchaseId,
+              description: `Purchased "${chosenProduct.name}" from supplier "${chosenSupplier.name}"`,
+              timestamp: new Date().toISOString()
+            });
+            localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
+          }
+
+          purchasesList = [finalizedPurchaseData, ...purchasesList];
+        }
+
+        // Save everything locally and update local states
+        localStorage.setItem('inventory_purchases', JSON.stringify(purchasesList));
+        localStorage.setItem('inventory_products', JSON.stringify(productsList));
+        localStorage.setItem('inventory_suppliers', JSON.stringify(suppliersList));
+
+        setPurchases(purchasesList);
+        setProducts(productsList);
+        setSuppliers(suppliersList);
+
+        setFeedback({
+          message: editingPurchase 
+            ? `Successfully synchronized purchase corrections for "${finalizedPurchaseData.productName}" (Local Only)` 
+            : `Permanently logged procurement transaction for "${finalizedPurchaseData.productName}" locally.`,
+          type: 'success'
+        });
+        setIsFormOpen(false);
+        setIsSaving(false);
+        return;
+      }
+
       await runTransaction(db, async (transaction) => {
         // --- 1. Define all references ---
         const purchaseRef = doc(db, 'purchases', purchaseId);
@@ -345,14 +470,72 @@ export default function ProcurementManagement() {
     }
   };
 
-  // --- Deletion & Rolling Back of Stock/Accounts securely via Transactions ---
-  const handleDeletePurchase = async (purchase: Purchase) => {
-    if (!window.confirm(`Are you sure you want to delete this procurement log of "${purchase.productName}"? This will rollback Supplier and Product parameters.`)) {
+  // --- Transaction Voiding securely via Transactions (instead of deletions) ---
+  const voidTransaction = async (purchaseId: string) => {
+    console.log("VOID triggered", purchaseId);
+    const purchase = purchases.find(p => p.id === purchaseId);
+    if (!purchase) {
+      console.error("Purchase not found for voiding:", purchaseId);
       return;
     }
+    setVoidConfirmationPurchase(purchase);
+  };
 
+  const handleVoidPurchase = async (purchase: Purchase) => {
+    console.log("handleVoidPurchase direct invocation for:", purchase.id);
     setFeedback(null);
     try {
+      if (!auth.currentUser) {
+        // Local Voiding Fallback
+        const savedPurchases = localStorage.getItem('inventory_purchases') || '[]';
+        let purchasesList: Purchase[] = JSON.parse(savedPurchases);
+
+        const savedProducts = localStorage.getItem('inventory_products') || '[]';
+        let productsList: Product[] = JSON.parse(savedProducts);
+
+        const savedSuppliers = localStorage.getItem('inventory_suppliers') || '[]';
+        let suppliersList: Supplier[] = JSON.parse(savedSuppliers);
+
+        productsList = productsList.map(p => {
+          if (p.id === purchase.productId) {
+            return { ...p, currentStock: Math.max(0, (p.currentStock ?? 0) - purchase.quantity) };
+          }
+          return p;
+        });
+
+        if (purchase.paymentType === 'Credit') {
+          suppliersList = suppliersList.map(s => {
+            if (s.id === purchase.supplierId) {
+              return { ...s, dueBalance: Math.max(0, (s.dueBalance ?? 0) - purchase.totalAmount) };
+            }
+            return s;
+          });
+        }
+
+        purchasesList = purchasesList.map(p => p.id === purchase.id ? { ...p, status: 'VOID' } : p);
+
+        if (purchase.paymentType === 'Cash') {
+          const savedLedger = localStorage.getItem('inventory_cash_ledger') || '[]';
+          let ledgerList = JSON.parse(savedLedger);
+          ledgerList = ledgerList.map((l: any) => l.id === `cl-${purchase.id}` ? { ...l, status: 'VOID' } : l);
+          localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
+        }
+
+        localStorage.setItem('inventory_purchases', JSON.stringify(purchasesList));
+        localStorage.setItem('inventory_products', JSON.stringify(productsList));
+        localStorage.setItem('inventory_suppliers', JSON.stringify(suppliersList));
+
+        setPurchases(purchasesList);
+        setProducts(productsList);
+        setSuppliers(suppliersList);
+
+        setFeedback({
+          message: `Procurement log for "${purchase.productName}" has been successfully VOIDED locally.`,
+          type: 'success'
+        });
+        return;
+      }
+
       await runTransaction(db, async (transaction) => {
         const productRef = doc(db, 'products', purchase.productId);
         const supplierRef = doc(db, 'suppliers', purchase.supplierId);
@@ -380,27 +563,42 @@ export default function ProcurementManagement() {
         }
 
         const purchaseRef = doc(db, 'purchases', purchase.id);
-        transaction.delete(purchaseRef);
+        transaction.update(purchaseRef, { status: 'VOID' });
 
-        const cashLedgerRef = doc(db, 'cashLedger', `cl-${purchase.id}`);
-        transaction.delete(cashLedgerRef);
+        if (purchase.paymentType === 'Cash') {
+          const cashLedgerRef = doc(db, 'cashLedger', `cl-${purchase.id}`);
+          transaction.update(cashLedgerRef, { status: 'VOID' });
+        }
       });
 
-      // Log deletions
+      // Log financial Audit
+      await logFinancialAudit(
+        'VOID',
+        purchase.id,
+        purchase,
+        { ...purchase, status: 'VOID' },
+        {
+          cash: purchase.paymentType === 'Cash' ? -purchase.totalAmount : 0,
+          stock: -purchase.quantity,
+          due: purchase.paymentType === 'Credit' ? -purchase.totalAmount : 0
+        }
+      );
+
+      // Log system/void activity
       await logSystemActivity(
-        "Procurement Purged",
-        `Deleted purchase record ID: ${purchase.id}. Restored associated stock level and account balances.`
+        "Procurement Voided",
+        `Permanently marked purchase record ID: ${purchase.id} as VOID. Restored associated stock levels and supplier liabilities.`
       );
 
       setFeedback({
-        message: `Procurement log for "${purchase.productName}" has been successfully deleted with active stock rollback applied.`,
+        message: `Procurement log for "${purchase.productName}" has been successfully VOIDED. Stocks and supplier due credits are reversed securely.`,
         type: 'success'
       });
     } catch (err: any) {
-      console.error("Purge operations abort:", err);
-      let errMsg = 'Failed to clear the transaction record.';
+      console.error("Void operations abort:", err);
+      let errMsg = 'Failed to void the transaction record.';
       try {
-        handleFirestoreError(err, OperationType.DELETE, `purchases/${purchase.id}`);
+        handleFirestoreError(err, OperationType.UPDATE, `purchases/${purchase.id}`);
       } catch (dbErr: any) {
         errMsg = dbErr.message;
       }
@@ -409,8 +607,9 @@ export default function ProcurementManagement() {
   };
 
   // --- Calculate Procurement Intelligence parameters ---
-  const totalPurchasesVolume = purchases.reduce((sum, p) => sum + p.totalAmount, 0);
-  const totalUnitsProcured = purchases.reduce((sum, p) => sum + p.quantity, 0);
+  const activePurchases = purchases.filter(p => p.status !== 'voided' && p.status !== 'VOID');
+  const totalPurchasesVolume = activePurchases.reduce((sum, p) => sum + p.totalAmount, 0);
+  const totalUnitsProcured = activePurchases.reduce((sum, p) => sum + p.quantity, 0);
   const totalCreditDueOutstanding = suppliers.reduce((sum, s) => sum + (s.dueBalance ?? 0), 0);
 
   // --- Listing Filters ---
@@ -550,14 +749,16 @@ export default function ProcurementManagement() {
             ))}
           </div>
 
-          <button
-            type="button"
-            onClick={() => openForm()}
-            className="inline-flex items-center gap-1.5 cursor-pointer bg-indigo-650 bg-indigo-600 hover:bg-indigo-705 hover:bg-indigo-700 text-white rounded-xl px-4 py-2.5 text-xs font-bold transition shadow-xs hover:shadow-sm"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Enter Purchase Order</span>
-          </button>
+          {(userRole === 'admin' || userRole === 'accountant') && (
+            <button
+              type="button"
+              onClick={() => openForm()}
+              className="inline-flex items-center gap-1.5 cursor-pointer bg-indigo-650 bg-indigo-600 hover:bg-indigo-705 hover:bg-indigo-700 text-white rounded-xl px-4 py-2.5 text-xs font-bold transition shadow-xs hover:shadow-sm"
+            >
+              <Plus className="h-4 w-4" />
+              <span>Enter Purchase Order</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -602,7 +803,7 @@ export default function ProcurementManagement() {
               </thead>
               <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
                 {filteredPurchases.map((purchase) => (
-                  <tr key={purchase.id} className="hover:bg-slate-50/50 transition duration-100 group">
+                  <tr key={purchase.id} className={`hover:bg-slate-50/50 transition duration-100 group ${purchase.status === 'voided' || purchase.status === 'VOID' ? 'opacity-45 bg-slate-50/50 line-through text-slate-400' : ''}`}>
                     <td className="py-4 px-6 sm:px-8 font-mono text-slate-500 font-bold whitespace-nowrap">
                       {new Date(purchase.purchaseDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
                     </td>
@@ -634,25 +835,25 @@ export default function ProcurementManagement() {
                         {purchase.paymentType}
                       </span>
                     </td>
-                    <td className="py-4 px-6 sm:px-8 text-center">
-                      <div className="flex items-center justify-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => openForm(purchase)}
-                          title="Edit transaction order"
-                          className="p-2 text-slate-405 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 rounded-xl transition cursor-pointer"
-                        >
-                          <Edit3 className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeletePurchase(purchase)}
-                          title="Purge transaction from registry and revert stocks"
-                          className="p-2 text-slate-405 text-slate-500 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 rounded-xl transition cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
+                    <td className="py-4 px-6 sm:px-8 text-center whitespace-nowrap">
+                      {purchase.status === 'voided' || purchase.status === 'VOID' ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-2.5 py-0.5 text-[9px] font-mono font-bold text-slate-400">
+                          VOIDED
+                        </span>
+                      ) : (
+                        <div className="flex items-center justify-center gap-1.5">
+                          {userRole === 'admin' && (
+                            <button
+                              type="button"
+                              onClick={() => voidTransaction(purchase.id)}
+                              title="Void procurement log and reverse parameters"
+                              className="p-2 text-slate-500 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 rounded-xl transition cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -882,6 +1083,59 @@ export default function ProcurementManagement() {
                 </form>
               </motion.div>
             </div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {voidConfirmationPurchase && (
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-md rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-xl animate-in duration-200 fade-in zoom-in-95"
+            >
+              <div className="flex items-start gap-4">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-50 text-rose-500">
+                  <AlertTriangle className="h-5 w-5" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="font-sans text-sm font-bold tracking-tight text-slate-850">
+                    Confirm Void Procurement Log
+                  </h3>
+                  <p className="text-xs text-slate-550 leading-relaxed">
+                    Are you sure you want to VOID this procurement log? This will permanently mark it as VOID, rollback stock, reverse liabilities, and flag the ledger record. This action is irreversible.
+                  </p>
+                  <div className="text-[10px] font-mono text-slate-400 bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-1">
+                    <div><span className="font-bold">Purchase ID:</span> {voidConfirmationPurchase.id}</div>
+                    <div><span className="font-bold">Product Name:</span> {voidConfirmationPurchase.productName} (x{voidConfirmationPurchase.quantity})</div>
+                    <div><span className="font-bold">Log Date:</span> {new Date(voidConfirmationPurchase.purchaseDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</div>
+                    <div><span className="font-bold">Grand Total:</span> ${voidConfirmationPurchase.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-6 flex justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setVoidConfirmationPurchase(null)}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const purchaseToVoid = voidConfirmationPurchase;
+                    setVoidConfirmationPurchase(null);
+                    await handleVoidPurchase(purchaseToVoid);
+                  }}
+                  className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 transition cursor-pointer shadow-xs"
+                >
+                  Yes, Void Procurement
+                </button>
+              </div>
+            </motion.div>
           </div>
         )}
       </AnimatePresence>

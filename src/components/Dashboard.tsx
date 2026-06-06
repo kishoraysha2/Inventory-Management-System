@@ -24,11 +24,11 @@ import {
   AlertCircle,
   Trash2
 } from 'lucide-react';
-import { db, OperationType, handleFirestoreError } from '../lib/firebase';
+import { db, auth, OperationType, handleFirestoreError } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
 import { Sale, Customer, Product, Supplier, Capital, CashLedgerEntry } from '../types';
 
-export default function Dashboard() {
+export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- States ---
   const [sales, setSales] = useState<Sale[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -41,7 +41,6 @@ export default function Dashboard() {
   const [timePeriod, setTimePeriod] = useState<'all' | 'thirty_days'>('all');
 
   // --- Simulated Identity Policy Control ---
-  const [userRole, setUserRole] = useState<'admin' | 'employee'>('admin');
   const [isCapitalModalOpen, setIsCapitalModalOpen] = useState(false);
   const [newCapAmount, setNewCapAmount] = useState('');
   const [newCapDate, setNewCapDate] = useState(new Date().toISOString().split('T')[0]);
@@ -50,8 +49,8 @@ export default function Dashboard() {
 
   const handleSaveCapital = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (userRole !== 'admin') {
-      setCapFeedback({ message: 'Access Denied: Only Administrator users can add or modify business Capital.', type: 'error' });
+    if (userRole !== 'admin' && userRole !== 'accountant') {
+      setCapFeedback({ message: 'Access Denied: Only Admin and Accountant users can add or modify business Capital.', type: 'error' });
       return;
     }
     const amt = parseFloat(newCapAmount);
@@ -61,6 +60,39 @@ export default function Dashboard() {
     }
     try {
       const capId = `cap-${Date.now()}`;
+      if (!auth.currentUser) {
+        // Offline / local storage fallback
+        const savedCapital = localStorage.getItem('inventory_capital') || '[]';
+        const capitalList = JSON.parse(savedCapital);
+        const newCap = {
+          id: capId,
+          amount: amt,
+          date: newCapDate,
+          note: newCapNote,
+          createdBy: 'admin_01'
+        };
+        capitalList.push(newCap);
+        localStorage.setItem('inventory_capital', JSON.stringify(capitalList));
+        setCapital(capitalList);
+
+        const savedLogs = localStorage.getItem('inventory_system_logs') || '[]';
+        const logsList = JSON.parse(savedLogs);
+        logsList.unshift({
+          id: `log-${Date.now()}`,
+          action: 'Capital contribution',
+          user: 'admin_01',
+          timestamp: new Date().toISOString(),
+          details: `Injected manual capital contribution of $${amt.toLocaleString()} on ${newCapDate} (${newCapNote || 'No notes'})`
+        });
+        localStorage.setItem('inventory_system_logs', JSON.stringify(logsList));
+        setSystemLogs(logsList);
+
+        setCapFeedback({ message: 'Capital investment successfully logged locally!', type: 'success' });
+        setNewCapAmount('');
+        setNewCapNote('');
+        return;
+      }
+
       await setDoc(doc(db, 'capital', capId), {
         id: capId,
         amount: amt,
@@ -91,6 +123,27 @@ export default function Dashboard() {
     }
     if (confirm('Delete this capital contribution record?')) {
       try {
+        if (!auth.currentUser) {
+          const savedCapital = localStorage.getItem('inventory_capital') || '[]';
+          let capitalList = JSON.parse(savedCapital);
+          capitalList = capitalList.filter((item: any) => item.id !== id);
+          localStorage.setItem('inventory_capital', JSON.stringify(capitalList));
+          setCapital(capitalList);
+
+          const savedLogs = localStorage.getItem('inventory_system_logs') || '[]';
+          const logsList = JSON.parse(savedLogs);
+          logsList.unshift({
+            id: `log-${Date.now()}`,
+            action: 'Capital deletion',
+            user: 'admin_01',
+            timestamp: new Date().toISOString(),
+            details: `Deleted capital contribution record: ${id}`
+          });
+          localStorage.setItem('inventory_system_logs', JSON.stringify(logsList));
+          setSystemLogs(logsList);
+          return;
+        }
+
         await deleteDoc(doc(db, 'capital', id));
         // Log this system operation
         await setDoc(doc(db, 'Logs', `log-${Date.now()}`), {
@@ -108,6 +161,33 @@ export default function Dashboard() {
 
   // --- Real-time Sync listeners ---
   useEffect(() => {
+    if (!auth.currentUser) {
+      // Local fallback
+      const savedSales = localStorage.getItem('inventory_sales');
+      setSales(savedSales ? JSON.parse(savedSales) : []);
+
+      const savedProducts = localStorage.getItem('inventory_products');
+      setProducts(savedProducts ? JSON.parse(savedProducts) : []);
+
+      const savedCustomers = localStorage.getItem('inventory_customers');
+      setCustomers(savedCustomers ? JSON.parse(savedCustomers) : []);
+
+      const savedSuppliers = localStorage.getItem('inventory_suppliers');
+      setSuppliers(savedSuppliers ? JSON.parse(savedSuppliers) : []);
+
+      const savedLogs = localStorage.getItem('inventory_system_logs');
+      setSystemLogs(savedLogs ? JSON.parse(savedLogs) : []);
+
+      const savedLedger = localStorage.getItem('inventory_cash_ledger');
+      setCashLedger(savedLedger ? JSON.parse(savedLedger) : []);
+
+      const savedCapital = localStorage.getItem('inventory_capital');
+      setCapital(savedCapital ? JSON.parse(savedCapital) : []);
+
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
 
     // 1. Sync Sales
@@ -215,50 +295,56 @@ export default function Dashboard() {
   const refDate = new Date(simulationDateStr);
   const todayStr = refDate.toISOString().split('T')[0]; // "2026-06-01"
 
-  // 1. Today's Sales
+  // 1. Today's Sales (excluding VOID/voided)
   const todaysSalesValue = sales.filter(s => {
-    if (!s.saleDate) return false;
+    if (!s.saleDate || s.status === 'VOID' || s.status === 'voided') return false;
     const datePart = s.saleDate.split('T')[0];
     return datePart === todayStr;
   }).reduce((sum, s) => sum + s.totalAmount, 0);
 
-  // 2. Monthly Sales (June 2026)
+  // 2. Monthly Sales (June 2026) (excluding VOID/voided)
   const currentMonthNum = refDate.getMonth(); // 5 (June)
   const currentYearNum = refDate.getFullYear(); // 2026
   const monthlySalesValue = sales.filter(s => {
-    if (!s.saleDate) return false;
+    if (!s.saleDate || s.status === 'VOID' || s.status === 'voided') return false;
     const d = new Date(s.saleDate);
     return d.getMonth() === currentMonthNum && d.getFullYear() === currentYearNum;
   }).reduce((sum, s) => sum + s.totalAmount, 0);
 
-  // 3. Total Profit (based strictly on subtotal minus costOfGoodsSold, excluding tax)
-  const salesProfitValue = sales.reduce((sum, s) => {
+  // 3. Total Profit (based strictly on subtotal minus costOfGoodsSold, excluding tax) (excluding VOID/voided)
+  const salesProfitValue = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided').reduce((sum, s) => {
     const saleSubtotal = s.subtotal ?? (s.quantity * (s.unitPrice ?? s.sellingPrice));
     const saleCOGS = s.costOfGoodsSold !== undefined ? s.costOfGoodsSold : (s.productPurchasePriceAtSale !== undefined ? s.productPurchasePriceAtSale : s.sellingPrice * 0.6) * s.quantity;
     return sum + (saleSubtotal - saleCOGS);
   }, 0);
 
   // 4. Total Purchase (Valuation of stock currently acquired in our inventory)
-  const totalPurchaseValue = products.reduce((sum, p) => {
-    return sum + (p.purchasePrice * p.currentStock);
-  }, 0);
+  const totalPurchaseValue = products
+    .filter(p => p.status !== 'inactive')
+    .reduce((sum, p) => {
+      return sum + (p.purchasePrice * p.currentStock);
+    }, 0);
 
   // 5. Customer Due (Sum of receivables)
-  const totalCustomerDue = customers.reduce((sum, c) => sum + (c.dueBalance || 0), 0);
+  const totalCustomerDue = customers
+    .filter(c => c.status !== 'inactive')
+    .reduce((sum, c) => sum + (c.dueBalance || 0), 0);
 
   // 6. Supplier Due (Sum of payables)
-  const totalSupplierDue = suppliers.reduce((sum, s) => sum + (s.dueBalance || 0), 0);
+  const totalSupplierDue = suppliers
+    .filter(s => s.status !== 'inactive')
+    .reduce((sum, s) => sum + (s.dueBalance || 0), 0);
 
   // 7. Cash accounting calculations with capital support
   const startingCapital = capital.reduce((sum, entry) => sum + entry.amount, 0);
   const initialCapital = startingCapital;
 
   const totalInflow = cashLedger
-    .filter(entry => entry.type === 'inflow')
+    .filter(entry => entry.type === 'inflow' && entry.status !== 'voided' && entry.status !== 'VOID')
     .reduce((sum, entry) => sum + entry.amount, 0);
 
   const totalOutflow = cashLedger
-    .filter(entry => entry.type === 'outflow')
+    .filter(entry => entry.type === 'outflow' && entry.status !== 'voided' && entry.status !== 'VOID')
     .reduce((sum, entry) => sum + entry.amount, 0);
 
   const cashInHand = initialCapital + totalInflow - totalOutflow;
@@ -268,8 +354,8 @@ export default function Dashboard() {
   const lowStockProductsList = products.filter(p => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert);
   const lowStockCount = lowStockProductsList.length;
 
-  // Additional stats: Overall profit margin percentage (excluding tax)
-  const overallSalesSubtotal = sales.reduce((sum, s) => sum + (s.subtotal ?? (s.quantity * (s.unitPrice ?? s.sellingPrice))), 0);
+  // Additional stats: Overall profit margin percentage (excluding tax) (excluding VOID/voided)
+  const overallSalesSubtotal = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided').reduce((sum, s) => sum + (s.subtotal ?? (s.quantity * (s.unitPrice ?? s.sellingPrice))), 0);
   const averageProfitMargin = overallSalesSubtotal > 0 ? (salesProfitValue / overallSalesSubtotal) * 100 : 0;
 
   // --- Dynamic Graph Coordinates Processing (Pure Vector Line Graphs) ---
@@ -284,8 +370,8 @@ export default function Dashboard() {
     dailySalesTrendMap[dateString] = 0;
   }
 
-  // Populate sales into trend
-  sales.forEach(s => {
+  // Populate sales into trend (excluding VOID/voided)
+  sales.filter(s => s.status !== 'VOID' && s.status !== 'voided').forEach(s => {
     if (!s.saleDate) return;
     const dateString = s.saleDate.split('T')[0];
     if (dailySalesTrendMap[dateString] !== undefined) {
@@ -352,15 +438,10 @@ export default function Dashboard() {
           
           <div className="space-y-2 pt-2">
             <div className="text-xs text-slate-500 flex items-center gap-2">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Simulating:</span>
-              <select 
-                value={userRole} 
-                onChange={(e) => setUserRole(e.target.value as 'admin' | 'employee')}
-                className="bg-white border border-slate-200 text-slate-700 font-bold rounded-lg px-2 py-1 text-xs focus:ring-1 focus:ring-emerald-400 cursor-pointer"
-              >
-                <option value="admin">System Admin</option>
-                <option value="employee">Standard Employee</option>
-              </select>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Role:</span>
+              <span className="bg-emerald-50 text-emerald-750 font-mono font-bold tracking-wide uppercase px-2 py-0.5 rounded-md border border-emerald-100">
+                {userRole}
+              </span>
             </div>
             <button 
               onClick={() => setIsCapitalModalOpen(true)}
@@ -440,7 +521,7 @@ export default function Dashboard() {
               <Layers className="h-4 w-4 text-indigo-500 opacity-70" />
             </div>
             <h3 className="text-3xl font-extrabold tracking-tight text-slate-900 pt-1">
-              {products.length} Items
+              {products.filter(p => p.status !== 'inactive').length} Items
             </h3>
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
@@ -461,7 +542,7 @@ export default function Dashboard() {
               <Users className="h-4 w-4 text-emerald-500 opacity-70" />
             </div>
             <h3 className="text-3xl font-extrabold tracking-tight text-slate-900 pt-1">
-              {customers.length} Profiles
+              {customers.filter(c => c.status !== 'inactive').length} Profiles
             </h3>
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
@@ -482,7 +563,7 @@ export default function Dashboard() {
               <Truck className="h-4 w-4 text-sky-500 opacity-70" />
             </div>
             <h3 className="text-3xl font-extrabold tracking-tight text-slate-900 pt-1">
-              {suppliers.length} Partners
+              {suppliers.filter(s => s.status !== 'inactive').length} Partners
             </h3>
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
@@ -902,33 +983,24 @@ export default function Dashboard() {
               <div className="p-6 overflow-y-auto space-y-6 flex-1">
                 {/* Simulated Identity Control info */}
                 <div className={`p-4 rounded-2xl flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 border ${
-                  userRole === 'admin' ? 'bg-emerald-50/50 border-emerald-100' : 'bg-amber-50/50 border-amber-100'
+                  userRole === 'admin' 
+                    ? 'bg-emerald-50/50 border-emerald-100' 
+                    : userRole === 'accountant'
+                    ? 'bg-indigo-50/50 border-indigo-100'
+                    : 'bg-amber-50/50 border-amber-100'
                 }`}>
                   <div className="space-y-1">
                     <p className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                      <AlertTriangle className={`w-4 h-4 ${userRole === 'admin' ? 'text-emerald-600' : 'text-amber-600'}`} />
+                      <AlertTriangle className={`w-4 h-4 ${userRole === 'admin' ? 'text-emerald-600' : userRole === 'accountant' ? 'text-indigo-600' : 'text-amber-600'}`} />
                       <span>Security Clearance Auditing</span>
                     </p>
                     <p className="text-[11px] text-slate-500 leading-relaxed">
-                      {userRole === 'admin' 
-                        ? 'Simulating User: admin_01 (Administrator authorized to write/edit initial business capital policies).'
-                        : 'Simulating User: Standard Employee (Read-only clearance. Capital write capability restricted).'
+                      Active Signed-In ERP Role: <span className="font-mono font-bold uppercase text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-1.5 py-0.5">{userRole}</span>.
+                      {userRole === 'admin' || userRole === 'accountant'
+                        ? ' Authorized to log new capital contributions.'
+                        : ' Capital write capabilities restricted for your role.'
                       }
                     </p>
-                  </div>
-                  <div className="shrink-0 flex items-center gap-1.5">
-                    <span className="text-[10px] uppercase font-bold text-slate-400">Swap Role:</span>
-                    <select 
-                      value={userRole} 
-                      onChange={(e) => {
-                        setUserRole(e.target.value as 'admin' | 'employee');
-                        setCapFeedback(null);
-                      }}
-                      className="bg-white border border-slate-200 text-slate-850 font-bold rounded-lg px-2.5 py-1.5 text-xs focus:ring-1 focus:ring-slate-400 cursor-pointer text-slate-800"
-                    >
-                      <option value="admin">System Admin</option>
-                      <option value="employee">Standard Employee</option>
-                    </select>
                   </div>
                 </div>
 

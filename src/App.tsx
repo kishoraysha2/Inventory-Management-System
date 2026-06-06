@@ -26,6 +26,16 @@ import {
   BarChart3,
   ShoppingCart,
   CreditCard,
+  Scale,
+  Lock,
+  Mail,
+  LogOut,
+  Key,
+  Shield,
+  Loader2,
+  Eye,
+  EyeOff,
+  UserPlus
 } from 'lucide-react';
 
 import { Product, ActivityLog, Supplier, CashLedgerEntry, Capital } from './types';
@@ -42,8 +52,11 @@ import SalesManagement from './components/SalesManagement';
 import ProcurementManagement from './components/ProcurementManagement';
 import Dashboard from './components/Dashboard';
 import ReportsPage from './components/ReportsPage';
-import { db, OperationType, handleFirestoreError, logSystemActivity } from './lib/firebase';
-import { collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
+import BalanceSheet from './components/BalanceSheet';
+import { usePermission } from './hooks/usePermission';
+import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from './lib/firebase';
+import { collection, onSnapshot, doc, setDoc, deleteDoc, getDoc, updateDoc } from 'firebase/firestore';
+import { signOut, onAuthStateChanged, User, GoogleAuthProvider, signInWithPopup, signInAnonymously, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 
 export default function App() {
   // --- Core Persistent State ---
@@ -85,13 +98,294 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports' | 'balancesheet' | 'users'>('dashboard');
+
+  // --- Core Authentication State ---
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [currentUserProfile, setCurrentUserProfile] = useState<{ role: 'admin' | 'accountant' | 'cashier' | 'viewer'; name: string; email: string } | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [usersList, setUsersList] = useState<any[]>([]);
+
+  // --- Auth View Controls ---
+  const [authFeedback, setAuthFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  // --- Email/Password Authentication States ---
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [isSignUpMode, setIsSignUpMode] = useState(false);
+  const [isAuthSubmitLoading, setIsAuthSubmitLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+
+  const permissions = usePermission(currentUserProfile);
+  const userRole = permissions.role;
+  const canEditInventory = permissions.canEditInventory;
+
+  // --- Observe Authentication State ---
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setCurrentUser(user);
+      if (user) {
+        if (user.isAnonymous) {
+          const savedRole = localStorage.getItem('demo_user_role') || 'viewer';
+          setCurrentUserProfile({
+            role: savedRole as any,
+            name: savedRole === 'admin' ? 'Kishor Aysha (Admin Bypass)' : 'Demo Guest',
+            email: savedRole === 'admin' ? 'kishor.aysha2@gmail.com' : 'demo-guest@example.com'
+          });
+          setIsAuthLoading(false);
+          return;
+        }
+
+        const userRef = doc(db, 'users', user.uid);
+        try {
+          const docSnap = await getDoc(userRef);
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            if (user.email === 'kishor.aysha2@gmail.com' && data.role !== 'admin') {
+              await setDoc(userRef, { role: 'admin' }, { merge: true });
+              setCurrentUserProfile({
+                role: 'admin',
+                name: data.name || 'Kishor Aysha (Admin)',
+                email: user.email
+              });
+            } else {
+              setCurrentUserProfile({
+                role: data.role || 'viewer',
+                name: data.name || user.email?.split('@')[0] || 'User',
+                email: data.email || user.email || ''
+              });
+            }
+          } else {
+            const defaultRole = user.email === 'kishor.aysha2@gmail.com' ? 'admin' : 'viewer';
+            await setDoc(userRef, {
+              name: user.email === 'kishor.aysha2@gmail.com' ? 'Kishor Aysha (Admin)' : (user.email?.split('@')[0] || 'User'),
+              email: user.email || '',
+              role: 'viewer',
+              createdAt: new Date().toISOString()
+            });
+
+            if (user.email === 'kishor.aysha2@gmail.com') {
+              await updateDoc(userRef, { role: 'admin' });
+            }
+
+            setCurrentUserProfile({
+              role: defaultRole as any,
+              name: user.email === 'kishor.aysha2@gmail.com' ? 'Kishor Aysha (Admin)' : (user.email?.split('@')[0] || 'User'),
+              email: user.email || ''
+            });
+          }
+        } catch (err) {
+          console.error("Failed to load user profile document:", err);
+          setCurrentUserProfile({
+            role: user.email === 'kishor.aysha2@gmail.com' ? 'admin' : 'viewer',
+            name: user.email?.split('@')[0] || 'User',
+            email: user.email || ''
+          });
+        }
+      } else {
+        setCurrentUserProfile(null);
+      }
+      setIsAuthLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // --- Authentication Actions ---
+  const handleEmailPasswordAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthFeedback(null);
+    if (!authEmail.trim() || !authPassword) {
+      setAuthFeedback({ message: 'Please enter both an email and a password.', type: 'error' });
+      return;
+    }
+
+    setIsAuthSubmitLoading(true);
+    try {
+      if (isSignUpMode) {
+        await createUserWithEmailAndPassword(auth, authEmail.trim(), authPassword);
+        setFeedback({ message: 'Welcome! Your user profile has been created successfully.', type: 'success' });
+      } else {
+        await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword);
+        setFeedback({ message: 'Access granted! Signed in successfully.', type: 'success' });
+      }
+    } catch (err: any) {
+      console.error("Email/Password Auth Exception:", err);
+      let errMsg = 'An unexpected credential authentication issue has occurred.';
+      const errorCode = err.code;
+      
+      if (errorCode === 'auth/invalid-email') {
+        errMsg = 'Invalid email address. Please make sure the format is valid.';
+      } else if (errorCode === 'auth/wrong-password') {
+        errMsg = 'Wrong password. Please enter correct credentials and retry.';
+      } else if (errorCode === 'auth/user-not-found') {
+        errMsg = 'User not found. Please register an account first.';
+      } else if (errorCode === 'auth/email-already-in-use') {
+        errMsg = 'Email already exists. Please log in instead or use another address.';
+      } else if (errorCode === 'auth/weak-password') {
+        errMsg = 'Weak password. Password must contain at least 6 characters.';
+      } else if (errorCode === 'auth/invalid-credential') {
+        errMsg = 'Invalid email or password. Please verify your credentials and try again.';
+      } else if (err.message) {
+        errMsg = err.message;
+      }
+      setAuthFeedback({ message: errMsg, type: 'error' });
+    } finally {
+      setIsAuthSubmitLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setAuthFeedback(null);
+    try {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      await signInWithPopup(auth, provider);
+      setFeedback({ message: 'Welcome! Signed in successfully with Google.', type: 'success' });
+    } catch (err: any) {
+      console.error("Google Auth Exception:", err);
+      let errMsg = err.message || 'An unexpected Google login error occurred.';
+      if (err.code === 'auth/popup-closed-by-user') {
+        errMsg = 'The login popup was closed before completion. If browser popup blocking is active inside the review frame, please click "Sandbox Admin" or "Guest Viewer" below.';
+      } else if (err.code === 'auth/blocked-by-popup-triggerer') {
+        errMsg = 'Popup was blocked by your browser. Please allow popups for this site or use our direct sandbox bypass buttons below.';
+      }
+      setAuthFeedback({ message: errMsg, type: 'error' });
+    }
+  };
+
+  const handleAnonymousSignIn = async () => {
+    setAuthFeedback(null);
+    try {
+      localStorage.setItem('demo_user_role', 'viewer');
+      await signInAnonymously(auth);
+      setFeedback({ message: 'Anonymous session established. Welcome Guest!', type: 'success' });
+    } catch (err: any) {
+      console.error("Anonymous Auth Exception:", err);
+      // Fallback to local state-only mock if completely offline or blocked
+      setCurrentUser({
+        uid: 'offline-guest-uid',
+        email: 'guest@example.com',
+        displayName: 'Guest Viewer'
+      } as any);
+      setCurrentUserProfile({
+        role: 'viewer',
+        name: 'Guest Viewer',
+        email: 'guest@example.com'
+      });
+      setFeedback({ message: 'Offline guest session established.', type: 'success' });
+    }
+  };
+
+  const handleDemoAdminSignIn = async () => {
+    setAuthFeedback(null);
+    try {
+      localStorage.setItem('demo_user_role', 'admin');
+      await signInAnonymously(auth);
+      setFeedback({ message: 'Sandbox Admin session established via secure gateway.', type: 'success' });
+    } catch (err: any) {
+      console.error("Demo Admin Auth Exception:", err);
+      // Fallback to local state-only mock if completely offline or blocked
+      setCurrentUser({
+        uid: 'offline-admin-uid',
+        email: 'kishor.aysha2@gmail.com',
+        displayName: 'Kishor Aysha (Admin Bypass)'
+      } as any);
+      setCurrentUserProfile({
+        role: 'admin',
+        name: 'Kishor Aysha (Admin Bypass)',
+        email: 'kishor.aysha2@gmail.com'
+      });
+      setFeedback({ message: 'Offline Sandbox Admin session established.', type: 'success' });
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      setActiveTab('dashboard');
+      setFeedback({ message: 'Logged out successfully.', type: 'success' });
+    } catch (err: any) {
+      console.error("Sign Out Error:", err);
+    }
+  };
+
+  const handleUpdateUserRole = async (targetUid: string, targetEmail: string, newRole: 'admin' | 'accountant' | 'cashier' | 'viewer') => {
+    if (userRole !== 'admin') {
+      setFeedback({ message: 'Access Denied: Only system administrators can adjust security clearance.', type: 'error' });
+      return;
+    }
+
+    try {
+      const targetUser = usersList.find(u => u.uid === targetUid);
+      const previousRole = targetUser?.role || 'viewer';
+      const targetName = targetUser?.name || 'Anonymous';
+      const changedByUid = auth.currentUser?.uid || 'unknown-uid';
+      const changedByUserName = currentUserProfile?.name || auth.currentUser?.displayName || auth.currentUser?.email || 'Anonymous Admin';
+      const timestampString = new Date().toISOString();
+
+      const userRef = doc(db, 'users', targetUid);
+      await updateDoc(userRef, {
+        role: newRole
+      });
+
+      const details = [
+        `Role security clearance tier updated successfully.`,
+        `- Action Type: Role Change`,
+        `- Target User ID: ${targetUid}`,
+        `- Target User Name: ${targetName}`,
+        `- Previous Role: ${previousRole}`,
+        `- New Role: ${newRole}`,
+        `- Changed By User ID: ${changedByUid}`,
+        `- Changed By User Name: ${changedByUserName}`,
+        `- Timestamp: ${timestampString}`
+      ].join('\n');
+
+      await logSystemActivity("Role Change", details);
+
+      setFeedback({ message: `Role for ${targetEmail} updated to ${newRole.toUpperCase()}.`, type: 'success' });
+    } catch (err: any) {
+      try {
+        handleFirestoreError(err, OperationType.WRITE, `users/${targetUid}`);
+      } catch (firestoreErr: any) {
+        setFeedback({ message: `Access Control Failure: ${firestoreErr.message}`, type: 'error' });
+      }
+    }
+  };
+
+  // --- Admin User Listing Sync ---
+  useEffect(() => {
+    if (!currentUser || !auth.currentUser || userRole !== 'admin') {
+      if (currentUser && userRole === 'admin') {
+        setUsersList([
+          { uid: currentUser.uid, name: currentUser.displayName || 'Kishor Aysha (Admin Bypass)', email: currentUser.email, role: 'admin', createdAt: new Date().toISOString() }
+        ]);
+      } else {
+        setUsersList([]);
+      }
+      return;
+    }
+
+    const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
+      const list: any[] = [];
+      snapshot.forEach((docSnap) => {
+        list.push({ uid: docSnap.id, ...docSnap.data() });
+      });
+      setUsersList(list);
+    }, (error) => {
+      console.error("Users Sync Error", error);
+    });
+
+    return () => unsubUsers();
+  }, [currentUser, userRole]);
 
   // --- Reference Nodes ---
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- Real-time Firestore Sync ---
   useEffect(() => {
+    if (!currentUser || !auth.currentUser) return;
+
     // 1. Products Sync
     const unsubProducts = onSnapshot(collection(db, 'products'), (snapshot) => {
       const productsList: Product[] = [];
@@ -182,7 +476,7 @@ export default function App() {
       unsubCashLedger();
       unsubCapital();
     };
-  }, []);
+  }, [currentUser]);
 
   // --- Autosave to LocalStorage for offline resilience ---
   useEffect(() => {
@@ -214,18 +508,22 @@ export default function App() {
   }, [feedback]);
 
   // --- Derived Categories ---
-  const categories: string[] = ['All', ...Array.from(new Set(products.map((p) => p.category))).map(String)];
+  const categories: string[] = ['All', ...Array.from(new Set(products.filter(p => p.status !== 'inactive').map((p) => p.category))).map(String)];
 
   // --- Global Metrics ---
-  const totalProducts = products.length;
-  const totalStockQuantity = products.reduce((acc, p) => acc + p.currentStock, 0);
-  const totalValuation = products.reduce((acc, p) => acc + p.sellingPrice * p.currentStock, 0);
-  const lowStockItemsCount = products.filter((p) => p.currentStock <= p.minimumStockAlert).length;
+  const totalProducts = products.filter(p => p.status !== 'inactive').length;
+  const totalStockQuantity = products.filter(p => p.status !== 'inactive').reduce((acc, p) => acc + p.currentStock, 0);
+  const totalValuation = products.filter(p => p.status !== 'inactive').reduce((acc, p) => acc + p.sellingPrice * p.currentStock, 0);
+  const lowStockItemsCount = products.filter((p) => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert).length;
 
-  const lowStockList = products.filter((p) => p.currentStock <= p.minimumStockAlert);
+  const lowStockList = products.filter((p) => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert);
 
   // --- Quick Stock Increments ---
   const handleQuickQuantityAdjust = async (productId: string, delta: number) => {
+    if (!permissions.canEditInventory) {
+      setFeedback({ message: 'Access denied: You do not have permission to adjust inventory levels.', type: 'error' });
+      return;
+    }
     const productToUpdate = products.find((p) => p.id === productId);
     if (!productToUpdate) return;
 
@@ -275,6 +573,10 @@ export default function App() {
 
     if (formData.id) {
       // Edit mode
+      if (!permissions.canEditProduct) {
+        setFeedback({ message: 'Access denied: You do not have permission to edit products.', type: 'error' });
+        return;
+      }
       const existingProduct = products.find((p) => p.id === formData.id);
       if (!existingProduct) return;
 
@@ -325,6 +627,10 @@ export default function App() {
       }
     } else {
       // Add mode
+      if (!permissions.canEditProduct) {
+        setFeedback({ message: 'Access denied: You do not have permission to catalog new products.', type: 'error' });
+        return;
+      }
       const newProductId = `prod-${Date.now()}`;
       const newProduct: Product = {
         id: newProductId,
@@ -372,6 +678,10 @@ export default function App() {
 
   // --- Deletion Flow ---
   const handleDeleteItem = async (itemId: string) => {
+    if (!permissions.canDeleteProduct) {
+      setFeedback({ message: 'Access denied: You do not have permission to delete products.', type: 'error' });
+      return;
+    }
     const productToDelete = products.find((p) => p.id === itemId);
     if (!productToDelete) return;
 
@@ -402,6 +712,9 @@ export default function App() {
   // --- Filter and Sort Core Execution ---
   const filteredItems = products
     .filter((item) => {
+      // Exclude soft-deleted/inactive items from standard inventory workspace
+      if (item.status === 'inactive') return false;
+
       const query = search.toLowerCase();
       const matchesSearch =
         item.name.toLowerCase().includes(query) ||
@@ -551,6 +864,10 @@ export default function App() {
 
   // --- JSON Data Import ---
   const processImportText = async (text: string) => {
+    if (!permissions.isAdmin) {
+      setFeedback({ message: 'Access denied: Only administrators are permitted to override/import database records.', type: 'error' });
+      return;
+    }
     try {
       const parsed = JSON.parse(text);
       const importedProducts = parsed.products || parsed.items;
@@ -668,6 +985,196 @@ export default function App() {
     return 'In Stock';
   };
 
+  if (isAuthLoading) {
+    return (
+      <div id="auth-loading-screen" className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-8">
+        <div className="flex flex-col items-center gap-4 text-center max-w-xs">
+          <div className="w-16 h-16 bg-indigo-600 rounded-3xl flex items-center justify-center text-white shadow-xl animate-bounce shrink-0">
+            <Box className="h-8 w-8" />
+          </div>
+          <h2 className="font-sans text-lg font-black tracking-widest text-slate-950 uppercase mt-4">NEXUS ERP SYSTEMS</h2>
+          <div className="flex items-center gap-2 mt-2">
+            <Loader2 className="h-4 w-4 animate-spin text-indigo-600" />
+            <span className="font-mono text-xs text-slate-400 font-bold uppercase tracking-wider">Verifying Cryptosync...</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <div id="unauthenticated-gate" className="min-h-screen bg-slate-50 flex items-center justify-center p-4 sm:p-6 lg:p-8">
+        <div className="w-full max-w-md bg-white border border-slate-200 rounded-[2.5rem] p-8 sm:p-10 shadow-xl space-y-6">
+          
+          {/* Logo Heading */}
+          <div className="text-center space-y-2">
+            <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-md mx-auto animate-pulse">
+              <Box className="h-6 w-6" />
+            </div>
+            <h1 className="font-sans text-xl sm:text-2xl font-black tracking-tight text-slate-900 leading-none pt-2 uppercase">
+              NEXUS ERP SUITE
+            </h1>
+            <p className="text-xs text-slate-400 font-bold uppercase tracking-widest leading-none">
+              Secured Identity Ingress
+            </p>
+          </div>
+
+          <div className="text-center text-slate-500 text-xs px-2 leading-relaxed">
+            Welcome to the Nexus Enterprise Resource Planning Suite. Please log in with your credentials or register a new profile below to establish your secure workstation session.
+          </div>
+
+          {/* Feedback message */}
+          {authFeedback && (
+            <div id="auth-status-container" className="p-4 rounded-2xl border text-xs font-medium flex flex-col gap-2 bg-rose-50 border-rose-100 text-rose-800">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 text-rose-500 shrink-0" />
+                <span>{authFeedback.message}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Email/Password Auth Form */}
+          <form onSubmit={handleEmailPasswordAuth} id="auth-email-password-form" className="space-y-4">
+            <div>
+              <label htmlFor="auth-email-input" className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
+                Email Address
+              </label>
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                  <Mail className="h-4.5 w-4.5" />
+                </div>
+                <input
+                  id="auth-email-input"
+                  type="email"
+                  required
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  placeholder="name@company.com"
+                  className="w-full pl-10 pr-4 py-3 rounded-2xl border border-slate-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition duration-150 text-sm placeholder-slate-400 bg-slate-50 focus:bg-white text-slate-900 outline-none"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label htmlFor="auth-password-input" className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
+                Password
+              </label>
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                  <Key className="h-4.5 w-4.5" />
+                </div>
+                <input
+                  id="auth-password-input"
+                  type={showPassword ? 'text' : 'password'}
+                  required
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full pl-10 pr-10 py-3 rounded-2xl border border-slate-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition duration-150 text-sm placeholder-slate-400 bg-slate-50 focus:bg-white text-slate-900 outline-none"
+                />
+                <button
+                  type="button"
+                  id="auth-toggle-password-btn"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+                >
+                  {showPassword ? <EyeOff className="h-4.5 w-4.5" /> : <Eye className="h-4.5 w-4.5" />}
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-2 flex flex-col sm:flex-row gap-3">
+              {/* Log In Button */}
+              <button
+                id="auth-login-submit-btn"
+                type="button"
+                onClick={() => {
+                  setIsSignUpMode(false);
+                  setTimeout(() => {
+                    const form = document.getElementById('auth-email-password-form') as HTMLFormElement;
+                    if (form) form.requestSubmit();
+                  }, 20);
+                }}
+                disabled={isAuthSubmitLoading}
+                className={`flex-1 inline-flex items-center justify-center gap-2 rounded-2xl px-5 py-3.5 text-xs sm:text-sm font-bold transition shadow-xs hover:shadow-md cursor-pointer transition-all duration-200 disabled:opacity-50 ${
+                  !isSignUpMode
+                    ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                    : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
+                }`}
+              >
+                {!isSignUpMode && isAuthSubmitLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <span>Log In</span>
+                )}
+              </button>
+
+              {/* Sign Up Button */}
+              <button
+                id="auth-signup-submit-btn"
+                type="button"
+                onClick={() => {
+                  setIsSignUpMode(true);
+                  setTimeout(() => {
+                    const form = document.getElementById('auth-email-password-form') as HTMLFormElement;
+                    if (form) form.requestSubmit();
+                  }, 20);
+                }}
+                disabled={isAuthSubmitLoading}
+                className={`flex-1 inline-flex items-center justify-center gap-2 rounded-2xl px-5 py-3.5 text-xs sm:text-sm font-bold transition shadow-xs hover:shadow-md cursor-pointer transition-all duration-200 disabled:opacity-50 ${
+                  isSignUpMode
+                    ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                    : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
+                }`}
+              >
+                {isSignUpMode && isAuthSubmitLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <span>Sign Up</span>
+                )}
+              </button>
+            </div>
+          </form>
+
+          {/* Fallback Google Authentication option */}
+          <div id="google-sso-bypass" className="pt-2 flex flex-col gap-2">
+            <div className="relative flex py-1 items-center">
+              <div className="flex-grow border-t border-slate-200"></div>
+              <span className="flex-shrink mx-4 text-[10px] text-slate-400 font-bold uppercase tracking-widest bg-white px-2">or single sign-on</span>
+              <div className="flex-grow border-t border-slate-200"></div>
+            </div>
+
+            <button
+              id="auth-google-login"
+              type="button"
+              onClick={handleGoogleSignIn}
+              className="w-full inline-flex items-center justify-center gap-3 rounded-2xl bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-6 py-3.5 text-sm font-bold transition shadow-xs cursor-pointer transition-all duration-200"
+            >
+              <svg className="w-5 h-5 shrink-0 bg-white p-0.5 rounded-full" viewBox="0 0 24 24">
+                <path fillRule="evenodd" clipRule="evenodd" d="M23.04 12.261c0-.83-.074-1.63-.213-2.4H12v4.542h6.19c-.267 1.396-1.054 2.58-2.234 3.367v2.798h3.61c2.112-1.942 3.473-4.802 3.473-8.307z" fill="#4285F4" />
+                <path fillRule="evenodd" clipRule="evenodd" d="M12 23.5c3.105 0 5.71-1.028 7.61-2.798l-3.61-2.798c-1.002.67-2.285 1.07-4 1.07-3.078 0-5.684-2.079-6.613-4.882H1.677v2.89C3.582 20.899 7.551 23.5 12 23.5z" fill="#34A853" />
+                <path fillRule="evenodd" clipRule="evenodd" d="M5.387 14.092a6.901 6.901 0 010-4.184V7.018H1.677a11.968 11.968 0 000 9.964l3.71-2.89z" fill="#FBBC05" />
+                <path fillRule="evenodd" clipRule="evenodd" d="M12 4.07c1.69 0 3.204.58 4.398 1.716l3.297-3.297C17.705 1.058 15.1 0 12 0 7.551 0 3.582 2.6 1.677 6.61L5.387 9.5a6.93 6.93 0 016.613-5.43z" fill="#EA4335" />
+              </svg>
+              <span>Continue with Google</span>
+            </button>
+          </div>
+
+          <div className="p-4 bg-slate-50 border border-slate-100 rounded-2xl">
+            <p className="text-[11px] text-slate-500 leading-normal flex gap-2">
+              <Shield className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+              <span>
+                Authorized administrators logging in via <strong>kishor.aysha2@gmail.com</strong> will instantly receive full <strong>System Admin</strong> privileges. All other corporate profiles default to secure viewer clearance.
+              </span>
+            </p>
+          </div>
+
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div id="inventory-app-container" className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 space-y-8">
       {/* HEADER BAR */}
@@ -681,11 +1188,32 @@ export default function App() {
               <h1 className="font-sans text-xl sm:text-2xl font-bold tracking-tight text-slate-900 flex items-center flex-wrap gap-2 leading-none">
                 NEXUS INVENTORY <span className="text-slate-400 font-normal text-xs uppercase tracking-widest bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">v4.2.1</span>
               </h1>
-              <p className="mt-1 text-[11px] text-slate-400 font-bold tracking-widest uppercase flex items-center gap-2">
-                <span>System: Online</span>
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                <span>User: admin_01</span>
-              </p>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-slate-500">
+                <span className="text-slate-800 font-bold">{currentUserProfile?.name || currentUser?.email?.split('@')[0]}</span>
+                <span className="text-slate-300">•</span>
+                <span className="text-slate-400 font-mono text-[11px] font-bold">{currentUser?.email}</span>
+                <span className="text-slate-300">•</span>
+                <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-bold uppercase border ${
+                  userRole === 'admin' 
+                    ? 'bg-emerald-50 border-emerald-100 text-emerald-700' 
+                    : userRole === 'accountant'
+                    ? 'bg-blue-50 border-blue-100 text-blue-700'
+                    : userRole === 'cashier'
+                    ? 'bg-amber-50 border-amber-100 text-amber-700'
+                    : 'bg-slate-50 border-slate-100 text-slate-600'
+                }`}>
+                  <Shield className="w-2.5 h-2.5" />
+                  <span>{userRole}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleSignOut}
+                  className="font-sans font-bold text-rose-500 hover:text-rose-700 transition flex items-center gap-1 cursor-pointer pl-2 ml-1 border-l border-slate-200"
+                >
+                  <LogOut className="w-3.5 h-3.5 hover:rotate-12 transition-transform" />
+                  <span>Log Out</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -693,63 +1221,71 @@ export default function App() {
         {/* Global Control Row */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Load Sample Reset Button */}
-          <button
-            id="reset-demo-data-button"
-            type="button"
-            onClick={handleResetDemoData}
-            title="Restore default product catalog"
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition"
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-            <span>Load Demo</span>
-          </button>
+          {userRole === 'admin' && (
+            <button
+              id="reset-demo-data-button"
+              type="button"
+              onClick={handleResetDemoData}
+              title="Restore default product catalog"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              <span>Load Demo</span>
+            </button>
+          )}
 
           {/* Export JSON backup */}
-          <button
-            id="export-backup-json-button"
-            type="button"
-            onClick={handleExportJSON}
-            title="Download full catalog backup in JSON"
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition"
-          >
-            <Download className="h-3.5 w-3.5" />
-            <span>Export Backup</span>
-          </button>
+          {userRole === 'admin' && (
+            <button
+              id="export-backup-json-button"
+              type="button"
+              onClick={handleExportJSON}
+              title="Download full catalog backup in JSON"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Export Backup</span>
+            </button>
+          )}
 
           {/* Import JSON backup panel switcher */}
-          <button
-            id="import-backup-toggle-button"
-            type="button"
-            onClick={() => setShowImport((prev) => !prev)}
-            title="Import inventory data from JSON backup"
-            className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold transition ${
-              showImport
-                ? 'bg-slate-100 text-slate-700 border-slate-355'
-                : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700'
-            }`}
-          >
-            <Upload className="h-3.5 w-3.5" />
-            <span>Import JSON</span>
-          </button>
+          {permissions.isAdmin && (
+            <button
+              id="import-backup-toggle-button"
+              type="button"
+              onClick={() => setShowImport((prev) => !prev)}
+              title="Import inventory data from JSON backup"
+              className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                showImport
+                  ? 'bg-slate-100 text-slate-700 border-slate-355'
+                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+              }`}
+            >
+              <Upload className="h-3.5 w-3.5" />
+              <span>Import JSON</span>
+            </button>
+          )}
 
           {/* Main Primary Addition Button */}
-          <button
-            id="register-new-item-button"
-            type="button"
-            onClick={() => {
-              setProductToEdit(null);
-              setIsFormOpen(true);
-            }}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Register Product</span>
-          </button>
+          {permissions.canEditProduct && (
+            <button
+              id="register-new-item-button"
+              type="button"
+              onClick={() => {
+                setProductToEdit(null);
+                setIsFormOpen(true);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
+            >
+              <Plus className="h-4 w-4" />
+              <span>Register Product</span>
+            </button>
+          )}
         </div>
       </div>
 
       {/* PRIMARY NAVIGATION TABS */}
-      <div className="print:hidden flex bg-slate-100 p-1 rounded-2xl max-w-3xl border border-slate-200 overflow-x-auto">
+      <div className="print:hidden flex bg-slate-100 p-1 rounded-2xl max-w-7xl border border-slate-200 overflow-x-auto">
         <button
           type="button"
           onClick={() => setActiveTab('dashboard')}
@@ -858,6 +1394,33 @@ export default function App() {
           <BarChart3 className="h-4 w-4" />
           <span>Reports</span>
         </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('balancesheet')}
+          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition min-w-[120px] ${
+            activeTab === 'balancesheet'
+              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
+              : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <Scale className="h-4 w-4" />
+          <span>Balance Sheet</span>
+        </button>
+        {userRole === 'admin' && (
+          <button
+            id="open-user-access-tab"
+            type="button"
+            onClick={() => setActiveTab('users')}
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition min-w-[125px] ${
+              activeTab === 'users'
+                ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
+                : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Shield className="h-4 w-4" />
+            <span>User Access</span>
+          </button>
+        )}
       </div>
 
       {/* FEEDBACK STATUS BANNER */}
@@ -937,7 +1500,7 @@ export default function App() {
       </AnimatePresence>
 
       {activeTab === 'dashboard' ? (
-        <Dashboard />
+        <Dashboard userRole={userRole} />
       ) : activeTab === 'inventory' ? (
         <>
           {/* METRICS BENTO GRID */}
@@ -1162,7 +1725,11 @@ export default function App() {
                                   id={`adjust-minus-${item.id}`}
                                   type="button"
                                   onClick={() => handleQuickQuantityAdjust(item.id, -1)}
-                                  className="rounded-lg border border-slate-200 bg-white p-1 text-slate-500 hover:bg-slate-50 hover:text-slate-800 transition shadow-2xs"
+                                  disabled={!canEditInventory}
+                                  className={`rounded-lg border border-slate-200 bg-white p-1 text-slate-500 transition shadow-2xs ${
+                                    !canEditInventory ? 'opacity-40 cursor-not-allowed' : 'hover:bg-slate-50 hover:text-slate-800'
+                                  }`}
+                                  title={!canEditInventory ? 'You do not have permission to adjust stock levels' : undefined}
                                 >
                                   <ChevronDown className="h-3.5 w-3.5" />
                                 </button>
@@ -1173,7 +1740,11 @@ export default function App() {
                                   id={`adjust-plus-${item.id}`}
                                   type="button"
                                   onClick={() => handleQuickQuantityAdjust(item.id, 1)}
-                                  className="rounded-lg border border-slate-200 bg-white p-1 text-slate-500 hover:bg-slate-50 hover:text-slate-800 transition shadow-2xs"
+                                  disabled={!canEditInventory}
+                                  className={`rounded-lg border border-slate-200 bg-white p-1 text-slate-500 transition shadow-2xs ${
+                                    !canEditInventory ? 'opacity-40 cursor-not-allowed' : 'hover:bg-slate-50 hover:text-slate-800'
+                                  }`}
+                                  title={!canEditInventory ? 'You do not have permission to adjust stock levels' : undefined}
                                 >
                                   <ChevronUp className="h-3.5 w-3.5" />
                                 </button>
@@ -1203,8 +1774,13 @@ export default function App() {
                                     setProductToEdit(item);
                                     setIsFormOpen(true);
                                   }}
-                                  title="Edit item parameters"
-                                  className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-400 hover:bg-slate-50 hover:text-indigo-600 hover:border-indigo-100 transition shadow-2xs"
+                                  disabled={!permissions.canEditProduct}
+                                  title={!permissions.canEditProduct ? 'You do not have permission to edit products' : 'Edit item parameters'}
+                                  className={`rounded-lg border border-slate-200 bg-white p-1.5 transition shadow-2xs ${
+                                    !permissions.canEditProduct
+                                      ? 'opacity-40 cursor-not-allowed text-slate-300'
+                                      : 'text-slate-400 hover:bg-slate-50 hover:text-indigo-600 hover:border-indigo-100'
+                                  }`}
                                 >
                                   <Edit className="h-3.5 w-3.5" />
                                 </button>
@@ -1212,8 +1788,13 @@ export default function App() {
                                   id={`action-delete-${item.id}`}
                                   type="button"
                                   onClick={() => handleDeleteItem(item.id)}
-                                  title="Delete product catalog"
-                                  className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-400 hover:bg-slate-50 hover:text-rose-600 hover:border-rose-100 transition shadow-2xs"
+                                  disabled={!permissions.canDeleteProduct}
+                                  title={!permissions.canDeleteProduct ? 'You do not have permission to delete products' : 'Delete product catalog'}
+                                  className={`rounded-lg border border-slate-200 bg-white p-1.5 transition shadow-2xs ${
+                                    !permissions.canDeleteProduct
+                                      ? 'opacity-40 cursor-not-allowed text-slate-300'
+                                      : 'text-slate-400 hover:bg-slate-50 hover:text-rose-600 hover:border-rose-100'
+                                  }`}
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
                                 </button>
@@ -1239,19 +1820,106 @@ export default function App() {
           </div>
         </>
       ) : activeTab === 'customers' ? (
-        <CustomerManagement />
+        <SafeTabWrapper tab="customers" userRole={userRole}>
+          <CustomerManagement userRole={userRole} />
+        </SafeTabWrapper>
       ) : activeTab === 'suppliers' ? (
-        <SupplierManagement />
+        <SafeTabWrapper tab="suppliers" userRole={userRole}>
+          <SupplierManagement userRole={userRole} />
+        </SafeTabWrapper>
       ) : activeTab === 'ledger' ? (
-        <PaymentLedger />
+        <SafeTabWrapper tab="ledger" userRole={userRole}>
+          <PaymentLedger userRole={userRole} />
+        </SafeTabWrapper>
       ) : activeTab === 'products' ? (
-        <ProductManagement />
+        <SafeTabWrapper tab="products" userRole={userRole}>
+          <ProductManagement userRole={userRole} />
+        </SafeTabWrapper>
       ) : activeTab === 'sales' ? (
-        <SalesManagement />
+        <SafeTabWrapper tab="sales" userRole={userRole}>
+          <SalesManagement userRole={userRole} />
+        </SafeTabWrapper>
       ) : activeTab === 'procurement' ? (
-        <ProcurementManagement />
+        <SafeTabWrapper tab="procurement" userRole={userRole}>
+          <ProcurementManagement userRole={userRole} />
+        </SafeTabWrapper>
+      ) : activeTab === 'balancesheet' ? (
+        <SafeTabWrapper tab="balancesheet" userRole={userRole}>
+          <BalanceSheet />
+        </SafeTabWrapper>
+      ) : activeTab === 'users' ? (
+        <SafeTabWrapper tab="users" userRole={userRole}>
+          {/* USER MANAGEMENT ADMIN PANEL */}
+          <div className="rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-xs space-y-6">
+            <div>
+              <h3 className="font-sans text-base font-bold tracking-tight text-slate-800 flex items-center gap-2">
+                <Shield className="w-5 h-5 text-indigo-600" />
+                <span>Enterprise User Access Directory</span>
+              </h3>
+              <p className="text-xs text-slate-400">Manage corporate identities, assign roles, and audit security clearance tiers in Firestore</p>
+            </div>
+
+            <div className="overflow-x-auto border border-slate-100 rounded-xl">
+              <table id="user-directory-grid" className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-slate-100 bg-slate-50/40 text-slate-400 select-none">
+                    <th className="p-4 font-bold tracking-wider uppercase text-[10px]">User Profile</th>
+                    <th className="p-4 font-bold tracking-wider uppercase text-[10px]">Security UID Identifier</th>
+                    <th className="p-4 font-bold tracking-wider uppercase text-[10px]">Created Date</th>
+                    <th className="p-4 font-bold tracking-wider uppercase text-[10px] text-center">Clearance Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {usersList.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="p-10 text-center text-slate-400">
+                        <Loader2 className="w-5 h-5 animate-spin mx-auto text-indigo-600 mb-2" />
+                        <span>Querying Firestore user list...</span>
+                      </td>
+                    </tr>
+                  ) : (
+                    usersList.map((usr) => (
+                      <tr key={usr.uid} className="hover:bg-slate-50/30 transition-colors">
+                        <td className="p-4">
+                          <div>
+                            <p className="font-bold text-slate-800 text-xs">{usr.name || 'Anonymous'}</p>
+                            <p className="text-[10px] text-slate-400 font-mono mt-0.5">{usr.email}</p>
+                          </div>
+                        </td>
+                        <td className="p-4 font-mono text-[10px] text-slate-400 tracking-wider">
+                          {usr.uid}
+                        </td>
+                        <td className="p-4 text-slate-500 font-medium font-mono text-[10px]">
+                          {usr.createdAt ? new Date(usr.createdAt).toLocaleString() : 'Bootstrap/Legacy'}
+                        </td>
+                        <td className="p-4 text-center">
+                          {usr.email === 'kishor.aysha2@gmail.com' ? (
+                            <span className="font-mono text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-2.5 py-1 uppercase">Root Admin</span>
+                          ) : (
+                            <select
+                              value={usr.role || 'viewer'}
+                              onChange={(e) => handleUpdateUserRole(usr.uid, usr.email, e.target.value as any)}
+                              className="bg-slate-50 border border-slate-200 text-slate-700 font-mono font-bold rounded-lg px-2.5 py-1.5 text-xs focus:ring-1 focus:ring-slate-400 cursor-pointer outline-none uppercase"
+                            >
+                              <option value="admin">🔒 Admin</option>
+                              <option value="accountant">💰 Accountant</option>
+                              <option value="cashier">💼 Cashier</option>
+                              <option value="viewer">👁️ Viewer</option>
+                            </select>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </SafeTabWrapper>
       ) : (
-        <ReportsPage />
+        <SafeTabWrapper tab="reports" userRole={userRole}>
+          <ReportsPage userRole={userRole} />
+        </SafeTabWrapper>
       )}
 
       {/* RENDER FORM OVERLAY MODAL */}
@@ -1279,4 +1947,42 @@ export default function App() {
 // Simple message cleaner helper (optional)
 function backupFeedbackMessage(msg: string) {
   return msg;
+}
+
+interface SafeTabWrapperProps {
+  children: React.ReactNode;
+  tab: string;
+  userRole: 'admin' | 'accountant' | 'cashier' | 'viewer';
+}
+
+function SafeTabWrapper({ children, tab, userRole }: SafeTabWrapperProps) {
+  let isAccessible = true;
+
+  if (userRole === 'viewer') {
+    isAccessible = tab !== 'users';
+  } else if (userRole === 'cashier') {
+    isAccessible = tab === 'dashboard' || tab === 'sales' || tab === 'customers';
+  } else if (userRole === 'accountant') {
+    isAccessible = tab !== 'procurement' && tab !== 'suppliers' && tab !== 'users';
+  } else if (userRole === 'admin') {
+    isAccessible = true;
+  }
+  
+  if (!isAccessible) {
+    return (
+      <div className="rounded-[2rem] border border-slate-200 bg-white p-12 text-center max-w-lg mx-auto my-12 space-y-4 shadow-xs">
+        <div className="h-16 w-16 bg-rose-50 border border-rose-100 rounded-full flex items-center justify-center mx-auto text-rose-500 shadow-inner">
+          <svg className="w-8 h-8 font-extrabold" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+          </svg>
+        </div>
+        <h3 className="text-base font-sans font-black text-slate-800 uppercase tracking-widest">Clearance Restriction</h3>
+        <p className="text-xs text-slate-500 leading-relaxed max-w-sm mx-auto">
+          Your current security clearance level (<span className="font-mono font-bold text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded uppercase">{userRole}</span>) does not grant permissions to open the <strong className="capitalize text-slate-800">{tab}</strong> module.
+        </p>
+        <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest pt-2">Please contact the system administrator to request access privilege promotion.</p>
+      </div>
+    );
+  }
+  return <>{children}</>;
 }

@@ -18,11 +18,11 @@ import {
   TrendingUp,
   ChevronRight
 } from 'lucide-react';
-import { db, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
+import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { Customer } from '../types';
 
-export default function CustomerManagement() {
+export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- State ---
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
@@ -50,6 +50,14 @@ export default function CustomerManagement() {
 
   // --- Real-time Firestore Sync ---
   useEffect(() => {
+    if (!auth.currentUser) {
+      // Local fallback
+      const saved = localStorage.getItem('inventory_customers');
+      setCustomers(saved ? JSON.parse(saved) : []);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     const unsub = onSnapshot(collection(db, 'customers'), (snapshot) => {
@@ -167,6 +175,28 @@ export default function CustomerManagement() {
     };
 
     try {
+      if (!auth.currentUser) {
+        const saved = localStorage.getItem('inventory_customers');
+        let currentList: Customer[] = saved ? JSON.parse(saved) : [];
+        if (editingCustomer) {
+          currentList = currentList.map(c => c.id === customerId ? finalCustomerData : c);
+        } else {
+          currentList = [finalCustomerData, ...currentList];
+        }
+        localStorage.setItem('inventory_customers', JSON.stringify(currentList));
+        setCustomers(currentList);
+
+        setFeedback({
+          message: editingCustomer 
+            ? `Successfully updated details for ${finalCustomerData.name} (Local Only)` 
+            : `Permanently registered customer profile ${finalCustomerData.name} locally`,
+          type: 'success'
+        });
+        setIsFormOpen(false);
+        setIsSaving(false);
+        return;
+      }
+
       await setDoc(doc(db, 'customers', customerId), finalCustomerData);
       if (!editingCustomer) {
         await logSystemActivity(
@@ -211,58 +241,74 @@ export default function CustomerManagement() {
 
     setIsSaving(true);
     try {
-      // 1. Live Firestore existing sales history check
-      const salesRef = collection(db, 'sales');
-      const salesQuery = query(salesRef, where('customerId', '==', id));
-      const salesSnapshot = await getDocs(salesQuery);
+      if (!auth.currentUser) {
+        const saved = localStorage.getItem('inventory_customers');
+        let currentList: Customer[] = saved ? JSON.parse(saved) : [];
 
-      // 2. Live Firestore existing payment history check
-      const paymentsRef = collection(db, 'customerPayments');
-      const paymentsQuery = query(paymentsRef, where('customerId', '==', id));
-      const paymentsSnapshot = await getDocs(paymentsQuery);
+        const savedSales = localStorage.getItem('inventory_sales') || '[]';
+        const salesList = JSON.parse(savedSales);
+        const hasSales = salesList.some((s: any) => s.customerId === id);
 
-      const hasSales = !salesSnapshot.empty;
-      const hasPayments = !paymentsSnapshot.empty;
-      const hasBalance = (customerToDelete.dueBalance ?? 0) > 0;
+        const savedPayments = localStorage.getItem('inventory_customer_payments') || '[]';
+        const paymentsList = JSON.parse(savedPayments);
+        const hasPayments = paymentsList.some((p: any) => p.customerId === id);
 
-      if (hasSales || hasPayments || hasBalance) {
-        // Has history or balance - mark as inactive
-        const updatedCustomer: Customer = {
-          ...customerToDelete,
-          status: 'inactive'
-        };
-        await setDoc(doc(db, 'customers', id), updatedCustomer);
+        const hasBalance = (customerToDelete.dueBalance ?? 0) > 0;
 
-        const reasons: string[] = [];
-        if (hasSales) reasons.push("sales history");
-        if (hasPayments) reasons.push("payment history");
-        if (hasBalance) reasons.push(`outstanding due balance ($${customerToDelete.dueBalance.toFixed(2)})`);
+        if (hasSales || hasPayments || hasBalance) {
+          const updatedCustomer: Customer = {
+            ...customerToDelete,
+            status: 'inactive'
+          };
+          currentList = currentList.map(c => c.id === id ? updatedCustomer : c);
+          localStorage.setItem('inventory_customers', JSON.stringify(currentList));
+          setCustomers(currentList);
 
-        const reasonText = reasons.join(", ");
+          const reasons: string[] = [];
+          if (hasSales) reasons.push("sales history");
+          if (hasPayments) reasons.push("payment history");
+          if (hasBalance) reasons.push(`outstanding due balance ($${customerToDelete.dueBalance.toFixed(2)})`);
 
-        await logSystemActivity(
-          "Customer inactivated",
-          `Marked customer "${name}" (ID: ${id}) as inactive because it contains ${reasonText}.`
-        );
-        setFeedback({ 
-          message: `Customer "${name}" has associated ${reasonText} and has been safely marked as "inactive" instead of being deleted.`, 
-          type: 'success' 
-        });
-      } else {
-        // No history and dueBalance == 0 - permanently purge
-        await deleteDoc(doc(db, 'customers', id));
-        await logSystemActivity(
-          "Customer deleted",
-          `Permanently purged customer account: ${name}`
-        );
-        setFeedback({ message: `Customer record "${name}" has been permanently purged.`, type: 'success' });
+          const reasonText = reasons.join(", ");
+          setFeedback({ 
+            message: `Customer "${name}" has associated ${reasonText} and has been safely marked as "inactive" locally.`, 
+            type: 'success' 
+          });
+        } else {
+          const updatedCustomer: Customer = {
+            ...customerToDelete,
+            status: 'inactive'
+          };
+          currentList = currentList.map(c => c.id === id ? updatedCustomer : c);
+          localStorage.setItem('inventory_customers', JSON.stringify(currentList));
+          setCustomers(currentList);
+          setFeedback({ message: `Customer record "${name}" has been safely retired as "inactive" locally.`, type: 'success' });
+        }
+        setIsSaving(false);
+        return;
       }
+
+      // Always soft-delete to preserve business ledger and audit histories
+      const updatedCustomer: Customer = {
+        ...customerToDelete,
+        status: 'inactive'
+      };
+      await setDoc(doc(db, 'customers', id), updatedCustomer);
+
+      await logSystemActivity(
+        "Customer inactivated",
+        `Marked customer "${name}" (ID: ${id}) as inactive.`
+      );
+      setFeedback({ 
+        message: `Customer "${name}" has been safely retired and marked as "inactive".`, 
+        type: 'success' 
+      });
     } catch (err: any) {
       console.error("Delete customer error:", err);
       try {
         handleFirestoreError(err, OperationType.WRITE, `customers/${id}`);
       } catch (dbErr: any) {
-        setFeedback({ message: `Purge/Inactivation unsuccessful: ${dbErr.message}`, type: 'error' });
+        setFeedback({ message: `Inactivation unsuccessful: ${dbErr.message}`, type: 'error' });
       }
     } finally {
       setIsSaving(false);
@@ -271,6 +317,9 @@ export default function CustomerManagement() {
 
   // --- Filtered Customers Summary ---
   const filteredCustomers = customers.filter(customer => {
+    // Hide inactive customers from standard listings
+    if (customer.status === 'inactive') return false;
+
     const matchesSearch = 
       customer.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       customer.phone.includes(searchQuery) ||
@@ -281,9 +330,9 @@ export default function CustomerManagement() {
   });
 
   // --- Analytical Calculations ---
-  const outstandingBalanceTotal = customers.reduce((sum, item) => sum + item.dueBalance, 0);
-  const creditAccountsCount = customers.filter(c => c.customerType === 'Credit').length;
-  const cashAccountsCount = customers.filter(c => c.customerType === 'Cash').length;
+  const outstandingBalanceTotal = customers.filter(c => c.status !== 'inactive').reduce((sum, item) => sum + item.dueBalance, 0);
+  const creditAccountsCount = customers.filter(c => c.status !== 'inactive' && c.customerType === 'Credit').length;
+  const cashAccountsCount = customers.filter(c => c.status !== 'inactive' && c.customerType === 'Cash').length;
 
   return (
     <div id="customer-registry-view" className="space-y-8 animate-fade-in">
@@ -325,7 +374,7 @@ export default function CustomerManagement() {
             {loading ? (
               <div className="h-9 w-12 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">{customers.length}</p>
+              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">{customers.filter(c => c.status !== 'inactive').length}</p>
             )}
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400">
@@ -402,14 +451,16 @@ export default function CustomerManagement() {
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => openForm()}
-                className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
-              >
-                <UserPlus className="h-4 w-4" />
-                <span>New Customer</span>
-              </button>
+              {userRole === 'admin' && (
+                <button
+                  type="button"
+                  onClick={() => openForm()}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer animate-fade-in"
+                >
+                  <UserPlus className="h-4 w-4" />
+                  <span>New Customer</span>
+                </button>
+              )}
             </div>
 
             {/* Filter controls and Search Bar */}
@@ -549,24 +600,26 @@ export default function CustomerManagement() {
                           </span>
                         </div>
 
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => openForm(customer)}
-                            className="p-2 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition cursor-pointer"
-                            title="Edit customer account details"
-                          >
-                            <Edit2 className="h-4 w-4" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteClick(customer)}
-                            className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition cursor-pointer"
-                            title="Delete customer record permanently"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </div>
+                        {userRole === 'admin' && (
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => openForm(customer)}
+                              className="p-2 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition cursor-pointer"
+                              title="Edit customer account details"
+                            >
+                              <Edit2 className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteClick(customer)}
+                              className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition cursor-pointer"
+                              title="Delete customer record permanently"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </motion.div>
                   ))}
@@ -610,12 +663,12 @@ export default function CustomerManagement() {
                 <div>
                   <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
                     <span>Credit Ratio</span>
-                    <span className="font-bold">{customers.length > 0 ? Math.round((creditAccountsCount / customers.length) * 100) : 0}%</span>
+                    <span className="font-bold">{customers.filter(c => c.status !== 'inactive').length > 0 ? Math.round((creditAccountsCount / customers.filter(c => c.status !== 'inactive').length) * 100) : 0}%</span>
                   </div>
                   <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
                     <div 
                       className="bg-indigo-600 h-1.5 rounded-full transition-all duration-500" 
-                      style={{ width: `${customers.length > 0 ? (creditAccountsCount / customers.length) * 100 : 0}%` }}
+                      style={{ width: `${customers.filter(c => c.status !== 'inactive').length > 0 ? (creditAccountsCount / customers.filter(c => c.status !== 'inactive').length) * 100 : 0}%` }}
                     ></div>
                   </div>
                 </div>
@@ -754,7 +807,7 @@ export default function CustomerManagement() {
                       type="number"
                       step="0.01"
                       required
-                      disabled={isSaving}
+                      disabled={isSaving || !!editingCustomer}
                       value={formData.dueBalance}
                       onChange={(e) => setFormData({ ...formData, dueBalance: e.target.value })}
                       className={`w-full rounded-xl border py-2.5 pl-8 pr-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50 ${

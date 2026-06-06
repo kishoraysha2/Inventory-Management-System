@@ -2,15 +2,31 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // Global Safety Net
+    // Global Safety Net (Default Deny Catch-All)
     match /{document=**} {
       allow read, write: if false;
+    }
+
+    // --- PHASE 3: GLOBAL HELPER PRIMITIVES ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Role-Checking Engines (Attributes and Bootstrapped Fallbacks)
+    function hasRole(role) {
+      return isSignedIn() 
+        && (
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role)
+          || (role == 'admin' && request.auth.token.email == 'kishor.aysha2@gmail.com')
+        );
     }
 
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    // --- PHASE 4: THE FORTRESS VALIDATION BLUEPRINTS ---
+    
     // Helper to validate complete InventoryItem schema
     function isValidItem(data) {
       return data.keys().hasAll(['id', 'name', 'sku', 'category', 'price', 'quantity', 'minQuantity', 'supplierName', 'supplierEmail', 'location', 'description', 'lastUpdated'])
@@ -126,7 +142,7 @@ service cloud.firestore {
     // Helper to validate complete Purchase schema
     function isValidPurchase(data) {
       return data.keys().hasAll(['id', 'supplierId', 'supplierName', 'productId', 'productName', 'quantity', 'purchasePrice', 'totalAmount', 'paymentType', 'purchaseDate'])
-          && data.keys().size() == 10
+          && (data.keys().size() == 10 || data.keys().size() == 11)
           && data.id is string && data.id.size() <= 128
           && data.supplierId is string && data.supplierId.size() <= 128
           && data.supplierName is string && data.supplierName.size() > 0 && data.supplierName.size() <= 200
@@ -136,7 +152,8 @@ service cloud.firestore {
           && (data.purchasePrice is number || data.purchasePrice is int) && data.purchasePrice >= 0
           && (data.totalAmount is number || data.totalAmount is int) && data.totalAmount >= 0
           && data.paymentType is string && (data.paymentType == 'Cash' || data.paymentType == 'Credit')
-          && data.purchaseDate is string;
+          && data.purchaseDate is string
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'voided')));
     }
 
     // Helper to validate complete CustomerPayment schema
@@ -170,14 +187,15 @@ service cloud.firestore {
     // Helper to validate complete CashLedgerEntry schema
     function isValidCashLedgerEntry(data) {
       return data.keys().hasAll(['id', 'type', 'source', 'amount', 'description', 'timestamp'])
-          && (data.keys().size() == 6 || data.keys().size() == 7)
+          && (data.keys().size() == 6 || data.keys().size() == 7 || data.keys().size() == 8)
           && data.id is string && data.id.size() <= 128
           && data.type is string && (data.type == 'inflow' || data.type == 'outflow')
           && data.source is string && (data.source == 'sale' || data.source == 'purchase' || data.source == 'payment' || data.source == 'manual')
           && (data.amount is number || data.amount is int) && data.amount >= 0
           && data.description is string && data.description.size() <= 1000
           && data.timestamp is string
-          && (!data.keys().hasAny(['referenceId']) || (data.referenceId is string && data.referenceId.size() <= 128));
+          && (!data.keys().hasAny(['referenceId']) || (data.referenceId is string && data.referenceId.size() <= 128))
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'voided' || data.status == 'VOID')));
     }
 
     // Helper to validate complete Capital schema
@@ -192,105 +210,164 @@ service cloud.firestore {
     }
 
 
+    // --- COLLECTION GATES AND DIRECT PATH MATCHES ---
+
+    // Users Collection
+    match /users/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || hasRole('admin'));
+      // Prevent role spoofing on initial self-creation, and allow admin full control
+      allow create: if isSignedIn() && (hasRole('admin') || (request.auth.uid == uid && request.resource.data.role == 'viewer'));
+      // Block viewer from updating user records, only admin and logged-in non-viewer can update (role stays read-only)
+      allow update: if isSignedIn() && (
+                      hasRole('admin') || 
+                      (request.auth.uid == uid && !hasRole('viewer') && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']))
+                    );
+      allow delete: if hasRole('admin');
+    }
 
     // Items Collection
     match /items/{itemId} {
-      allow read: if true;
-      allow create: if isValidId(itemId) && isValidItem(request.resource.data);
-      allow update: if isValidId(itemId) && isValidItem(request.resource.data);
-      allow delete: if isValidId(itemId);
+      allow read: if isSignedIn();
+      allow create: if (hasRole('admin') || hasRole('accountant')) && isValidId(itemId) && isValidItem(request.resource.data);
+      allow update: if (hasRole('admin') || hasRole('accountant')) && isValidId(itemId) && isValidItem(request.resource.data);
+      allow delete: if hasRole('admin');
     }
 
-    // Logs Collection
+    // Logs (Activity Audit) Collection (Append-only)
     match /logs/{logId} {
-      allow read: if true;
-      allow create: if isValidId(logId) && isValidLog(request.resource.data);
-      allow update: if false; // Logs are immutable
-      allow delete: if false; // Logs are strictly read-and-create only (never deletable)
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && !hasRole('viewer') && isValidId(logId) && isValidLog(request.resource.data);
+      allow update, delete: if false;
     }
 
-    // System Logs Collection
+    // System Activity Logs Collection (Append-only)
     match /Logs/{logId} {
-      allow read: if true;
-      allow create: if isValidId(logId) && isValidSystemLog(request.resource.data);
-      allow update: if false; // Logs are immutable
-      allow delete: if false; // Logs are strictly read-and-create only (never deletable)
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && !hasRole('viewer') && isValidId(logId) && isValidSystemLog(request.resource.data);
+      allow update, delete: if false;
     }
 
     // Suppliers Collection
     match /suppliers/{supplierId} {
-      allow read: if true;
-      allow create: if isValidId(supplierId) && isValidSupplier(request.resource.data);
-      allow update: if isValidId(supplierId) && isValidSupplier(request.resource.data);
-      allow delete: if isValidId(supplierId);
+      allow read: if isSignedIn();
+      allow create: if (hasRole('admin') || hasRole('accountant'))
+                    && isValidId(supplierId)
+                    && isValidSupplier(request.resource.data)
+                    && (hasRole('admin') || !('dueBalance' in request.resource.data) || request.resource.data.dueBalance == 0);
+      allow update: if isValidId(supplierId) && isValidSupplier(request.resource.data) && (
+                      hasRole('admin') || 
+                      hasRole('accountant') ||
+                      (hasRole('cashier') && (!('dueBalance' in request.resource.data) || request.resource.data.dueBalance == resource.data.dueBalance))
+                    );
+      allow delete: if hasRole('admin');
     }
 
     // Customers Collection
     match /customers/{customerId} {
-      allow read: if true;
-      allow create: if isValidId(customerId) && isValidCustomer(request.resource.data);
-      allow update: if isValidId(customerId) && isValidCustomer(request.resource.data);
-      allow delete: if isValidId(customerId);
+      allow read: if isSignedIn();
+      allow create: if (hasRole('admin') || hasRole('cashier') || hasRole('accountant'))
+                    && isValidId(customerId)
+                    && isValidCustomer(request.resource.data)
+                    && (hasRole('admin') || request.resource.data.dueBalance == 0);
+      allow update: if isValidId(customerId) && isValidCustomer(request.resource.data) && (
+                      hasRole('admin') || 
+                      hasRole('accountant') ||
+                      (hasRole('cashier') && request.resource.data.dueBalance == resource.data.dueBalance)
+                    );
+      allow delete: if hasRole('admin');
     }
 
     // Products Collection
     match /products/{productId} {
-      allow read: if true;
-      allow create: if isValidId(productId) && isValidProduct(request.resource.data);
-      allow update: if isValidId(productId) && isValidProduct(request.resource.data);
-      allow delete: if isValidId(productId);
+      allow read: if isSignedIn();
+      allow create: if (hasRole('admin') || hasRole('accountant')) && isValidId(productId) && isValidProduct(request.resource.data);
+      allow update: if isValidId(productId) && isValidProduct(request.resource.data) && (
+                      hasRole('admin') || 
+                      hasRole('accountant') ||
+                      (hasRole('cashier') && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['currentStock']))
+                    );
+      allow delete: if hasRole('admin');
     }
 
     // Sales Collection
     match /sales/{saleId} {
-      allow read: if true;
-      allow create: if isValidId(saleId) 
+      allow read: if isSignedIn();
+      allow create: if (hasRole('admin') || hasRole('cashier')) 
+                    && isValidId(saleId) 
                     && isValidSale(request.resource.data)
                     && exists(/databases/$(database)/documents/products/$(request.resource.data.productId))
                     && get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data.currentStock >= request.resource.data.quantity
                     && (!('status' in get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data) || get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data.status != 'inactive');
-      allow update: if false; // Sales records are completely immutable to protect financial data integrity
-      allow delete: if isValidId(saleId);
+      allow update: if (hasRole('admin') || hasRole('accountant'))
+                    && (request.resource.data.status == 'voided' || request.resource.data.status == 'VOID')
+                    && (!('status' in resource.data) || resource.data.status == 'active')
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']);
+      allow delete: if false; 
     }
 
     // Purchases Collection
     match /purchases/{purchaseId} {
-      allow read: if true;
-      allow create: if isValidId(purchaseId) && isValidPurchase(request.resource.data);
-      allow update: if isValidId(purchaseId) && isValidPurchase(request.resource.data);
-      allow delete: if isValidId(purchaseId);
+      allow read: if isSignedIn() && (hasRole('admin') || hasRole('accountant') || hasRole('viewer'));
+      allow create: if (hasRole('admin') || hasRole('accountant')) 
+                    && isValidId(purchaseId) 
+                    && isValidPurchase(request.resource.data);
+      allow update: if (hasRole('admin') || hasRole('accountant'))
+                    && (request.resource.data.status == 'voided' || request.resource.data.status == 'VOID')
+                    && (!('status' in resource.data) || resource.data.status == 'active')
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']);
+      allow delete: if false; 
     }
 
     // Customer Payments Collection
     match /customerPayments/{paymentId} {
-      allow read: if true;
-      allow create: if isValidId(paymentId) && isValidCustomerPayment(request.resource.data);
-      allow update: if isValidId(paymentId) && isValidCustomerPayment(request.resource.data);
-      allow delete: if isValidId(paymentId);
+      allow read: if isSignedIn();
+      allow create: if (hasRole('admin') || hasRole('accountant') || hasRole('cashier')) 
+                    && isValidId(paymentId) 
+                    && isValidCustomerPayment(request.resource.data);
+      allow update: if (hasRole('admin') || hasRole('accountant'))
+                    && (request.resource.data.status == 'voided' || request.resource.data.status == 'VOID')
+                    && (!('status' in resource.data) || resource.data.status == 'active')
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']);
+      allow delete: if false; 
     }
 
     // Supplier Payments Collection
     match /supplierPayments/{paymentId} {
-      allow read: if true;
-      allow create: if isValidId(paymentId) && isValidSupplierPayment(request.resource.data);
-      allow update: if isValidId(paymentId) && isValidSupplierPayment(request.resource.data);
-      allow delete: if isValidId(paymentId);
+      allow read: if isSignedIn() && (hasRole('admin') || hasRole('accountant') || hasRole('viewer'));
+      allow create: if (hasRole('admin') || hasRole('accountant')) 
+                    && isValidId(paymentId) 
+                    && isValidSupplierPayment(request.resource.data);
+      allow update: if (hasRole('admin') || hasRole('accountant'))
+                    && (request.resource.data.status == 'voided' || request.resource.data.status == 'VOID')
+                    && (!('status' in resource.data) || resource.data.status == 'active')
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']);
+      allow delete: if false; 
     }
 
     // Cash Ledger Collection
     match /cashLedger/{entryId} {
-      allow read: if true;
-      allow create: if isValidId(entryId) && isValidCashLedgerEntry(request.resource.data);
-      allow update: if isValidId(entryId) && isValidCashLedgerEntry(request.resource.data);
-      allow delete: if isValidId(entryId);
+      allow read: if isSignedIn();
+      allow create: if (hasRole('admin') || hasRole('accountant') || hasRole('cashier')) 
+                    && isValidId(entryId) 
+                    && isValidCashLedgerEntry(request.resource.data);
+      allow update: if (hasRole('admin') || hasRole('accountant'))
+                    && (request.resource.data.status == 'voided' || request.resource.data.status == 'VOID' || request.resource.data.status == 'void')
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']);
+      allow delete: if false; 
     }
 
     // Capital Collection
     match /capital/{capitalId} {
-      allow read: if true;
-      allow create: if isValidId(capitalId) && isValidCapital(request.resource.data);
-      allow update: if isValidId(capitalId) && isValidCapital(request.resource.data);
-      allow delete: if isValidId(capitalId);
+      allow read: if isSignedIn();
+      allow create: if (hasRole('admin') || hasRole('accountant')) && isValidId(capitalId) && isValidCapital(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // Financial Logs (Immutable Action Logging)
+    match /financialLogs/{logId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && !hasRole('viewer') && isValidId(logId);
+      allow update, delete: if false;
     }
   }
 }
