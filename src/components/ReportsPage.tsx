@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { calculateCustomerLedger } from '../lib/utils';
 import { 
   Calendar, 
   Download, 
@@ -32,11 +33,23 @@ export default function ReportsPage() {
   // --- States ---
   const [sales, setSales] = useState<Sale[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customersState, setCustomersState] = useState<Customer[]>([]);
+  const [customerPayments, setCustomerPayments] = useState<any[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [systemLogs, setSystemLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeReport, setActiveReport] = useState<ReportType>('sales');
+
+  const customers = useMemo(() => {
+    return customersState.map(c => {
+      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id);
+      return {
+        ...c,
+        dueBalance: Math.max(0, rawDue),
+        customerCredit: rawDue < 0 ? Math.abs(rawDue) : 0
+      };
+    });
+  }, [customersState, sales, customerPayments]);
 
   // --- Date Range Constants & States (Reference date 2026-06-01) ---
   const [startDate, setStartDate] = useState("");
@@ -80,7 +93,10 @@ export default function ReportsPage() {
       setProducts(savedProducts ? JSON.parse(savedProducts) : []);
 
       const savedCustomers = localStorage.getItem('inventory_customers');
-      setCustomers(savedCustomers ? JSON.parse(savedCustomers) : []);
+      setCustomersState(savedCustomers ? JSON.parse(savedCustomers) : []);
+
+      const savedPayments = localStorage.getItem('inventory_customer_payments');
+      setCustomerPayments(savedPayments ? JSON.parse(savedPayments) : []);
 
       const savedSuppliers = localStorage.getItem('inventory_suppliers');
       setSuppliers(savedSuppliers ? JSON.parse(savedSuppliers) : []);
@@ -116,7 +132,15 @@ export default function ReportsPage() {
       snapshot.forEach((docSnap) => {
         custList.push(docSnap.data() as Customer);
       });
-      setCustomers(custList);
+      setCustomersState(custList);
+    });
+
+    const unsubPayments = onSnapshot(collection(db, 'customerPayments'), (snapshot) => {
+      const paymentsList: any[] = [];
+      snapshot.forEach((docSnap) => {
+        paymentsList.push(docSnap.data());
+      });
+      setCustomerPayments(paymentsList);
     });
 
     const unsubSuppliers = onSnapshot(collection(db, 'suppliers'), (snapshot) => {
@@ -142,6 +166,7 @@ export default function ReportsPage() {
       unsubSales();
       unsubProducts();
       unsubCustomers();
+      unsubPayments();
       unsubSuppliers();
       unsubLogs();
     };

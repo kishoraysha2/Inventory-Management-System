@@ -112,7 +112,14 @@ export default function ActivityHistory({
 
                 <div className="flex items-start justify-between gap-2 text-xs">
                   <div>
-                    <p className="font-bold text-slate-200 tracking-tight">{log.itemName}</p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <p className="font-bold text-slate-200 tracking-tight">{log.itemName}</p>
+                      {log.type === 'add' && (
+                        <span className="inline-flex items-center rounded-full bg-indigo-500/10 px-1.5 py-0.5 text-[9px] font-bold text-indigo-300 border border-indigo-500/20 uppercase tracking-widest">
+                          Opening Stock
+                        </span>
+                      )}
+                    </div>
                     <p className="mt-0.5 text-slate-400 leading-relaxed font-sans">{log.description}</p>
                   </div>
                   <div className="text-right shrink-0">

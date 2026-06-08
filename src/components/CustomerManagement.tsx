@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Users, 
@@ -21,10 +21,11 @@ import {
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { Customer } from '../types';
+import { calculateCustomerLedger } from '../lib/utils';
 
 export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- State ---
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customersState, setCustomersState] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -48,19 +49,30 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
   // --- Validation Errors State ---
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  const [sales, setSales] = useState<any[]>([]);
+  const [customerPayments, setCustomerPayments] = useState<any[]>([]);
+
   // --- Real-time Firestore Sync ---
   useEffect(() => {
     if (!auth.currentUser) {
       // Local fallback
       const saved = localStorage.getItem('inventory_customers');
-      setCustomers(saved ? JSON.parse(saved) : []);
+      setCustomersState(saved ? JSON.parse(saved) : []);
+
+      const savedSales = localStorage.getItem('inventory_sales') || '[]';
+      setSales(JSON.parse(savedSales));
+
+      const savedPayments = localStorage.getItem('inventory_customer_payments') || '[]';
+      setCustomerPayments(JSON.parse(savedPayments));
+
       setLoading(false);
       return;
     }
 
     setLoading(true);
     setError(null);
-    const unsub = onSnapshot(collection(db, 'customers'), (snapshot) => {
+
+    const unsubCustomers = onSnapshot(collection(db, 'customers'), (snapshot) => {
       const customerList: Customer[] = [];
       snapshot.forEach((docSnap) => {
         customerList.push(docSnap.data() as Customer);
@@ -71,7 +83,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
         const dateB = b.createdDate ? new Date(b.createdDate).getTime() : 0;
         return dateB - dateA;
       });
-      setCustomers(customerList);
+      setCustomersState(customerList);
       setLoading(false);
     }, (err) => {
       console.error("Customers list synchronize error:", err);
@@ -86,8 +98,39 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
       setLoading(false);
     });
 
-    return () => unsub();
+    const unsubSales = onSnapshot(collection(db, 'sales'), (snapshot) => {
+      const salesList: any[] = [];
+      snapshot.forEach((docSnap) => {
+        salesList.push({ id: docSnap.id, ...docSnap.data() });
+      });
+      setSales(salesList);
+    });
+
+    const unsubPayments = onSnapshot(collection(db, 'customerPayments'), (snapshot) => {
+      const paymentsList: any[] = [];
+      snapshot.forEach((docSnap) => {
+        paymentsList.push({ id: docSnap.id, ...docSnap.data() });
+      });
+      setCustomerPayments(paymentsList);
+    });
+
+    return () => {
+      unsubCustomers();
+      unsubSales();
+      unsubPayments();
+    };
   }, []);
+
+  const customers = useMemo(() => {
+    return customersState.map(c => {
+      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id);
+      return {
+        ...c,
+        dueBalance: Math.max(0, rawDue),
+        customerCredit: rawDue < 0 ? Math.abs(rawDue) : 0
+      };
+    });
+  }, [customersState, sales, customerPayments]);
 
   // --- Auto-hide Feedback ---
   useEffect(() => {
@@ -184,7 +227,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
           currentList = [finalCustomerData, ...currentList];
         }
         localStorage.setItem('inventory_customers', JSON.stringify(currentList));
-        setCustomers(currentList);
+        setCustomersState(currentList);
 
         setFeedback({
           message: editingCustomer 
@@ -262,7 +305,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
           };
           currentList = currentList.map(c => c.id === id ? updatedCustomer : c);
           localStorage.setItem('inventory_customers', JSON.stringify(currentList));
-          setCustomers(currentList);
+          setCustomersState(currentList);
 
           const reasons: string[] = [];
           if (hasSales) reasons.push("sales history");
@@ -281,7 +324,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
           };
           currentList = currentList.map(c => c.id === id ? updatedCustomer : c);
           localStorage.setItem('inventory_customers', JSON.stringify(currentList));
-          setCustomers(currentList);
+          setCustomersState(currentList);
           setFeedback({ message: `Customer record "${name}" has been safely retired as "inactive" locally.`, type: 'success' });
         }
         setIsSaving(false);
@@ -331,6 +374,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
 
   // --- Analytical Calculations ---
   const outstandingBalanceTotal = customers.filter(c => c.status !== 'inactive').reduce((sum, item) => sum + item.dueBalance, 0);
+  const customerCreditTotal = customers.filter(c => c.status !== 'inactive').reduce((sum, item) => sum + (item.customerCredit || 0), 0);
   const creditAccountsCount = customers.filter(c => c.status !== 'inactive' && c.customerType === 'Credit').length;
   const cashAccountsCount = customers.filter(c => c.status !== 'inactive' && c.customerType === 'Cash').length;
 
@@ -351,7 +395,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
             }`}
           >
             {feedback.type === 'success' ? (
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span className="w-2 h-2 rounded-full bg-emerald-55 bg-emerald-500 animate-pulse"></span>
             ) : (
               <AlertTriangle className="h-4 w-4 text-rose-600" />
             )}
@@ -361,7 +405,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
       </AnimatePresence>
 
       {/* METRIC BENTO CARDS */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
         {/* Total Customers */}
         <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between animate-fade-in">
           <div>
@@ -398,7 +442,27 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
             )}
           </div>
           <div className="mt-4 pt-3 border-t border-rose-200/50 text-[11px] text-rose-700/80">
-            Aggregate active customer credits
+            Aggregate active customer dues
+          </div>
+        </div>
+
+        {/* Customer Credit Portfolio Balance */}
+        <div className="bg-emerald-50 rounded-[2rem] p-6 sm:p-8 border border-emerald-100 flex flex-col justify-between animate-fade-in">
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest leading-none">Customer Credit</span>
+              <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+            </div>
+            {loading ? (
+              <div className="h-9 w-28 bg-emerald-200/50 rounded-lg animate-pulse mt-2"></div>
+            ) : (
+              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
+                ${customerCreditTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </p>
+            )}
+          </div>
+          <div className="mt-4 pt-3 border-t border-emerald-200/50 text-[11px] text-emerald-700/85">
+            Advance overpaid customer balances
           </div>
         </div>
 
@@ -591,13 +655,23 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
 
                       {/* Right Section: Balance and Action Hooks */}
                       <div className="flex items-center justify-between sm:justify-end gap-6 border-t sm:border-t-0 border-slate-100 pt-3 sm:pt-0 shrink-0">
-                        <div className="text-left sm:text-right">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none block">Outstanding Due</span>
-                          <span className={`text-lg font-extrabold block mt-1 ${
-                            customer.dueBalance > 0 ? 'text-rose-600' : 'text-slate-700'
-                          }`}>
-                            ${customer.dueBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          </span>
+                        <div className="flex gap-6 items-center">
+                          <div className="text-left sm:text-right">
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none block">Outstanding Due</span>
+                            <span className={`text-lg font-extrabold block mt-1 ${
+                              customer.dueBalance > 0 ? 'text-rose-600' : 'text-slate-705 text-slate-700'
+                            }`}>
+                              ${customer.dueBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            </span>
+                          </div>
+                          {(customer.customerCredit || 0) > 0 && (
+                            <div className="text-left sm:text-right border-l border-slate-155 border-slate-100 pl-4">
+                              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest leading-none block">Customer Credit</span>
+                              <span className="text-lg font-extrabold block mt-1 text-emerald-600">
+                                ${customer.customerCredit.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                              </span>
+                            </div>
+                          )}
                         </div>
 
                         {userRole === 'admin' && (

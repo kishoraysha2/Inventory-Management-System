@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { db, auth } from '../lib/firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
+import { calculateCustomerLedger } from '../lib/utils';
 import { 
   Scale, 
   DollarSign, 
@@ -22,13 +23,24 @@ export default function BalanceSheet() {
   const [loading, setLoading] = useState(true);
   const [sales, setSales] = useState<Sale[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customersState, setCustomersState] = useState<Customer[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [cashLedger, setCashLedger] = useState<CashLedgerEntry[]>([]);
   const [capital, setCapital] = useState<Capital[]>([]);
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [customerPayments, setCustomerPayments] = useState<CustomerPayment[]>([]);
   const [supplierPayments, setSupplierPayments] = useState<SupplierPayment[]>([]);
+
+  const customers = useMemo(() => {
+    return customersState.map(c => {
+      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id);
+      return {
+        ...c,
+        dueBalance: Math.max(0, rawDue),
+        customerCredit: rawDue < 0 ? Math.abs(rawDue) : 0
+      };
+    });
+  }, [customersState, sales, customerPayments]);
 
   // Real-time synchronization
   useEffect(() => {
@@ -41,7 +53,7 @@ export default function BalanceSheet() {
       setProducts(savedProducts ? JSON.parse(savedProducts) : []);
 
       const savedCustomers = localStorage.getItem('inventory_customers');
-      setCustomers(savedCustomers ? JSON.parse(savedCustomers) : []);
+      setCustomersState(savedCustomers ? JSON.parse(savedCustomers) : []);
 
       const savedSuppliers = localStorage.getItem('inventory_suppliers');
       setSuppliers(savedSuppliers ? JSON.parse(savedSuppliers) : []);
@@ -82,7 +94,7 @@ export default function BalanceSheet() {
     const unsubCustomers = onSnapshot(collection(db, 'customers'), (snap) => {
       const list: Customer[] = [];
       snap.forEach(d => list.push(d.data() as Customer));
-      setCustomers(list);
+      setCustomersState(list);
     });
 
     const unsubSuppliers = onSnapshot(collection(db, 'suppliers'), (snap) => {

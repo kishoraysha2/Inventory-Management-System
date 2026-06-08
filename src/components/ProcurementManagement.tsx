@@ -616,10 +616,10 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
   const filteredPurchases = purchases.filter((item) => {
     const query = searchQuery.toLowerCase();
     const matchesSearch = 
-      item.supplierName.toLowerCase().includes(query) ||
-      item.productName.toLowerCase().includes(query) ||
-      item.paymentType.toLowerCase().includes(query) ||
-      item.id.toLowerCase().includes(query);
+      (item.supplierName || '').toLowerCase().includes(query) ||
+      (item.productName || '').toLowerCase().includes(query) ||
+      (item.paymentType || '').toLowerCase().includes(query) ||
+      (item.id || '').toLowerCase().includes(query);
 
     const matchesType = paymentFilter === 'All' || item.paymentType === paymentFilter;
     return matchesSearch && matchesType;

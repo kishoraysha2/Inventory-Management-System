@@ -59,7 +59,7 @@ export default function ItemForm({
         category: categories[0] || '',
         price: '',
         purchasePrice: '',
-        quantity: '',
+        quantity: '0',
         minQuantity: '',
         supplierName: '',
         supplierEmail: '',
@@ -94,6 +94,11 @@ export default function ItemForm({
     const priceNum = parseFloat(formData.price);
     if (!formData.price || isNaN(priceNum) || priceNum < 0) {
       newErrors.price = 'Selling price must be a positive number';
+    }
+
+    const purchasePriceNum = parseFloat(formData.purchasePrice);
+    if (!formData.purchasePrice || isNaN(purchasePriceNum) || purchasePriceNum < 0) {
+      newErrors.purchasePrice = 'Purchase price must be a positive number';
     }
 
     const qtyNum = parseInt(formData.quantity, 10);
@@ -225,30 +230,55 @@ export default function ItemForm({
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
                   Product Category *
                 </label>
-                <select
-                  id="form-category-select"
+                <input
+                  id="form-category-input"
+                  type="text"
                   name="category"
+                  list="categories-datalist"
                   value={formData.category}
                   onChange={handleChange}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 outline-none transition focus:border-slate-400"
-                >
+                  placeholder="e.g. Footwear"
+                  className={`w-full rounded-xl border px-4 py-2.5 outline-none transition focus:border-slate-400 ${
+                    errors.category ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200'
+                  }`}
+                />
+                <datalist id="categories-datalist">
                   {categories.map((cat) => (
-                    <option key={cat} value={cat}>
-                      {cat}
-                    </option>
+                    <option key={cat} value={cat} />
                   ))}
-                </select>
+                </datalist>
+                {errors.category && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.category}</p>}
               </div>
             </div>
 
-            {/* Row 3: Price & Quantity */}
+            {/* Row 3: Prices */}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  Unit Price ($) *
+                  Purchase Price ($) *
                 </label>
                 <input
-                  id="form-price-input"
+                  id="form-purchase-price-input"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  name="purchasePrice"
+                  value={formData.purchasePrice}
+                  onChange={handleChange}
+                  placeholder="150.00"
+                  className={`w-full rounded-xl border px-4 py-2.5 outline-none transition focus:border-slate-400 ${
+                    errors.purchasePrice ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200'
+                  }`}
+                />
+                {errors.purchasePrice && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.purchasePrice}</p>}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
+                  Selling Price ($) *
+                </label>
+                <input
+                  id="form-selling-price-input"
                   type="number"
                   step="0.01"
                   min="0"
@@ -262,7 +292,10 @@ export default function ItemForm({
                 />
                 {errors.price && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.price}</p>}
               </div>
+            </div>
 
+            {/* Row 4: Quantity & Threshold Alert */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
                   Stock Quantity *
@@ -281,10 +314,7 @@ export default function ItemForm({
                 />
                 {errors.quantity && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.quantity}</p>}
               </div>
-            </div>
 
-            {/* Row 4: Alert Threshold & Warehouse Location */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
                   Min Threshold Alert Level *
@@ -303,21 +333,22 @@ export default function ItemForm({
                 />
                 {errors.minQuantity && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.minQuantity}</p>}
               </div>
+            </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  Storage Location / Zone
-                </label>
-                <input
-                  id="form-location-input"
-                  type="text"
-                  name="location"
-                  value={formData.location}
-                  onChange={handleChange}
-                  placeholder="e.g. Warehouse A - Shelf 4"
-                  className="w-full rounded-xl border border-slate-200 px-4 py-2.5 outline-none transition focus:border-slate-400"
-                />
-              </div>
+            {/* Row 4: Warehouse Location */}
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
+                Storage Location / Zone
+              </label>
+              <input
+                id="form-location-input"
+                type="text"
+                name="location"
+                value={formData.location}
+                onChange={handleChange}
+                placeholder="e.g. Warehouse A - Shelf 4"
+                className="w-full rounded-xl border border-slate-200 px-4 py-2.5 outline-none transition focus:border-slate-400"
+              />
             </div>
 
             {/* Row 5: Supplier Info */}

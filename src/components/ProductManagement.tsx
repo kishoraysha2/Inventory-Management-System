@@ -197,7 +197,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
         category: '',
         purchasePrice: '',
         sellingPrice: '',
-        currentStock: '',
+        currentStock: '0',
         minimumStockAlert: '',
         status: 'active'
       });
@@ -266,7 +266,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
       category: formData.category.trim(),
       purchasePrice: parseFloat(formData.purchasePrice),
       sellingPrice: parseFloat(formData.sellingPrice),
-      currentStock: parseInt(formData.currentStock),
+      currentStock: editingProduct ? editingProduct.currentStock : (parseInt(formData.currentStock) || 0),
       minimumStockAlert: parseInt(formData.minimumStockAlert),
       createdDate: timestamp,
       status: (formData.status as 'active' | 'inactive') || 'active'
@@ -600,7 +600,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
                   className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
                 >
                   <Plus className="h-4 w-4" />
-                  <span>Add Product</span>
+                  <span>Add Product (Opening Stock)</span>
                 </button>
               )}
             </div>
@@ -726,6 +726,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
                               <Hash className="h-2.5 w-2.5" />
                               {product.sku}
                             </span>
+
                           </div>
 
                           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-1">
@@ -879,7 +880,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
               <div className="flex items-center justify-between border-b border-slate-100 px-6 sm:px-8 py-5">
                 <div>
                   <h3 className="text-base font-bold text-slate-900">
-                    {editingProduct ? `Modify Product: ${editingProduct.name}` : 'Catalog New Inventory Product'}
+                    {editingProduct ? `Modify Product: ${editingProduct.name}` : 'Catalog New Inventory Product (Opening Stock)'}
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
                     Assign product identification, current inventories, and price margins
@@ -1084,7 +1085,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
                     ) : (
                       <>
                         <Save className="h-4 w-4" />
-                        <span>{editingProduct ? 'Save Product' : 'Catalog Item'}</span>
+                        <span>{editingProduct ? 'Save Product' : 'Catalog Item (Opening Stock)'}</span>
                       </>
                     )}
                   </button>

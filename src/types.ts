@@ -6,6 +6,7 @@ export interface ActivityLog {
   description: string;
   quantityDifference?: number;
   timestamp: string;
+  reason?: string;
 }
 
 export interface Supplier {
@@ -29,6 +30,7 @@ export interface Customer {
   address: string;
   customerType: 'Cash' | 'Credit';
   dueBalance: number;
+  customerCredit?: number;
   createdDate: string;
   status?: 'active' | 'inactive';
 }

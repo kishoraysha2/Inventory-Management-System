@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { calculateCustomerLedger } from '../lib/utils';
 import {
   DollarSign,
   Calendar,
@@ -29,10 +30,22 @@ import { Customer, Supplier, CustomerPayment, SupplierPayment } from '../types';
 export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- Core State ---
   const [activeSegment, setActiveSegment] = useState<'customers' | 'suppliers'>('customers');
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customersState, setCustomersState] = useState<Customer[]>([]);
+  const [sales, setSales] = useState<any[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [customerPayments, setCustomerPayments] = useState<CustomerPayment[]>([]);
   const [supplierPayments, setSupplierPayments] = useState<SupplierPayment[]>([]);
+
+  const customers = useMemo(() => {
+    return customersState.map(c => {
+      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id);
+      return {
+        ...c,
+        dueBalance: Math.max(0, rawDue),
+        customerCredit: rawDue < 0 ? Math.abs(rawDue) : 0
+      };
+    });
+  }, [customersState, sales, customerPayments]);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +79,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
           let customersList = JSON.parse(savedCustomers);
           customersList = customersList.map((c: any) => c.id === cp.customerId ? { ...c, dueBalance: (c.dueBalance ?? 0) + cp.amountPaid } : c);
           localStorage.setItem('inventory_customers', JSON.stringify(customersList));
-          setCustomers(customersList);
+          setCustomersState(customersList);
 
           // Update Customer Payments status
           const savedPayments = localStorage.getItem('inventory_customer_payments') || '[]';
@@ -208,7 +221,10 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
     if (!auth.currentUser) {
       // Local fallback
       const savedCustomers = localStorage.getItem('inventory_customers');
-      setCustomers(savedCustomers ? JSON.parse(savedCustomers) : []);
+      setCustomersState(savedCustomers ? JSON.parse(savedCustomers) : []);
+
+      const savedSales = localStorage.getItem('inventory_sales');
+      setSales(savedSales ? JSON.parse(savedSales) : []);
 
       const savedSuppliers = localStorage.getItem('inventory_suppliers');
       setSuppliers(savedSuppliers ? JSON.parse(savedSuppliers) : []);
@@ -229,7 +245,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
     const unsubCustomers = onSnapshot(collection(db, 'customers'), (snapshot) => {
       const custs: Customer[] = [];
       snapshot.forEach((d) => custs.push(d.data() as Customer));
-      setCustomers(custs.sort((a, b) => a.name.localeCompare(b.name)));
+      setCustomersState(custs.sort((a, b) => a.name.localeCompare(b.name)));
     }, (err) => console.error(err));
 
     // 2. Suppliers Sync
@@ -262,11 +278,19 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
       setSupplierPayments(payments);
     }, (err) => console.error(err));
 
+    // 5. Sales Sync
+    const unsubSales = onSnapshot(collection(db, 'sales'), (snapshot) => {
+      const salesList: any[] = [];
+      snapshot.forEach((d) => salesList.push(d.data()));
+      setSales(salesList);
+    }, (err) => console.error(err));
+
     return () => {
       unsubCustomers();
       unsubSuppliers();
       unsubCustomerPayments();
       unsubSupplierPayments();
+      unsubSales();
     };
   }, []);
 
@@ -375,7 +399,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
           let customersList = JSON.parse(savedCustomers);
           customersList = customersList.map((c: any) => c.id === targetCust.id ? { ...c, dueBalance: remDue } : c);
           localStorage.setItem('inventory_customers', JSON.stringify(customersList));
-          setCustomers(customersList);
+          setCustomersState(customersList);
 
           // Update Cash Ledger
           const savedLedger = localStorage.getItem('inventory_cash_ledger') || '[]';
@@ -896,42 +920,101 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                     <p className="text-[11px] text-slate-400 mt-0.5">Adjust filter keywords to search database.</p>
                   </div>
                 ) : (
-                  <div className="divide-y divide-slate-100">
-                    {searchedCustomers.map((c) => (
-                      <div key={c.id} className="py-3 first:pt-0 last:pb-0 flex items-center justify-between gap-3 group transition">
-                        <div className="min-w-0 flex-1 space-y-1">
-                          <h4 className="text-xs font-bold text-slate-800 truncate group-hover:text-indigo-600 transition">{c.name}</h4>
-                          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-                            <span className="inline-flex shrink-0 px-1.5 py-0.5 text-[9px] bg-slate-50 border border-slate-100 text-slate-400 font-bold rounded-md">
-                              ID: {c.id}
-                            </span>
-                            {c.phone ? (
-                              <span className="inline-flex items-center gap-1 text-[10px] text-slate-500 font-medium truncate">
-                                <Phone className="h-2.5 w-2.5 text-slate-405 text-slate-400" />
-                                <span className="truncate">{c.phone}</span>
-                              </span>
-                            ) : null}
-                          </div>
+                  <div className="space-y-6">
+                    {/* SECTION 1: Outstanding Due */}
+                    <div className="space-y-2">
+                      <h4 className="text-[10px] uppercase tracking-wider text-slate-450 text-slate-400 font-extrabold flex items-center gap-1.5 px-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-rose-550 bg-rose-500"></span>
+                        <span>Customers With Outstanding Due</span>
+                        <span className="ml-auto bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded text-[9px] font-mono">
+                          {searchedCustomers.filter(c => (c.customerCredit || 0) === 0).length}
+                        </span>
+                      </h4>
+                      {searchedCustomers.filter(c => (c.customerCredit || 0) === 0).length === 0 ? (
+                        <p className="text-[10px] text-slate-400 italic pl-3.5 py-2">No customers with outstanding due balances.</p>
+                      ) : (
+                        <div className="divide-y divide-slate-100 bg-slate-50/20 rounded-2xl p-3 border border-slate-100">
+                          {searchedCustomers.filter(c => (c.customerCredit || 0) === 0).map((c) => (
+                            <div key={c.id} className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between gap-3 group transition">
+                              <div className="min-w-0 flex-1 space-y-0.5">
+                                <h4 className="text-xs font-bold text-slate-800 truncate group-hover:text-indigo-600 transition">{c.name}</h4>
+                                <div className="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-1.5">
+                                  <span className="inline-flex shrink-0 px-1 py-0.5 text-[8px] bg-white border border-slate-100 text-slate-400 font-bold rounded">
+                                    ID: {c.id}
+                                  </span>
+                                  {c.phone ? (
+                                    <span className="inline-flex items-center gap-1 text-[9px] text-slate-500 font-medium truncate">
+                                      <Phone className="h-2 w-2 text-slate-400" />
+                                      <span className="truncate">{c.phone}</span>
+                                    </span>
+                                  ) : null}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-3 shrink-0">
+                                <div className="text-right">
+                                  <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest leading-none">Due Balance</p>
+                                  <span className={`text-xs font-bold block mt-1 ${c.dueBalance > 0 ? 'text-orange-600' : 'text-slate-400 font-normal'}`}>
+                                    ${c.dueBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                  </span>
+                                </div>
+                                {(userRole === 'admin' || userRole === 'accountant') && c.dueBalance > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenRecordModal(c.id)}
+                                    className="px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-150 border border-indigo-100 text-indigo-600 font-bold text-[10px] cursor-pointer transition shrink-0"
+                                  >
+                                    Pay
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
                         </div>
-                        <div className="flex items-center gap-3 shrink-0">
-                          <div className="text-right">
-                            <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest leading-none">Due Balance</p>
-                            <span className={`text-xs font-bold block mt-1 ${c.dueBalance > 0 ? 'text-orange-600' : 'text-slate-400 font-normal'}`}>
-                              ${c.dueBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                            </span>
-                          </div>
-                          {(userRole === 'admin' || userRole === 'accountant') && c.dueBalance > 0 && (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenRecordModal(c.id)}
-                              className="px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-150 border border-indigo-100 text-indigo-600 font-bold text-[10px] cursor-pointer transition shrink-0"
-                            >
-                              Pay
-                            </button>
-                          )}
+                      )}
+                    </div>
+
+                    {/* SECTION 2: Credit Balance */}
+                    <div className="space-y-2 pt-2 border-t border-slate-100">
+                      <h4 className="text-[10px] uppercase tracking-wider text-slate-450 text-slate-400 font-extrabold flex items-center gap-1.5 px-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-555 bg-emerald-500 animate-pulse"></span>
+                        <span>Customers With Credit Balance</span>
+                        <span className="ml-auto bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded text-[9px] font-mono">
+                          {searchedCustomers.filter(c => (c.customerCredit || 0) > 0).length}
+                        </span>
+                      </h4>
+                      {searchedCustomers.filter(c => (c.customerCredit || 0) > 0).length === 0 ? (
+                        <p className="text-[10px] text-slate-400 italic pl-3.5 py-2">No customers with credit balances.</p>
+                      ) : (
+                        <div className="divide-y divide-slate-100 bg-slate-50/20 rounded-2xl p-3 border border-slate-100">
+                          {searchedCustomers.filter(c => (c.customerCredit || 0) > 0).map((c) => (
+                            <div key={c.id} className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between gap-3 group transition">
+                              <div className="min-w-0 flex-1 space-y-0.5">
+                                <h4 className="text-xs font-bold text-slate-800 truncate group-hover:text-emerald-600 transition">{c.name}</h4>
+                                <div className="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-1.5">
+                                  <span className="inline-flex shrink-0 px-1 py-0.5 text-[8px] bg-white border border-slate-100 text-slate-400 font-bold rounded">
+                                    ID: {c.id}
+                                  </span>
+                                  {c.phone ? (
+                                    <span className="inline-flex items-center gap-1 text-[9px] text-slate-500 font-medium truncate">
+                                      <Phone className="h-2 w-2 text-slate-404 text-slate-400" />
+                                      <span className="truncate">{c.phone}</span>
+                                    </span>
+                                  ) : null}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-3 shrink-0">
+                                <div className="text-right">
+                                  <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest leading-none">Credit Balance</p>
+                                  <span className="text-xs font-bold block mt-1 text-emerald-600 font-extrabold">
+                                    ${(c.customerCredit || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
                         </div>
-                      </div>
-                    ))}
+                      )}
+                    </div>
                   </div>
                 )
               ) : (
@@ -1078,8 +1161,8 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
 
                         {/* State step progress indicator */}
                         <div className="text-[10px] text-slate-400 border-l border-slate-100 pl-4 space-y-0.5 min-w-[124px]">
-                          <div>Owed: <span className="font-bold text-slate-600">${p.previousDue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
-                          <div>Rem: <span className="font-bold text-slate-800">${p.remainingDue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
+                          <div>Owed: <span className="font-bold text-slate-600">${(p.previousDue ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
+                          <div>Rem: <span className="font-bold text-slate-800">${(p.remainingDue ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
                         </div>
 
                         {/* Void Control */}

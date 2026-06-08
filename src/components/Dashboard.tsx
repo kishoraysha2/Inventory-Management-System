@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { calculateCustomerLedger } from '../lib/utils';
 import { 
   TrendingUp, 
   DollarSign, 
@@ -22,7 +23,9 @@ import {
   X,
   CheckCircle2,
   AlertCircle,
-  Trash2
+  Trash2,
+  Archive,
+  Briefcase
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
@@ -32,12 +35,25 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
   // --- States ---
   const [sales, setSales] = useState<Sale[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customersState, setCustomersState] = useState<Customer[]>([]);
+  const [customerPayments, setCustomerPayments] = useState<any[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [purchases, setPurchases] = useState<any[]>([]);
   const [systemLogs, setSystemLogs] = useState<any[]>([]);
   const [cashLedger, setCashLedger] = useState<any[]>([]);
   const [capital, setCapital] = useState<Capital[]>([]);
   const [loading, setLoading] = useState(true);
+
+  const customers = useMemo(() => {
+    return customersState.map(c => {
+      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id);
+      return {
+        ...c,
+        dueBalance: Math.max(0, rawDue),
+        customerCredit: rawDue < 0 ? Math.abs(rawDue) : 0
+      };
+    });
+  }, [customersState, sales, customerPayments]);
   const [timePeriod, setTimePeriod] = useState<'all' | 'thirty_days'>('all');
 
   // --- Simulated Identity Policy Control ---
@@ -170,10 +186,16 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
       setProducts(savedProducts ? JSON.parse(savedProducts) : []);
 
       const savedCustomers = localStorage.getItem('inventory_customers');
-      setCustomers(savedCustomers ? JSON.parse(savedCustomers) : []);
+      setCustomersState(savedCustomers ? JSON.parse(savedCustomers) : []);
+
+      const savedPayments = localStorage.getItem('inventory_customer_payments');
+      setCustomerPayments(savedPayments ? JSON.parse(savedPayments) : []);
 
       const savedSuppliers = localStorage.getItem('inventory_suppliers');
       setSuppliers(savedSuppliers ? JSON.parse(savedSuppliers) : []);
+
+      const savedPurchases = localStorage.getItem('inventory_purchases');
+      setPurchases(savedPurchases ? JSON.parse(savedPurchases) : []);
 
       const savedLogs = localStorage.getItem('inventory_system_logs');
       setSystemLogs(savedLogs ? JSON.parse(savedLogs) : []);
@@ -218,9 +240,20 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
       snapshot.forEach((docSnap) => {
         custList.push(docSnap.data() as Customer);
       });
-      setCustomers(custList);
+      setCustomersState(custList);
     }, (err) => {
       console.error("Dashboard error syncing customers", err);
+    });
+
+    // 3.1 Sync Customer Payments
+    const unsubPayments = onSnapshot(collection(db, 'customerPayments'), (snapshot) => {
+      const paymentsList: any[] = [];
+      snapshot.forEach((docSnap) => {
+        paymentsList.push(docSnap.data());
+      });
+      setCustomerPayments(paymentsList);
+    }, (err) => {
+      console.error("Dashboard error syncing customerPayments", err);
     });
 
     // 4. Sync Suppliers
@@ -277,14 +310,29 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
       setLoading(false);
     });
 
+    // 8. Sync Purchases
+    const unsubPurchases = onSnapshot(collection(db, 'purchases'), (snapshot) => {
+      const list: any[] = [];
+      snapshot.forEach((docSnap) => {
+        if (docSnap.exists()) {
+          list.push(docSnap.data());
+        }
+      });
+      setPurchases(list);
+    }, (err) => {
+      console.error("Dashboard error syncing purchases", err);
+    });
+
     return () => {
       unsubSales();
       unsubProducts();
       unsubCustomers();
+      unsubPayments();
       unsubSuppliers();
       unsubLogs();
       unsubCashLedger();
       unsubCapital();
+      unsubPurchases();
     };
   }, []);
 
@@ -293,7 +341,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
   // Set reference dates based on metadata/local simulation time (2026-06-01)
   const simulationDateStr = "2026-06-01";
   const refDate = new Date(simulationDateStr);
-  const todayStr = refDate.toISOString().split('T')[0]; // "2026-06-01"
+  const todayStr = new Date().toISOString().split('T')[0];
 
   // 1. Today's Sales (excluding VOID/voided)
   const todaysSalesValue = sales.filter(s => {
@@ -311,18 +359,55 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
     return d.getMonth() === currentMonthNum && d.getFullYear() === currentYearNum;
   }).reduce((sum, s) => sum + s.totalAmount, 0);
 
-  // 3. Total Profit (based strictly on subtotal minus costOfGoodsSold, excluding tax) (excluding VOID/voided)
-  const salesProfitValue = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided').reduce((sum, s) => {
+  // 3. Profit calculations (based strictly on subtotal minus costOfGoodsSold, excluding tax) (excluding VOID/voided)
+  const cashProfitValue = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided' && (s.paymentType || '').toString().toUpperCase().trim() !== 'CREDIT').reduce((sum, s) => {
     const saleSubtotal = s.subtotal ?? (s.quantity * (s.unitPrice ?? s.sellingPrice));
     const saleCOGS = s.costOfGoodsSold !== undefined ? s.costOfGoodsSold : (s.productPurchasePriceAtSale !== undefined ? s.productPurchasePriceAtSale : s.sellingPrice * 0.6) * s.quantity;
     return sum + (saleSubtotal - saleCOGS);
   }, 0);
+
+  const creditProfitValue = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided' && (s.paymentType || '').toString().toUpperCase().trim() === 'CREDIT').reduce((sum, s) => {
+    const saleSubtotal = s.subtotal ?? (s.quantity * (s.unitPrice ?? s.sellingPrice));
+    const saleCOGS = s.costOfGoodsSold !== undefined ? s.costOfGoodsSold : (s.productPurchasePriceAtSale !== undefined ? s.productPurchasePriceAtSale : s.sellingPrice * 0.6) * s.quantity;
+    return sum + (saleSubtotal - saleCOGS);
+  }, 0);
+
+  const salesProfitValue = cashProfitValue + creditProfitValue;
 
   // 4. Total Purchase (Valuation of stock currently acquired in our inventory)
   const totalPurchaseValue = products
     .filter(p => p.status !== 'inactive')
     .reduce((sum, p) => {
       return sum + (p.purchasePrice * p.currentStock);
+    }, 0);
+
+  // 4.1. Opening Stock Value Calculation
+  // Calculates the sum of all inventory value created through the "Add Product (Opening Stock)" process.
+  // Using the formula: initialStock = p.currentStock - totalProcured + totalSold
+  const openingStockValueCost = products
+    .filter(p => p.status !== 'inactive')
+    .reduce((sum, p) => {
+      const totalProcured = (purchases || [])
+        .filter(pur => pur.productId === p.id && pur.status !== 'VOID' && pur.status !== 'voided')
+        .reduce((s, pur) => s + (pur.quantity || 0), 0);
+      const totalSold = (sales || [])
+        .filter(sale => sale.productId === p.id && sale.status !== 'VOID' && sale.status !== 'voided')
+        .reduce((s, sale) => s + (sale.quantity || 0), 0);
+      const openingQty = Math.max(0, p.currentStock - totalProcured + totalSold);
+      return sum + (openingQty * p.purchasePrice);
+    }, 0);
+
+  const openingStockValueRetail = products
+    .filter(p => p.status !== 'inactive')
+    .reduce((sum, p) => {
+      const totalProcured = (purchases || [])
+        .filter(pur => pur.productId === p.id && pur.status !== 'VOID' && pur.status !== 'voided')
+        .reduce((s, pur) => s + (pur.quantity || 0), 0);
+      const totalSold = (sales || [])
+        .filter(sale => sale.productId === p.id && sale.status !== 'VOID' && sale.status !== 'voided')
+        .reduce((s, sale) => s + (sale.quantity || 0), 0);
+      const openingQty = Math.max(0, p.currentStock - totalProcured + totalSold);
+      return sum + (openingQty * p.sellingPrice);
     }, 0);
 
   // 5. Customer Due (Sum of receivables)
@@ -670,24 +755,110 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
           </div>
         </motion.div>
 
-        {/* CARD 8: Cumulative Profit (Adding premium calculation value) */}
+        {/* CARD 8: Cumulative Profit (Adding premium calculation value with Cash & Credit breakdown) */}
         <motion.div
           whileHover={{ y: -3 }}
           transition={{ duration: 0.2 }}
           className="bg-white rounded-[2rem] p-6 border border-slate-200/90 shadow-2xs hover:shadow-xs transition flex flex-col justify-between"
         >
-          <div className="space-y-2">
+          <div className="space-y-4">
             <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-              <span>Cumulative Profit</span>
-              <Sparkles className="h-4 w-4 text-indigo-550 text-indigo-600" />
+              <span>Total Profit</span>
+              <Sparkles className="h-4 w-4 text-emerald-500 animate-pulse" />
             </div>
-            <h3 className="text-3xl font-extrabold tracking-tight text-slate-950 pt-1">
-              ${salesProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </h3>
+            
+            <div>
+              <h3 className="text-3xl font-extrabold tracking-tight text-slate-950">
+                ${salesProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </h3>
+              <p className="text-[10px] text-slate-400 mt-1">Total combined profit margin</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 border-t border-slate-105 border-slate-100 pt-3">
+              <div>
+                <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Cash Profit</span>
+                <span className="text-sm font-extrabold text-emerald-600 block mt-0.5">
+                  ${cashProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+              <div className="border-l border-slate-100 pl-3">
+                <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Credit Profit</span>
+                <span className="text-sm font-extrabold text-indigo-650 text-indigo-600 block mt-0.5">
+                  ${creditProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+            </div>
           </div>
+          
           <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-450 text-slate-400">
             <span>Gross margin estimate</span>
             <span className="font-semibold text-slate-700 font-mono">{averageProfitMargin.toFixed(1)}% Avg</span>
+          </div>
+        </motion.div>
+
+        {/* CARD 9: Original Opening Stock Value */}
+        <motion.div
+          whileHover={{ y: -3 }}
+          transition={{ duration: 0.2 }}
+          className="bg-indigo-50/20 border border-indigo-100 rounded-[2rem] p-6 shadow-2xs hover:shadow-xs transition flex flex-col justify-between"
+        >
+          <div className="space-y-4">
+            <div className="flex items-center justify-between text-[10px] font-bold text-indigo-500 uppercase tracking-widest font-sans">
+              <span>Original Opening Stock Value</span>
+              <Archive className="h-4 w-4 text-indigo-500 opacity-80" />
+            </div>
+
+            <div>
+              <h3 className="text-3xl font-extrabold tracking-tight text-indigo-950 font-mono">
+                ${openingStockValueCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </h3>
+              <p className="text-[10px] text-slate-400 mt-1 font-sans">Total initial setup value (at Cost)</p>
+            </div>
+
+            <div className="border-t border-indigo-100/70 pt-3">
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block font-sans">Original Opening Stock Retail Value</span>
+              <span className="text-sm font-extrabold text-indigo-700 block mt-0.5 font-mono">
+                ${openingStockValueRetail.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-indigo-100/50 flex items-center justify-between text-[11px] text-slate-400 font-sans">
+            <span>Setup Inventory base</span>
+            <span className="text-indigo-600 font-bold uppercase text-[9px] px-2 py-0.5 rounded border bg-indigo-50 border-indigo-150">Initial Stock</span>
+          </div>
+        </motion.div>
+
+        {/* CARD 10: Current Inventory Asset Value */}
+        <motion.div
+          whileHover={{ y: -3 }}
+          transition={{ duration: 0.2 }}
+          className="bg-emerald-50/15 border border-emerald-100 rounded-[2rem] p-6 shadow-2xs hover:shadow-xs transition flex flex-col justify-between"
+        >
+          <div className="space-y-4">
+            <div className="flex items-center justify-between text-[10px] font-bold text-emerald-600 uppercase tracking-widest font-sans">
+              <span>Current Inventory Asset Value</span>
+              <Briefcase className="h-4 w-4 text-emerald-500 opacity-80" />
+            </div>
+
+            <div>
+              <h3 className="text-3xl font-extrabold tracking-tight text-emerald-950 font-mono">
+                ${totalPurchaseValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </h3>
+              <p className="text-[10px] text-slate-400 mt-1 font-sans">Actual capital currently tied up in inventory assets</p>
+            </div>
+
+            <div className="border-t border-emerald-100/70 pt-3">
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block font-sans">Valuation Basis</span>
+              <span className="text-xs font-semibold text-slate-500 block mt-0.5 font-sans">
+                Purchase Price × Current Stock
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-emerald-100/50 flex items-center justify-between text-[11px] text-slate-400 font-sans">
+            <span>Live Asset Value</span>
+            <span className="text-emerald-700 font-bold uppercase text-[9px] px-2 py-0.5 rounded border bg-emerald-50 border-emerald-150">Asset Valuation</span>
           </div>
         </motion.div>
 

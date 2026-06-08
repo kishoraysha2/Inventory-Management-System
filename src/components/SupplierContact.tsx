@@ -26,7 +26,7 @@ export default function SupplierContact({
 
     // Get low stock items supplied by this supplier
     const itemsToRestock = lowStockItems.filter(
-      (item) => item.supplierName.toLowerCase() === currentSupplier.name.toLowerCase()
+      (item) => (item.supplierName || '').toLowerCase() === (currentSupplier?.name || '').toLowerCase()
     );
 
     setTimeout(() => {

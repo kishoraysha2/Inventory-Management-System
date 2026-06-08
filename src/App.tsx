@@ -100,6 +100,12 @@ export default function App() {
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports' | 'balancesheet' | 'users'>('dashboard');
 
+  // --- Inventory Adjustment Modal State ---
+  const [adjustmentProduct, setAdjustmentProduct] = useState<Product | null>(null);
+  const [adjustmentDelta, setAdjustmentDelta] = useState<number>(0);
+  const [adjustmentReason, setAdjustmentReason] = useState<string>('Physical Count Correction');
+  const [isAdjusting, setIsAdjusting] = useState<boolean>(false);
+
   // --- Core Authentication State ---
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [currentUserProfile, setCurrentUserProfile] = useState<{ role: 'admin' | 'accountant' | 'cashier' | 'viewer'; name: string; email: string } | null>(null);
@@ -613,7 +619,7 @@ export default function App() {
   const lowStockList = products.filter((p) => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert);
 
   // --- Quick Stock Increments ---
-  const handleQuickQuantityAdjust = async (productId: string, delta: number) => {
+  const handleQuickQuantityAdjust = (productId: string, delta: number) => {
     if (!permissions.canEditInventory) {
       setFeedback({ message: 'Access denied: You do not have permission to adjust inventory levels.', type: 'error' });
       return;
@@ -627,21 +633,49 @@ export default function App() {
       return;
     }
 
+    setAdjustmentProduct(productToUpdate);
+    setAdjustmentDelta(delta);
+    setAdjustmentReason('Physical Count Correction');
+  };
+
+  const handleConfirmAdjustment = async () => {
+    if (!adjustmentProduct) return;
+    setIsAdjusting(true);
+
+    const productId = adjustmentProduct.id;
+    const delta = adjustmentDelta;
+
+    const productToUpdate = products.find((p) => p.id === productId);
+    if (!productToUpdate) {
+      setAdjustmentProduct(null);
+      setIsAdjusting(false);
+      return;
+    }
+
+    const newQty = productToUpdate.currentStock + delta;
+    if (newQty < 0) {
+      setFeedback({ message: `Cannot decrease stock level below 0 for ${productToUpdate.name}.`, type: 'error' });
+      setAdjustmentProduct(null);
+      setIsAdjusting(false);
+      return;
+    }
+
     const timestamp = new Date().toISOString();
     const updatedProduct: Product = {
       ...productToUpdate,
       currentStock: newQty,
     };
 
-    // Log activity
+    // Log activity including selected reason
     const logEntry: ActivityLog = {
       id: `log-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
       itemId: productToUpdate.id,
       itemName: productToUpdate.name,
       type: 'stock_change',
-      description: `Adjusted quantity from ${productToUpdate.currentStock} to ${newQty} (${delta > 0 ? '+' : ''}${delta})`,
+      description: `Adjusted quantity from ${productToUpdate.currentStock} to ${newQty} (${delta > 0 ? '+' : ''}${delta}) - Reason: ${adjustmentReason}`,
       quantityDifference: delta,
       timestamp,
+      reason: adjustmentReason,
     };
 
     try {
@@ -649,15 +683,18 @@ export default function App() {
       await setDoc(doc(db, 'logs', logEntry.id), logEntry);
       await logSystemActivity(
         "Stock updated",
-        `Adjusted stock level for item "${productToUpdate.name}" (SKU: ${productToUpdate.sku}) from ${productToUpdate.currentStock} to ${newQty} (${delta > 0 ? '+' : ''}${delta})`
+        `Adjusted stock level for item "${productToUpdate.name}" (SKU: ${productToUpdate.sku}) from ${productToUpdate.currentStock} to ${newQty} (${delta > 0 ? '+' : ''}${delta}) - Reason: ${adjustmentReason}`
       );
-      setFeedback({ message: `Level updated for ${productToUpdate.name} (${newQty} units total).`, type: 'success' });
+      setFeedback({ message: `Inventory Adjustment completed: ${productToUpdate.name} is now at ${newQty} units.`, type: 'success' });
     } catch (e) {
       try {
         handleFirestoreError(e, OperationType.WRITE, `products/${productId}`);
       } catch (err: any) {
         setFeedback({ message: `Firestore Write Error: ${err.message}`, type: 'error' });
       }
+    } finally {
+      setIsAdjusting(false);
+      setAdjustmentProduct(null);
     }
   };
 
@@ -2036,6 +2073,125 @@ export default function App() {
         itemToEdit={productToEdit}
         categories={categories.filter((cat) => cat !== 'All')}
       />
+
+      {/* INVENTORY ADJUSTMENT MODAL */}
+      <AnimatePresence>
+        {adjustmentProduct && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              transition={{ duration: 0.2 }}
+              className="w-full max-w-md bg-white border border-slate-200 rounded-[2rem] p-6 sm:p-8 shadow-xl relative text-slate-800"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+                <div>
+                  <h3 className="font-sans text-base font-extrabold text-slate-900 uppercase tracking-wide">
+                    Inventory Adjustment
+                  </h3>
+                  <p className="text-[11px] text-slate-400 font-sans mt-0.5 font-medium">
+                    Adjust catalog level and register a certified audit trail
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAdjustmentProduct(null)}
+                  className="rounded-full p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="py-5 space-y-4 font-sans text-xs">
+                {/* Product specifics */}
+                <div className="bg-slate-50/70 border border-slate-100 rounded-xl p-3.5 space-y-2">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400 font-medium">Product Name:</span>
+                    <span className="font-bold text-slate-900">{adjustmentProduct.name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400 font-medium">Product SKU:</span>
+                    <span className="font-mono font-bold text-slate-700 bg-white border border-slate-100 px-1.5 py-0.5 rounded text-[10px]">
+                      {adjustmentProduct.sku}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Adjustment values */}
+                <div className="grid grid-cols-3 gap-3 text-center">
+                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-100/50">
+                    <span className="block text-[10px] text-slate-400 font-bold uppercase tracking-wider">Before</span>
+                    <span className="block text-base font-extrabold text-slate-800 font-mono mt-1">
+                      {adjustmentProduct.currentStock}
+                    </span>
+                  </div>
+                  <div className="bg-amber-50/50 p-3 rounded-xl border border-amber-100">
+                    <span className="block text-[10px] text-amber-600 font-bold uppercase tracking-wider">Change</span>
+                    <span className="block text-base font-extrabold text-amber-700 font-mono mt-1">
+                      {adjustmentDelta > 0 ? `+${adjustmentDelta}` : adjustmentDelta}
+                    </span>
+                  </div>
+                  <div className="bg-emerald-50/50 p-3 rounded-xl border border-emerald-100">
+                    <span className="block text-[10px] text-emerald-600 font-bold uppercase tracking-wider">After</span>
+                    <span className="block text-base font-extrabold text-emerald-700 font-mono mt-1">
+                      {adjustmentProduct.currentStock + adjustmentDelta}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Reason drop control */}
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">
+                    Reason for Adjustment <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={adjustmentReason}
+                    onChange={(e) => setAdjustmentReason(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 text-slate-700 rounded-xl px-3.5 py-2.5 outline-none font-sans text-xs focus:border-slate-400 transition cursor-pointer font-medium"
+                    required
+                  >
+                    <option value="Physical Count Correction">📋 Physical Count Correction</option>
+                    <option value="Damaged Stock">💥 Damaged Stock</option>
+                    <option value="Lost Stock">🔍 Lost Stock</option>
+                    <option value="Found Stock">🎁 Found Stock</option>
+                    <option value="Other">❓ Other</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Actions footer */}
+              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setAdjustmentProduct(null)}
+                  disabled={isAdjusting}
+                  className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-500 hover:bg-slate-50 transition active:scale-98 disabled:opacity-55"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmAdjustment}
+                  disabled={isAdjusting}
+                  className="px-5 py-2.5 rounded-xl bg-slate-900 border border-slate-900 text-xs font-bold text-white hover:bg-slate-800 transition shadow-xs flex items-center gap-2 active:scale-98 disabled:opacity-75"
+                >
+                  {isAdjusting ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    "Apply Adjustment"
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Footer Bar */}
       <footer className="mt-8 pt-6 border-t border-slate-200 flex flex-wrap justify-between items-center gap-4 text-[10px] text-slate-400 font-bold uppercase tracking-widest leading-none">

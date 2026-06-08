@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { calculateCustomerLedger } from '../lib/utils';
 import { 
   TrendingUp, 
   Search, 
@@ -76,11 +77,98 @@ export const INITIAL_SALES: Sale[] = [
 export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- States ---
   const [sales, setSales] = useState<Sale[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customersState, setCustomersState] = useState<Customer[]>([]);
+  const [customerPayments, setCustomerPayments] = useState<any[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+
+  const customers = useMemo(() => {
+    return customersState.map(c => {
+      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id);
+      return {
+        ...c,
+        dueBalance: Math.max(0, rawDue),
+        customerCredit: rawDue < 0 ? Math.abs(rawDue) : 0
+      };
+    });
+  }, [customersState, sales, customerPayments]);
+
+  const creditSalesPaymentInfo = useMemo(() => {
+    const infoMap = new Map<string, { amountPaid: number; remainingBalance: number; status: 'Unpaid' | 'Partially Paid' | 'Fully Paid' }>();
+    
+    // Group sales (valid credit sales only) by customer ID
+    const customerSalesGroup: Record<string, Sale[]> = {};
+    sales.forEach(s => {
+      const status = (s.status || '').toString().toUpperCase().trim();
+      const isVoid = status === 'VOID' || status === 'VOIDED';
+      const isCredit = (s.paymentType || '').toString().toUpperCase().trim() === 'CREDIT';
+      if (!isVoid && isCredit) {
+        if (!customerSalesGroup[s.customerId]) {
+          customerSalesGroup[s.customerId] = [];
+        }
+        customerSalesGroup[s.customerId].push(s);
+      }
+    });
+
+    // Group payments (valid customer payments only) by customer ID
+    const customerPaymentsGroup: Record<string, any[]> = {};
+    customerPayments.forEach(p => {
+      const status = (p.status || '').toString().toUpperCase().trim();
+      const isVoid = status === 'VOID' || status === 'VOIDED';
+      if (!isVoid) {
+        if (!customerPaymentsGroup[p.customerId]) {
+          customerPaymentsGroup[p.customerId] = [];
+        }
+        customerPaymentsGroup[p.customerId].push(p);
+      }
+    });
+
+    // For each customer, allocate payments FIFO style to credit sales
+    Object.keys(customerSalesGroup).forEach(custId => {
+      const custSales = [...customerSalesGroup[custId]];
+      // Sort credit sales oldest to newest to allocate FIFO
+      custSales.sort((a, b) => new Date(a.saleDate || a.timestamp || 0).getTime() - new Date(b.saleDate || b.timestamp || 0).getTime());
+
+      const custPayments = customerPaymentsGroup[custId] || [];
+      // Sum total paid by this customer
+      let totalPaidPool = custPayments.reduce((sum, p) => sum + (Number(p.amountPaid) || 0), 0);
+
+      custSales.forEach(sale => {
+        const invoiceTotal = sale.totalAmount;
+        let allocated = 0;
+
+        if (totalPaidPool > 0) {
+          if (totalPaidPool >= invoiceTotal) {
+            allocated = invoiceTotal;
+            totalPaidPool -= invoiceTotal;
+          } else {
+            allocated = totalPaidPool;
+            totalPaidPool = 0;
+          }
+        }
+
+        const remaining = Math.max(0, invoiceTotal - allocated);
+        let status: 'Unpaid' | 'Partially Paid' | 'Fully Paid' = 'Unpaid';
+        if (allocated === 0) {
+          status = 'Unpaid';
+        } else if (remaining === 0) {
+          status = 'Fully Paid';
+        } else {
+          status = 'Partially Paid';
+        }
+
+        infoMap.set(sale.id, {
+          amountPaid: allocated,
+          remainingBalance: remaining,
+          status: status
+        });
+      });
+    });
+
+    return infoMap;
+  }, [sales, customerPayments]);
   
   const [searchQuery, setSearchQuery] = useState('');
   const [paymentFilter, setPaymentFilter] = useState<'All' | 'Cash' | 'Credit'>('All');
@@ -151,7 +239,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
 
         setSales(salesList);
         setProducts(productsList);
-        setCustomers(customersList);
+        setCustomersState(customersList);
 
         setFeedback({
           message: `Sales transaction "${sale.id}" has been voided locally. Restored stocks and liabilities.`,
@@ -250,10 +338,13 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
       setSales(savedSales ? JSON.parse(savedSales) : INITIAL_SALES);
 
       const savedCustomers = localStorage.getItem('inventory_customers');
-      setCustomers(savedCustomers ? JSON.parse(savedCustomers) : []);
+      setCustomersState(savedCustomers ? JSON.parse(savedCustomers) : []);
 
       const savedProducts = localStorage.getItem('inventory_products');
       setProducts(savedProducts ? JSON.parse(savedProducts) : []);
+
+      const savedPayments = localStorage.getItem('inventory_customer_payments');
+      setCustomerPayments(savedPayments ? JSON.parse(savedPayments) : []);
 
       setLoading(false);
       return;
@@ -296,7 +387,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
         custList.push(docSnap.data() as Customer);
       });
       custList.sort((a, b) => a.name.localeCompare(b.name));
-      setCustomers(custList);
+      setCustomersState(custList);
     }, (error) => {
       try {
         handleFirestoreError(error, OperationType.LIST, 'customers');
@@ -321,10 +412,22 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
       }
     });
 
+    // 4. Sync Customer Payments
+    const unsubPayments = onSnapshot(collection(db, 'customerPayments'), (snapshot) => {
+      const paymentsList: any[] = [];
+      snapshot.forEach((docSnap) => {
+        paymentsList.push(docSnap.data());
+      });
+      setCustomerPayments(paymentsList);
+    }, (error) => {
+      console.error("Payments sync error in SalesManagement", error);
+    });
+
     return () => {
       unsubSales();
       unsubCustomers();
       unsubProducts();
+      unsubPayments();
     };
   }, []);
 
@@ -530,7 +633,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
 
         setSales(salesList);
         setProducts(productsList);
-        setCustomers(customersList);
+        setCustomersState(customersList);
 
         setFeedback({
           message: `Successfully logged offline sale of $${totalAmount.toFixed(2)} to "${chosenCust.name}".`,
@@ -658,9 +761,9 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
   const filteredSalesList = sales.filter((sale) => {
     const query = searchQuery.toLowerCase();
     const matchesSearch = 
-      sale.customerName.toLowerCase().includes(query) ||
-      sale.productName.toLowerCase().includes(query) ||
-      sale.paymentType.toLowerCase().includes(query);
+      (sale.customerName || '').toLowerCase().includes(query) ||
+      (sale.productName || '').toLowerCase().includes(query) ||
+      (sale.paymentType || '').toLowerCase().includes(query);
 
     const matchesFilterStatus = paymentFilter === 'All' || sale.paymentType === paymentFilter;
 
@@ -740,7 +843,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
         <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Outstanding Account credit</span>
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Total Credit Sales</span>
               <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-amber-50 border border-amber-100 text-amber-700 uppercase">
                 Receivables
               </span>
@@ -906,6 +1009,58 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
                             </span>
                           </div>
                         </div>
+
+                        {/* Credit Sale Payment Visibility */}
+                        {sale.paymentType === 'Credit' && (sale.status !== 'VOID' && sale.status !== 'voided') && (() => {
+                          const info = creditSalesPaymentInfo.get(sale.id) || { amountPaid: 0, remainingBalance: sale.totalAmount, status: 'Unpaid' };
+                          return (
+                            <div className="mt-3 pt-3 border-t border-dashed border-slate-100 space-y-2">
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                                <div>
+                                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Payment Status</span>
+                                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-black mt-0.5 border ${
+                                    info.status === 'Fully Paid'
+                                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                      : info.status === 'Partially Paid'
+                                      ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                      : 'bg-rose-50 text-rose-800 border-rose-200'
+                                  }`}>
+                                    <span className={`h-1.5 w-1.5 rounded-full ${
+                                      info.status === 'Fully Paid' ? 'bg-emerald-500 animate-pulse' : info.status === 'Partially Paid' ? 'bg-amber-500' : 'bg-rose-500'
+                                    }`}></span>
+                                    {info.status}
+                                  </span>
+                                </div>
+                                <div className="text-left sm:text-right">
+                                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Invoice Total</span>
+                                  <span className="font-bold text-slate-700 block mt-0.5">
+                                    ${sale.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                  </span>
+                                </div>
+                                <div className="text-left sm:text-right">
+                                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Amount Paid</span>
+                                  <span className="font-bold text-emerald-600 block mt-0.5">
+                                    ${info.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                  </span>
+                                </div>
+                                <div className="text-left sm:text-right">
+                                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Remaining Balance</span>
+                                  <span className="font-bold text-rose-605 text-rose-605 block mt-0.5">
+                                    ${info.remainingBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
+                                <div 
+                                  className={`h-full rounded-full transition-all duration-300 ${
+                                    info.status === 'Fully Paid' ? 'bg-emerald-500' : 'bg-amber-500'
+                                  }`}
+                                  style={{ width: `${Math.min(100, (info.amountPaid / sale.totalAmount) * 100)}%` }}
+                                ></div>
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {/* Selling cost display */}
@@ -1281,6 +1436,8 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
             sale={selectedSaleForInvoice}
             customers={customers}
             products={products}
+            sales={sales}
+            customerPayments={customerPayments}
             onClose={() => setSelectedSaleForInvoice(null)}
           />
         )}

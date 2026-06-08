@@ -22,6 +22,8 @@ interface TaxInvoiceModalProps {
   sale: Sale;
   customers: Customer[];
   products: Product[];
+  sales: Sale[];
+  customerPayments: any[];
   onClose: () => void;
 }
 
@@ -45,7 +47,7 @@ const DEFAULT_COMPANY_PROFILE: CompanyProfile = {
   taxRatePercent: 15
 };
 
-export default function TaxInvoiceModal({ sale, customers, products, onClose }: TaxInvoiceModalProps) {
+export default function TaxInvoiceModal({ sale, customers, products, sales, customerPayments, onClose }: TaxInvoiceModalProps) {
   // --- State Configuration with LocalStorage Persistence ---
   const [company, setCompany] = useState<CompanyProfile>(() => {
     const saved = localStorage.getItem('invoice_company_profile');
@@ -58,6 +60,128 @@ export default function TaxInvoiceModal({ sale, customers, products, onClose }: 
     }
     return DEFAULT_COMPANY_PROFILE;
   });
+
+  // Calculate payment status, summary, and history track
+  const paymentInfo = React.useMemo(() => {
+    const isCredit = (sale.paymentType || '').toString().toUpperCase().trim() === 'CREDIT';
+    const isVoid = (sale as any).status === 'VOID' || (sale as any).status === 'voided';
+    
+    if (isVoid) {
+      return {
+        amountPaid: 0,
+        remainingBalance: 0,
+        status: 'VOIDED',
+        paymentHistory: [] as { paymentDate: string; amountPaid: number; notes?: string }[]
+      };
+    }
+
+    if (!isCredit) {
+      return {
+        amountPaid: sale.totalAmount,
+        remainingBalance: 0,
+        status: 'Fully Paid',
+        paymentHistory: [
+          {
+            paymentDate: sale.saleDate,
+            amountPaid: sale.totalAmount,
+            notes: 'Cash immediate settlement'
+          }
+        ]
+      };
+    }
+
+    const custId = sale.customerId;
+
+    // Filter and sort all valid credit sales of this customer chronologically
+    const custSales = sales.filter(s => {
+      const status = ((s as any).status || '').toString().toUpperCase().trim();
+      const sVoid = status === 'VOID' || status === 'VOIDED';
+      const sCredit = (s.paymentType || '').toString().toUpperCase().trim() === 'CREDIT';
+      return s.customerId === custId && !sVoid && sCredit;
+    });
+    custSales.sort((a, b) => new Date(a.saleDate || a.timestamp || 0).getTime() - new Date(b.saleDate || b.timestamp || 0).getTime());
+
+    // Filter and sort all valid payments of this customer chronologically
+    const custPayments = customerPayments.filter(p => {
+      const status = (p.status || '').toString().toUpperCase().trim();
+      return p.customerId === custId && status !== 'VOID' && status !== 'VOIDED';
+    });
+    custPayments.sort((a, b) => new Date(a.paymentDate || 0).getTime() - new Date(b.paymentDate || 0).getTime());
+
+    // Allocate payment coins FIFO style
+    interface TempSale {
+      id: string;
+      totalAmount: number;
+      alreadyAllocated: number;
+      paymentHistory: { paymentDate: string; amountPaid: number; notes?: string }[];
+    }
+
+    const saleAllocations = new Map<string, TempSale>();
+    custSales.forEach(s => {
+      saleAllocations.set(s.id, {
+        id: s.id,
+        totalAmount: s.totalAmount,
+        alreadyAllocated: 0,
+        paymentHistory: []
+      });
+    });
+
+    // Go item-by-item through payments
+    custPayments.forEach(p => {
+      let amountLeft = Number(p.amountPaid) || 0;
+      
+      for (const s of custSales) {
+        if (amountLeft <= 0) break;
+        
+        const alloc = saleAllocations.get(s.id);
+        if (!alloc) continue;
+        
+        const needed = alloc.totalAmount - alloc.alreadyAllocated;
+        if (needed > 0) {
+          if (amountLeft >= needed) {
+            alloc.alreadyAllocated += needed;
+            alloc.paymentHistory.push({
+              paymentDate: p.paymentDate,
+              amountPaid: needed,
+              notes: p.notes
+            });
+            amountLeft -= needed;
+          } else {
+            alloc.alreadyAllocated += amountLeft;
+            alloc.paymentHistory.push({
+              paymentDate: p.paymentDate,
+              amountPaid: amountLeft,
+              notes: p.notes
+            });
+            amountLeft = 0;
+          }
+        }
+      }
+    });
+
+    const finalAlloc = saleAllocations.get(sale.id) || {
+      totalAmount: sale.totalAmount,
+      alreadyAllocated: 0,
+      paymentHistory: [] as { paymentDate: string; amountPaid: number; notes?: string }[]
+    };
+
+    const remaining = Math.max(0, finalAlloc.totalAmount - finalAlloc.alreadyAllocated);
+    let status: 'Unpaid' | 'Partially Paid' | 'Fully Paid' = 'Unpaid';
+    if (finalAlloc.alreadyAllocated === 0) {
+      status = 'Unpaid';
+    } else if (remaining === 0) {
+      status = 'Fully Paid';
+    } else {
+      status = 'Partially Paid';
+    }
+
+    return {
+      amountPaid: finalAlloc.alreadyAllocated,
+      remainingBalance: remaining,
+      status: status,
+      paymentHistory: finalAlloc.paymentHistory
+    };
+  }, [sale, sales, customerPayments]);
 
   const [invoiceNotes, setInvoiceNotes] = useState<string>("Terms: Net 30 days. Please include the Invoice Number with your payment. Thank you for your continued business!");
   const [invoiceNumber, setInvoiceNumber] = useState<string>(() => {
@@ -217,11 +341,90 @@ export default function TaxInvoiceModal({ sale, customers, products, onClose }: 
     doc.text('INVOICE TOTAL DUE:', 124, boxY + 23);
     doc.text(`$${grandTotal.toFixed(2)}`, 172, boxY + 23);
 
-    // 9. Document notes and terms block
+    // 9. Payment Status & Summary in PDF
+    let payY = 150;
+    doc.setFillColor(248, 250, 252); // slate-50
+    doc.rect(15, payY, 85, 45, 'F');
+    doc.setDrawColor(226, 232, 240);
+    doc.rect(15, payY, 85, 45, 'S');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(30, 41, 59);
+    doc.text('PAYMENT SUMMARY', 20, payY + 6);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text('Total Paid to Date:', 20, payY + 15);
+    doc.setTextColor(16, 185, 129); // emerald-500 equivalent style color
+    doc.setFont('helvetica', 'bold');
+    doc.text(`$${paymentInfo.amountPaid.toFixed(2)}`, 65, payY + 15);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100, 116, 139);
+    doc.text('Remaining Owed:', 20, payY + 23);
+    doc.setTextColor(239, 68, 68); // rose-500
+    doc.setFont('helvetica', 'bold');
+    doc.text(`$${paymentInfo.remainingBalance.toFixed(2)}`, 65, payY + 23);
+
+    doc.setDrawColor(226, 232, 240);
+    doc.line(15, payY + 29, 100, payY + 29);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(71, 85, 105);
+    doc.text('PAYMENT STATUS:', 20, payY + 36);
+    
+    // Status text color depending on state
+    if (paymentInfo.status === 'Fully Paid') {
+      doc.setTextColor(16, 185, 129);
+    } else if (paymentInfo.status === 'Partially Paid') {
+      doc.setTextColor(245, 158, 11);
+    } else {
+      doc.setTextColor(239, 68, 68);
+    }
+    doc.text(paymentInfo.status.toUpperCase(), 58, payY + 36);
+
+    // 10. Payment History in PDF (beside summary box, width 90)
+    doc.setFillColor(255, 255, 255);
+    doc.rect(105, payY, 90, 45, 'F');
+    doc.setDrawColor(226, 232, 240);
+    doc.rect(105, payY, 90, 45, 'S');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(30, 41, 59);
+    doc.text('PAYMENT HISTORY TRACK', 110, payY + 6);
+
+    // List individual payments in history
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(100, 116, 139);
+    doc.text('Payment Date', 110, payY + 14);
+    doc.text('Amount Paid', 165, payY + 14);
+    doc.line(105, payY + 16, 195, payY + 16);
+
+    doc.setFont('helvetica', 'normal');
+    let historyY = payY + 22;
+    if (paymentInfo.paymentHistory.length === 0) {
+      doc.setTextColor(148, 163, 184);
+      doc.text('No payment history records found.', 110, historyY);
+    } else {
+      paymentInfo.paymentHistory.slice(0, 3).forEach((ph) => {
+        doc.setTextColor(100, 116, 139);
+        doc.text(new Date(ph.paymentDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }), 110, historyY);
+        doc.setTextColor(16, 185, 129);
+        doc.text(`$${ph.amountPaid.toFixed(2)}`, 165, historyY);
+        historyY += 7;
+      });
+    }
+
+    // 11. Custom Notes Box - let's move it down or fit it perfectly
+    let notesY = 205;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
     doc.setTextColor(71, 85, 105);
-    doc.text('ADDITIONAL TERM DETAILS & INSTRUCTIONS:', 15, 155);
+    doc.text('ADDITIONAL TERM DETAILS & INSTRUCTIONS:', 15, notesY);
 
     doc.setFont('helvetica', 'italic');
     doc.setFontSize(8.5);
@@ -229,7 +432,7 @@ export default function TaxInvoiceModal({ sale, customers, products, onClose }: 
     
     // Auto-wrapping of the customized invoice message notes
     const wrappedNotes = doc.splitTextToSize(invoiceNotes, 180);
-    doc.text(wrappedNotes, 15, 161);
+    doc.text(wrappedNotes, 15, notesY + 6);
 
     // 10. Beautiful footer signature block
     doc.setFont('helvetica', 'normal');
@@ -679,6 +882,109 @@ export default function TaxInvoiceModal({ sale, customers, products, onClose }: 
 
                   </div>
 
+                </div>
+
+                {/* PAYMENT SUMMARY & HISTORY SECTION */}
+                <div className="mt-8 pt-6 border-t border-slate-200">
+                  <div className="flex items-center gap-2 mb-4">
+                    <DollarSign className="h-4 w-4 text-indigo-600" />
+                    <h4 className="text-xs font-bold uppercase tracking-widest text-slate-800">
+                      Payment Summary & Audit Track
+                    </h4>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-2">
+                    
+                    {/* Payment Summary Metrics Card */}
+                    <div className="bg-slate-50 rounded-2xl border border-slate-251 border-slate-200 p-5 space-y-3.5">
+                      <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block pb-1 border-b border-slate-200/40">
+                        Payment Status Breakdown
+                      </span>
+                      
+                      <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
+                        <span>Invoice Total Amount:</span>
+                        <span className="font-mono font-bold text-slate-900">
+                          ${grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
+                        <span>Total Paid to Date:</span>
+                        <span className="font-mono font-black text-emerald-600">
+                          ${paymentInfo.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
+                        <span>Remaining Outstanding Balance:</span>
+                        <span className={`font-mono font-black ${paymentInfo.remainingBalance > 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                          ${paymentInfo.remainingBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+
+                      <div className="w-full h-[1px] bg-slate-200 my-2"></div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold uppercase tracking-wider text-slate-700">Settlement Status:</span>
+                        <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-black border uppercase ${
+                          paymentInfo.status === 'Fully Paid'
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                            : paymentInfo.status === 'Partially Paid'
+                            ? 'bg-amber-50 text-amber-800 border-amber-200'
+                            : 'bg-rose-50 text-rose-800 border-rose-200'
+                        }`}>
+                          <span className={`h-1.5 w-1.5 rounded-full ${
+                            paymentInfo.status === 'Fully Paid' ? 'bg-emerald-500 animate-pulse' : paymentInfo.status === 'Partially Paid' ? 'bg-amber-500' : 'bg-rose-500'
+                          }`}></span>
+                          {paymentInfo.status}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Payment History Audit Section */}
+                    <div className="border border-slate-200 rounded-2xl bg-white p-5 flex flex-col justify-between">
+                      <div>
+                        <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block pb-1 border-b border-slate-200/40 mb-3">
+                          Payment History Details
+                        </span>
+                        
+                        {paymentInfo.paymentHistory.length === 0 ? (
+                          <div className="p-4 rounded-xl bg-slate-50 border border-slate-100 text-center text-xs text-slate-400 font-medium italic">
+                            No payment history has been posted to this invoice yet.
+                          </div>
+                        ) : (
+                          <div className="space-y-2 max-h-40 overflow-y-auto">
+                            <table className="w-full text-left border-collapse">
+                              <thead>
+                                <tr className="border-b border-slate-100 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                  <th className="pb-1.5 font-bold">Payment Date</th>
+                                  <th className="pb-1.5 text-right font-bold">Amount Paid</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-50">
+                                {paymentInfo.paymentHistory.map((ph, idx) => (
+                                  <tr key={idx} className="text-xs text-slate-600 hover:bg-slate-50/50">
+                                    <td className="py-2 text-slate-500 font-medium">
+                                      {new Date(ph.paymentDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                                    </td>
+                                    <td className="py-2 text-right font-mono font-bold text-emerald-600">
+                                      ${ph.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                      
+                      <div className="mt-4 text-[10px] text-slate-400 flex items-center gap-1.5 pt-3 border-t border-slate-50">
+                        <Check className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
+                        <span>Receipt history is dynamically synchronized matching current customer payments list.</span>
+                      </div>
+                    </div>
+
+                  </div>
                 </div>
 
               </div>
