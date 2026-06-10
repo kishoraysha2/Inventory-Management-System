@@ -27,6 +27,7 @@ import {
   ShoppingCart,
   CreditCard,
   Scale,
+  Menu,
   Lock,
   Mail,
   LogOut,
@@ -99,6 +100,7 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports' | 'balancesheet' | 'users'>('dashboard');
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   // --- Inventory Adjustment Modal State ---
   const [adjustmentProduct, setAdjustmentProduct] = useState<Product | null>(null);
@@ -1319,97 +1321,80 @@ export default function App() {
   }
 
   return (
-    <div id="inventory-app-container" className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 space-y-8">
-      {/* HEADER BAR */}
-      <div id="dashboard-header" className="print:hidden flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-slate-200 pb-6 mb-2">
-        <div>
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-sm shrink-0">
-              <Box className="h-5 w-5" />
+    <div id="inventory-app-container" className="mx-auto max-w-7xl px-3 py-4 sm:px-6 lg:px-8 space-y-5 sm:space-y-8 pb-24 sm:pb-8">
+      {/* THREE-ROW RESPONSIVE HEADER SECTION */}
+      <div id="dashboard-header-section" className="print:hidden space-y-4">
+        {/* ROW 1: Logo, App Name, User Information, Admin/Role Badge, Hamburger */}
+        <div className="bg-white border border-slate-200/80 rounded-2xl p-4 sm:p-5 flex flex-row items-center justify-between gap-4 shadow-3xs hover:border-slate-350 transition-all duration-200 w-full">
+          
+          {/* Logo & App Name Area - Left Aligned */}
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 sm:flex-initial">
+            <div className="w-9 h-9 sm:w-10 sm:h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-xs shrink-0">
+              <Box className="h-4.5 w-4.5 sm:h-5 sm:w-5" />
             </div>
-            <div>
-              <h1 className="font-sans text-xl sm:text-2xl font-bold tracking-tight text-slate-900 flex items-center flex-wrap gap-2 leading-none">
-                NEXUS INVENTORY <span className="text-slate-400 font-normal text-xs uppercase tracking-widest bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">v4.2.1</span>
+            <div className="min-w-0">
+              <h1 className="font-sans text-base sm:text-xl lg:text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-1.5 sm:gap-2 leading-none">
+                <span className="truncate">NEXUS INVENTORY</span>
+                <span className="text-slate-400 font-normal text-[9px] sm:text-xs uppercase tracking-widest bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded-full shrink-0">v4.2.1</span>
               </h1>
-              <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-slate-500">
-                <span className="text-slate-800 font-bold">{currentUserProfile?.name || currentUser?.email?.split('@')[0]}</span>
-                <span className="text-slate-300">•</span>
-                <span className="text-slate-400 font-mono text-[11px] font-bold">{currentUser?.email}</span>
-                <span className="text-slate-300">•</span>
-                <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-bold uppercase border ${
-                  userRole === 'admin' 
-                    ? 'bg-emerald-50 border-emerald-100 text-emerald-700' 
-                    : userRole === 'accountant'
-                    ? 'bg-blue-50 border-blue-100 text-blue-700'
-                    : userRole === 'cashier'
-                    ? 'bg-amber-50 border-amber-100 text-amber-700'
-                    : 'bg-slate-50 border-slate-100 text-slate-600'
-                }`}>
-                  <Shield className="w-2.5 h-2.5" />
-                  <span>{userRole}</span>
-                </span>
-                <button
-                  type="button"
-                  onClick={handleSignOut}
-                  className="font-sans font-bold text-rose-500 hover:text-rose-700 transition flex items-center gap-1 cursor-pointer pl-2 ml-1 border-l border-slate-200"
-                >
-                  <LogOut className="w-3.5 h-3.5 hover:rotate-12 transition-transform" />
-                  <span>Log Out</span>
-                </button>
-              </div>
             </div>
           </div>
+
+          {/* User Information, Admin Badge, Log out & Hamburger - Right Aligned */}
+          <div className="flex items-center gap-2 sm:gap-4 shrink-0 min-w-0">
+            {/* User Info email & name (visible on larger mobile sm and above) */}
+            <div className="hidden sm:flex flex-col items-end text-right min-w-0">
+              <span className="text-slate-800 font-bold text-xs sm:text-sm leading-none truncate max-w-[120px] md:max-w-xs">
+                {currentUserProfile?.name || currentUser?.email?.split('@')[0]}
+              </span>
+              <span className="text-slate-400 font-mono text-[10px] sm:text-[11px] font-bold truncate max-w-[150px] md:max-w-xs mt-1">
+                {currentUser?.email}
+              </span>
+            </div>
+
+            {/* Admin Badge */}
+            <span id="user-role-badge" className={`inline-flex items-center gap-0.5 sm:gap-1 rounded-md px-1.5 py-0.5 sm:px-2.5 sm:py-0.5 text-[9px] sm:text-[10px] font-black uppercase border shadow-3xs select-none shrink-0 ${
+              userRole === 'admin' 
+                ? 'bg-emerald-50 border-emerald-150 text-emerald-700' 
+                : userRole === 'accountant'
+                ? 'bg-blue-50 border-blue-200 text-blue-700'
+                : userRole === 'cashier'
+                ? 'bg-amber-50 border-amber-100 text-amber-700'
+                : 'bg-slate-50 border-slate-100 text-slate-600'
+            }`}>
+              <Shield className="w-2.5 h-2.5 shrink-0" />
+              <span className="leading-none">{userRole}</span>
+            </span>
+
+            {/* Log Out button */}
+            <button
+              type="button"
+              onClick={handleSignOut}
+              className="font-sans font-bold text-rose-500 hover:text-rose-700 hover:bg-rose-50 p-1.5 sm:px-2.5 sm:py-1.5 rounded-xl transition flex items-center gap-1 cursor-pointer shrink-0"
+              title="Log Out"
+            >
+              <LogOut className="w-4 h-4 hover:rotate-12 transition-transform" />
+              <span className="hidden sm:inline text-xs">Log Out</span>
+            </button>
+
+            {/* Hamburger button visible only on mobile & tablet */}
+            <button
+              id="mobile-navigation-hamburger"
+              type="button"
+              onClick={() => setIsMobileMenuOpen(true)}
+              className="md:hidden p-2 rounded-xl text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 active:scale-95 transition cursor-pointer border border-slate-200 bg-white shadow-3xs shrink-0"
+              title="Open Navigation"
+            >
+              <Menu className="h-4.5 w-4.5 sm:h-5 sm:w-5" />
+            </button>
+          </div>
+
         </div>
 
-        {/* Global Control Row */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Load Sample Reset Button */}
-          {userRole === 'admin' && (
-            <button
-              id="reset-demo-data-button"
-              type="button"
-              onClick={handleResetDemoData}
-              title="Restore default product catalog"
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              <span>Load Demo</span>
-            </button>
-          )}
-
-          {/* Export JSON backup */}
-          {userRole === 'admin' && (
-            <button
-              id="export-backup-json-button"
-              type="button"
-              onClick={handleExportJSON}
-              title="Download full catalog backup in JSON"
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition"
-            >
-              <Download className="h-3.5 w-3.5" />
-              <span>Export Backup</span>
-            </button>
-          )}
-
-          {/* Import JSON backup panel switcher */}
-          {permissions.isAdmin && (
-            <button
-              id="import-backup-toggle-button"
-              type="button"
-              onClick={() => setShowImport((prev) => !prev)}
-              title="Import inventory data from JSON backup"
-              className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold transition ${
-                showImport
-                  ? 'bg-slate-100 text-slate-700 border-slate-355'
-                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700'
-              }`}
-            >
-              <Upload className="h-3.5 w-3.5" />
-              <span>Import JSON</span>
-            </button>
-          )}
-
-          {/* Main Primary Addition Button */}
+        {/* ROW 2: Register Product, Load Demo, Export Backup, Import JSON - Action buttons on separate row */}
+        <div className="bg-white border border-slate-200/85 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-start gap-2.5 sm:gap-2 shadow-3xs w-full">
+          
+          {/* Main Primary Registration Button */}
           {permissions.canEditProduct && (
             <button
               id="register-new-item-button"
@@ -1418,17 +1403,64 @@ export default function App() {
                 setProductToEdit(null);
                 setIsFormOpen(true);
               }}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4.5 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
             >
               <Plus className="h-4 w-4" />
               <span>Register Product</span>
             </button>
           )}
+
+          {/* Load Demo */}
+          {userRole === 'admin' && (
+            <button
+              id="reset-demo-data-button"
+              type="button"
+              onClick={handleResetDemoData}
+              title="Restore default product catalog"
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-705 border-slate-200 hover:border-slate-300 transition cursor-pointer"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              <span>Load Demo</span>
+            </button>
+          )}
+
+          {/* Export Backup */}
+          {userRole === 'admin' && (
+            <button
+              id="export-backup-json-button"
+              type="button"
+              onClick={handleExportJSON}
+              title="Download full catalog backup in JSON"
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-705 border-slate-200 hover:border-slate-300 transition cursor-pointer"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Export Backup</span>
+            </button>
+          )}
+
+          {/* Import JSON */}
+          {permissions.isAdmin && (
+            <button
+              id="import-backup-toggle-button"
+              type="button"
+              onClick={() => setShowImport((prev) => !prev)}
+              title="Import inventory data from JSON backup"
+              className={`w-full sm:w-auto inline-flex items-center justify-center gap-1.5 rounded-xl border px-3.5 py-2.5 text-xs font-semibold transition cursor-pointer ${
+                showImport
+                  ? 'bg-slate-100 text-slate-700 border-slate-350 shadow-3xs'
+                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-705 border-slate-200 hover:border-slate-300'
+              }`}
+            >
+              <Upload className="h-3.5 w-3.5" />
+              <span>Import JSON</span>
+            </button>
+          )}
+
         </div>
       </div>
 
       {/* PRIMARY NAVIGATION TABS */}
-      <div className="print:hidden flex bg-slate-100 p-1 rounded-2xl max-w-7xl border border-slate-200 overflow-x-auto">
+      <div className="print:hidden hidden md:flex bg-slate-100 p-1 rounded-2xl max-w-7xl border border-slate-200 overflow-x-auto">
         <button
           type="button"
           onClick={() => setActiveTab('dashboard')}
@@ -2192,6 +2224,298 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+
+      {/* MOBILE NAVIGATION DRAWER */}
+      <AnimatePresence>
+        {isMobileMenuOpen && (
+          <>
+            {/* Backdrop */}
+            <motion.div
+              id="mobile-drawer-backdrop"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 0.5 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsMobileMenuOpen(false)}
+              className="md:hidden fixed inset-0 bg-slate-950/60 backdrop-blur-xs z-50 cursor-pointer"
+            />
+
+            {/* Side Drawer Panel */}
+            <motion.div
+              id="mobile-drawer-panel"
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+              className="md:hidden fixed inset-y-0 right-0 w-80 bg-white shadow-2xl z-50 flex flex-col border-l border-slate-200"
+            >
+              {/* Drawer Header */}
+              <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white shadow-xs shrink-0">
+                    <Box className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h2 className="text-xs font-black text-slate-900 tracking-tight uppercase">
+                      Nexus Navigation
+                    </h2>
+                  </div>
+                </div>
+                <button
+                  id="mobile-drawer-close"
+                  type="button"
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className="p-1 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 transition cursor-pointer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Drawer Navigation List */}
+              <div className="flex-1 overflow-y-auto py-3 px-4 space-y-1.5 scrollbar-thin">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('dashboard');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'dashboard'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <LayoutDashboard className="h-4.5 w-4.5" />
+                  <span>Dashboard</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('inventory');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'inventory'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <Box className="h-4.5 w-4.5" />
+                  <span>Inventory Desk</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('customers');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'customers'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <Users className="h-4.5 w-4.5" />
+                  <span>Customers</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('suppliers');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'suppliers'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <Truck className="h-4.5 w-4.5" />
+                  <span>Suppliers</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('ledger');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'ledger'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <CreditCard className="h-4.5 w-4.5" />
+                  <span>Due Ledger</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('products');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'products'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <ShoppingBag className="h-4.5 w-4.5" />
+                  <span>Products</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('sales');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'sales'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <TrendingUp className="h-4.5 w-4.5" />
+                  <span>Sales</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('procurement');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'procurement'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <ShoppingCart className="h-4.5 w-4.5" />
+                  <span>Procurement</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('reports');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'reports'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <BarChart3 className="h-4.5 w-4.5" />
+                  <span>Reports</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('balancesheet');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'balancesheet'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <Scale className="h-4.5 w-4.5" />
+                  <span>Balance Sheet</span>
+                </button>
+
+                {userRole === 'admin' && (
+                  <button
+                    id="open-mobile-user-access-tab"
+                    type="button"
+                    onClick={() => {
+                      setActiveTab('users');
+                      setIsMobileMenuOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                      activeTab === 'users'
+                        ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                        : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                    }`}
+                  >
+                    <Shield className="h-4.5 w-4.5" />
+                    <span>User Access</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Drawer Footer info summary */}
+              <div className="p-4 bg-slate-50 border-t border-slate-100 text-center">
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                  Nexus ERP Workforce Clearance
+                </p>
+                <p className="text-[9px] text-slate-400 mt-1 font-mono">
+                  {currentUser?.email}
+                </p>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* MOBILE STICKY BOTTOM QUICK ACTION BUTTON */}
+      {(() => {
+        const isMobileFabAllowed = () => {
+          if (activeTab === 'inventory') return permissions.canEditProduct;
+          if (activeTab === 'customers') return userRole === 'admin';
+          if (activeTab === 'suppliers') return userRole === 'admin';
+          if (activeTab === 'sales') return userRole !== 'viewer';
+          if (activeTab === 'procurement') return userRole === 'admin' || userRole === 'accountant';
+          if (activeTab === 'ledger') return userRole === 'admin' || userRole === 'accountant';
+          if (activeTab === 'products') return permissions.canEditProduct;
+          return false;
+        };
+
+        const getFabLabel = () => {
+          if (activeTab === 'inventory') return 'Add Product';
+          if (activeTab === 'customers') return 'New Customer';
+          if (activeTab === 'suppliers') return 'New Supplier';
+          if (activeTab === 'sales') return 'Record Sale';
+          if (activeTab === 'procurement') return 'Add Purchase';
+          if (activeTab === 'ledger') return 'Record Pay';
+          if (activeTab === 'products') return 'Add Product';
+          return 'Add New';
+        };
+
+        if (!['inventory', 'customers', 'suppliers', 'sales', 'procurement', 'ledger', 'products'].includes(activeTab) || !isMobileFabAllowed()) {
+          return null;
+        }
+
+        return (
+          <div id="mobile-sticky-fab-container" className="md:hidden fixed bottom-6 right-6 z-40 filter drop-shadow-lg">
+            <button
+              id={`mobile-fab-trigger-${activeTab}`}
+              type="button"
+              onClick={() => {
+                if (activeTab === 'inventory') {
+                  setProductToEdit(null);
+                  setIsFormOpen(true);
+                } else {
+                  window.dispatchEvent(new CustomEvent('nexus-trigger-add-modal', { detail: { tab: activeTab } }));
+                }
+              }}
+              className="flex h-14 items-center justify-center gap-2 rounded-full bg-indigo-600 px-5 text-white shadow-lg active:scale-95 cursor-pointer border border-indigo-500 font-bold text-xs"
+              title={`Quick add action for ${activeTab}`}
+            >
+              <Plus className="h-5 w-5 shrink-0" />
+              <span>{getFabLabel()}</span>
+            </button>
+          </div>
+        );
+      })()}
 
       {/* Footer Bar */}
       <footer className="mt-8 pt-6 border-t border-slate-200 flex flex-wrap justify-between items-center gap-4 text-[10px] text-slate-400 font-bold uppercase tracking-widest leading-none">

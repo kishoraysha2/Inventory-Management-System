@@ -25,7 +25,9 @@ import {
   AlertCircle,
   Trash2,
   Archive,
-  Briefcase
+  Briefcase,
+  Wallet,
+  Save
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
@@ -420,6 +422,16 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
     .filter(s => s.status !== 'inactive')
     .reduce((sum, s) => sum + (s.dueBalance || 0), 0);
 
+  // Customer Credit (Total credit balance/prepaid balances from customers)
+  const totalCustomerCredit = customers
+    .filter(c => c.status !== 'inactive')
+    .reduce((sum, c) => sum + (c.customerCredit || 0), 0);
+
+  // Total Purchases Sum (All-time valid purchases)
+  const totalPurchasesSum = purchases
+    .filter(p => p.status !== 'VOID' && p.status !== 'voided')
+    .reduce((sum, p) => sum + p.totalAmount, 0);
+
   // 7. Cash accounting calculations with capital support
   const startingCapital = capital.reduce((sum, entry) => sum + entry.amount, 0);
   const initialCapital = startingCapital;
@@ -486,51 +498,51 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
   const areaPoints = points ? `${paddingX},${heightSvg - paddingY} ${points} ${widthSvg - paddingX},${heightSvg - paddingY}` : '';
 
   return (
-    <div id="nexus-intel-dashboard-root" className="space-y-8 animate-fade-in font-sans pb-12">
+    <div id="nexus-intel-dashboard-root" className="space-y-6 sm:space-y-8 animate-fade-in font-sans pb-12 bg-[#0B0F19] text-[#E6EDF7] p-4 sm:p-8 rounded-2xl sm:rounded-[2rem] border border-[#1E2A44] shadow-2xl w-full max-w-full overflow-hidden">
       
       {/* HEADER BAR AND DATE INDICES */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 animate-pulse"></span>
+          <h2 className="text-lg sm:text-xl font-bold tracking-tight text-white flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-[#00D4FF] animate-pulse"></span>
             Operational Intelligence Dashboard
           </h2>
-          <p className="text-xs text-slate-400 mt-1 uppercase tracking-wider font-semibold font-mono">
+          <p className="text-[10px] sm:text-xs text-[#93A3B8] mt-1 uppercase tracking-wider font-semibold font-mono">
             Audit Date: June 01, 2026 • Real-time FireStore Calculations active
           </p>
         </div>
 
         {/* Action tags */}
-        <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 bg-white border border-slate-200 rounded-2xl px-4 py-2.5 w-fit shadow-2xs">
-          <Clock className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+        <div className="flex items-center gap-2 text-xs font-semibold text-[#93A3B8] bg-[#0F1626]/80 border border-[#1E2A44] rounded-2xl px-4 py-2.5 w-fit shadow-lg backdrop-blur-xs">
+          <Clock className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
           <span>Last automated sync: {loading ? 'Computing...' : 'Now'}</span>
-          {loading && <RefreshCw className="w-3 h-3 text-indigo-500 animate-spin ml-2" />}
+          {loading && <RefreshCw className="w-3 h-3 text-indigo-400 animate-spin ml-2" />}
         </div>
       </div>
 
       {/* --- CASH & CAPITAL ACCOUNTING LIQUIDITY DESK --- */}
-      <div id="liquidity-desk-widget" className="bg-gradient-to-r from-emerald-50/70 to-teal-50/30 rounded-[2rem] border border-emerald-100 p-6 md:p-8 shadow-2xs flex flex-col xl:flex-row justify-between items-stretch gap-6">
-        <div className="space-y-4 flex flex-col justify-between xl:w-1/4">
+      <div id="liquidity-desk-widget" className="bg-gradient-to-r from-[#0F1626]/90 to-[#121B2F]/90 rounded-2xl sm:rounded-[2rem] border border-[#1E2A44] p-4 sm:p-6 md:p-8 shadow-2xl flex flex-col xl:flex-row justify-between items-stretch gap-6 w-full max-w-full overflow-hidden">
+        <div className="space-y-4 flex flex-col justify-between w-full xl:w-1/4">
           <div className="space-y-2">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span className="text-[10px] font-black tracking-widest text-emerald-800 uppercase">Capital Liquidity Desk</span>
+              <span className="w-2.5 h-2.5 rounded-full bg-[#00D4FF] animate-pulse"></span>
+              <span className="text-[10px] font-black tracking-widest text-[#00D4FF] uppercase">Capital Liquidity Desk</span>
             </div>
-            <h3 className="text-xs text-slate-500 font-medium leading-relaxed">
+            <h3 className="text-xs text-[#93A3B8] font-medium leading-relaxed font-sans">
               Real-time balance sheets monitoring owner starting capital, net trading movements, and instant liquid vault reserves.
             </h3>
           </div>
           
           <div className="space-y-2 pt-2">
-            <div className="text-xs text-slate-500 flex items-center gap-2">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Role:</span>
-              <span className="bg-emerald-50 text-emerald-750 font-mono font-bold tracking-wide uppercase px-2 py-0.5 rounded-md border border-emerald-100">
+            <div className="text-xs text-[#93A3B8] flex items-center gap-2 font-sans">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-[#93A3B8] opacity-60">Role:</span>
+              <span className="bg-[#1E2A44] text-[#00D4FF] font-mono font-bold tracking-wide uppercase px-2 py-0.5 rounded-md border border-[#1E2A44]/80 text-[10px]">
                 {userRole}
               </span>
             </div>
             <button 
               onClick={() => setIsCapitalModalOpen(true)}
-              className="w-full flex items-center justify-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs px-4 py-2.5 rounded-xl transition shadow-3xs"
+              className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-[#4F7BFF] to-[#7B5CFF] hover:from-[#5f8aff] hover:to-[#8b6eff] text-white font-bold text-xs px-4 py-2.5 rounded-xl transition shadow-lg cursor-pointer font-sans"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Modify Capital</span>
@@ -538,327 +550,453 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 xl:w-3/4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6 xl:gap-8 w-full xl:w-3/4">
           {/* Starting Capital Widget */}
-          <div className="bg-white rounded-2xl p-5 border border-emerald-100/60 shadow-3xs flex flex-col justify-between">
-            <div>
-              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Starting Capital</span>
-              <p className="text-2xl font-black text-slate-900 mt-2 font-mono tracking-tight">
+          <motion.div
+            whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(79,123,255,0.4)" }}
+            transition={{ type: "spring", stiffness: 300, damping: 20 }}
+            className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#4F7BFF]/25 rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_25px_-4px_rgba(79,123,255,0.1)] hover:shadow-[0_8px_30px_rgba(79,123,255,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[150px] sm:min-h-[190px] relative overflow-hidden group"
+          >
+            <div className="absolute top-0 right-0 w-28 h-28 bg-gradient-to-br from-[#4F7BFF]/10 to-transparent rounded-full blur-2xl pointer-events-none group-hover:scale-110 transition-transform duration-300"></div>
+            <div className="space-y-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#4F7BFF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_15px_rgba(79,123,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                  <Briefcase className="h-5 w-5 text-white" />
+                </div>
+                <span className="text-[10px] font-bold text-[#4F7BFF] uppercase tracking-widest font-sans opacity-95">Business Capital</span>
+              </div>
+              <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#4F7BFF] pt-1 font-mono">
                 ${startingCapital.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </p>
+              </h3>
             </div>
-            <div className="mt-3 pt-2.5 border-t border-slate-100 flex justify-between items-center text-[10px]">
-              <span className="text-slate-400 font-medium font-sans">Owner Corporate Equity</span>
-              <span className="text-emerald-700 font-bold bg-emerald-50 px-1.5 py-0.5 rounded text-[8px] font-mono">
+            <div className="pt-4 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+              <span className="truncate opacity-80">Owner Equity</span>
+              <span className="text-[#00D4FF] font-bold bg-[#1E2A44] px-2.5 py-1 rounded-lg text-[9px] font-mono shadow-sm">
                 {capital.length} Injections
               </span>
             </div>
-          </div>
+          </motion.div>
 
           {/* Current Cash Widget */}
-          <div className="bg-white rounded-2xl p-5 border border-emerald-100/60 shadow-3xs flex flex-col justify-between">
-            <div>
-              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block font-sans">Current Cash</span>
-              <p className="text-2xl font-black text-slate-900 mt-2 font-mono tracking-tight">
+          <motion.div
+            whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(34,197,94,0.45)" }}
+            transition={{ type: "spring", stiffness: 300, damping: 20 }}
+            className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#22C55E]/25 rounded-xl sm:rounded-[1.5rem] shadow-[0_0_25px_rgba(34,197,94,0.06)] hover:shadow-[0_8px_30px_rgba(34,197,94,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[150px] sm:min-h-[190px] relative overflow-hidden group"
+          >
+            <div className="absolute top-0 right-0 w-28 h-28 bg-gradient-to-br from-[#22C55E]/10 to-transparent rounded-full blur-2xl pointer-events-none group-hover:scale-110 transition-transform duration-300"></div>
+            <div className="space-y-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#22C55E] to-[#10B981] shrink-0 ring-2 ring-white/10 shadow-[0_0_15px_rgba(34,197,94,0.35)] group-hover:scale-105 transition-transform duration-300">
+                  <DollarSign className="h-5 w-5 text-white" />
+                </div>
+                <span className="text-[10px] font-bold text-[#22C55E] uppercase tracking-widest font-sans opacity-95">Cash in Hand</span>
+              </div>
+              <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#22C55E] pt-1 font-mono">
                 ${cashInHand.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </p>
+              </h3>
             </div>
-            <div className="mt-3 pt-2.5 border-t border-slate-100 flex justify-between items-center text-[10px]">
-              <span className="text-slate-400 font-medium font-sans">Liquid Vault Reserves</span>
-              <span className={`font-black px-1.5 py-0.5 rounded text-[9px] font-mono ${cashInHand >= 0 ? "bg-teal-50 text-teal-700" : "bg-rose-50 text-rose-700"}`}>
+            <div className="pt-4 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+              <span className="truncate opacity-80">Liquid reserves</span>
+              <span className={`font-mono font-bold px-2.5 py-1 rounded-lg text-[9px] shadow-sm ${cashInHand >= 0 ? "bg-emerald-950/50 text-[#22C55E] border border-emerald-500/20" : "bg-rose-950/50 text-rose-400 border border-rose-500/20"}`}>
                 {cashInHand >= 0 ? "SURPLUS" : "DEFICIT"}
               </span>
             </div>
-          </div>
+          </motion.div>
 
           {/* Net Movement Widget */}
-          <div className="bg-white rounded-2xl p-5 border border-emerald-100/60 shadow-3xs flex flex-col justify-between">
-            <div>
-              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block font-sans">Net Movement</span>
-              <p className={`text-2xl font-black mt-2 font-mono tracking-tight ${netMovement >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+          <motion.div
+            whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(34,197,94,0.4)" }}
+            transition={{ type: "spring", stiffness: 300, damping: 20 }}
+            className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_25px_-4px_rgba(79,123,255,0.1)] hover:shadow-[0_8px_30px_rgba(34,197,94,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[150px] sm:min-h-[190px] relative overflow-hidden group"
+          >
+            <div className="absolute top-0 right-0 w-28 h-28 bg-gradient-to-br from-[#4F7BFF]/10 to-transparent rounded-full blur-2xl pointer-events-none group-hover:scale-110 transition-transform duration-300"></div>
+            <div className="space-y-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#4F7BFF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_15px_rgba(79,123,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                  <RefreshCw className="h-5 w-5 text-white" />
+                </div>
+                <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Net Movement</span>
+              </div>
+              <h3 className={`text-xl xs:text-2xl sm:text-3xl font-black tracking-tight pt-1 font-mono ${netMovement >= 0 ? 'text-[#22C55E]' : 'text-rose-400'}`}>
                 {netMovement >= 0 ? '+' : ''}${netMovement.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </p>
+              </h3>
             </div>
-            <div className="mt-3 pt-2.5 border-t border-slate-100 flex justify-between items-center text-[10px]">
-              <span className="text-slate-400 font-medium font-sans">Combined Trade Cashflow</span>
-              <span className={`font-black px-1.5 py-0.5 rounded text-[8px] font-mono ${netMovement >= 0 ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
+            <div className="pt-4 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+              <span className="truncate opacity-80">Combined cashflow</span>
+              <span className={`font-bold px-2.5 py-1 rounded-lg text-[9px] font-mono shadow-sm ${netMovement >= 0 ? "bg-emerald-950/50 text-[#22C55E] border border-emerald-500/20" : "bg-rose-950/50 text-rose-400 border border-rose-500/20"}`}>
                 {netMovement >= 0 ? "INCREASING ▲" : "DECREASING ▼"}
               </span>
             </div>
-          </div>
+          </motion.div>
         </div>
       </div>
 
-      {/* 
-        8 BENTO METRICS GRID (Showcasing all calculations requested)
-      */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+      {/* 8 BENTO METRICS GRID (Showcasing all calculations requested with enhanced heights & modern SaaS feels) */}
+      <div className="grid grid-cols-1 gap-4 sm:gap-6 md:gap-7 xl:gap-8 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 font-sans">
         
         {/* CARD 1: Total Products */}
         <motion.div
-          whileHover={{ y: -3 }}
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(79,123,255,0.3)" }}
           transition={{ duration: 0.2 }}
-          className="bg-white rounded-[2rem] p-6 border border-slate-200/90 shadow-2xs hover:shadow-xs transition flex flex-col justify-between"
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(79,123,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
         >
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-              <span>Total Products</span>
-              <Layers className="h-4 w-4 text-indigo-500 opacity-70" />
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#4F7BFF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#4F7BFF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(79,123,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <Layers className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Products</span>
             </div>
-            <h3 className="text-3xl font-extrabold tracking-tight text-slate-900 pt-1">
+            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1">
               {products.filter(p => p.status !== 'inactive').length} Items
             </h3>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
-            <span>In active inventory catalog</span>
-            <span className="text-indigo-600 font-bold">Synced Live</span>
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-80">Active catalog</span>
+            <span className="text-[#4F7BFF] font-bold">Synced Live</span>
           </div>
         </motion.div>
 
         {/* CARD 2: Total Customers */}
         <motion.div
-          whileHover={{ y: -3 }}
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(79,123,255,0.3)" }}
           transition={{ duration: 0.2 }}
-          className="bg-white rounded-[2rem] p-6 border border-slate-200/90 shadow-2xs hover:shadow-xs transition flex flex-col justify-between"
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(79,123,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
         >
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-              <span>Total Customers</span>
-              <Users className="h-4 w-4 text-emerald-500 opacity-70" />
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#4F7BFF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#4F7BFF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(79,123,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <Users className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Customers</span>
             </div>
-            <h3 className="text-3xl font-extrabold tracking-tight text-slate-900 pt-1">
+            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1">
               {customers.filter(c => c.status !== 'inactive').length} Profiles
             </h3>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
-            <span>Registered customers</span>
-            <span className="text-emerald-600 font-bold">Active CRM</span>
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-80">CRM accounts</span>
+            <span className="text-[#00D4FF] font-bold">Active CRM</span>
           </div>
         </motion.div>
 
         {/* CARD 3: Total Suppliers */}
         <motion.div
-          whileHover={{ y: -3 }}
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(79,123,255,0.3)" }}
           transition={{ duration: 0.2 }}
-          className="bg-white rounded-[2rem] p-6 border border-slate-200/90 shadow-2xs hover:shadow-xs transition flex flex-col justify-between"
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(79,123,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
         >
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-              <span>Total Suppliers</span>
-              <Truck className="h-4 w-4 text-sky-500 opacity-70" />
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#4F7BFF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#4F7BFF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(79,123,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <Truck className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Suppliers</span>
             </div>
-            <h3 className="text-3xl font-extrabold tracking-tight text-slate-900 pt-1">
+            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1">
               {suppliers.filter(s => s.status !== 'inactive').length} Partners
             </h3>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
-            <span>Verified trade vendors</span>
-            <span className="text-sky-600 font-bold">Supply Chain</span>
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-80">Trade partners</span>
+            <span className="text-[#4F7BFF] font-bold">Supply Chain</span>
           </div>
         </motion.div>
 
         {/* CARD 4: Low Stock Products alert count */}
         <motion.div
-          whileHover={{ y: -3 }}
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(239,68,68,0.5)" }}
           transition={{ duration: 0.2 }}
-          className={`rounded-[2rem] p-6 border shadow-2xs hover:shadow-xs transition flex flex-col justify-between ${
-            lowStockCount > 0 
-              ? 'border-rose-100 bg-rose-50/10 text-rose-950' 
-              : 'border-slate-200/90 bg-white text-slate-900'
-          }`}
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-rose-500/30 rounded-xl sm:rounded-[1.5rem] shadow-[0_0_20px_rgba(239,68,68,0.06)] hover:shadow-[0_8px_30px_rgba(239,68,68,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
         >
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-              <span>Low Stock Products</span>
-              <AlertTriangle className={`h-4 w-4 ${lowStockCount > 0 ? 'text-rose-500 animate-pulse' : 'text-slate-400'}`} />
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#FF4F5A]/8 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#FF4E4E] to-[#FF8000] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(255,78,78,0.4)] group-hover:scale-105 transition-transform duration-300">
+                <AlertTriangle className={`h-5 w-5 text-white ${lowStockCount > 0 ? 'animate-pulse' : ''}`} />
+              </div>
+              <span className="text-[10px] font-bold text-[#EF4444] uppercase tracking-widest font-sans opacity-95">Low Stock Alert</span>
             </div>
-            <h3 className={`text-3xl font-extrabold tracking-tight pt-1 ${lowStockCount > 0 ? 'text-rose-700' : 'text-slate-800'}`}>
+            <h3 className={`text-xl xs:text-2xl sm:text-3xl font-black tracking-tight pt-1 ${lowStockCount > 0 ? 'text-[#FF4F5A]' : 'text-[#E6EDF7]'}`}>
               {lowStockCount} Products
             </h3>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px]">
-            <span className="text-slate-400">Under warning thresholds</span>
-            <span className={`font-bold uppercase text-[9px] px-2 py-0.5 rounded border ${
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-80 font-medium">Safety threshold</span>
+            <span className={`font-mono font-bold uppercase text-[9px] px-2.5 py-1 rounded-lg ${
               lowStockCount > 0 
-                ? 'bg-rose-50 border-rose-200 text-rose-700' 
-                : 'bg-emerald-50 border-emerald-100 text-emerald-800'
+                ? 'bg-rose-950/50 text-[#FF4E4E] border border-rose-500/25' 
+                : 'bg-emerald-950/50 text-[#22C55E] border border-emerald-500/25'
             }`}>
-              {lowStockCount > 0 ? 'Urgent Restock' : 'Stock Healthy'}
+              {lowStockCount > 0 ? 'Urgent Restock' : 'Healthy'}
             </span>
           </div>
         </motion.div>
 
         {/* CARD 5: Total Sales Today */}
         <motion.div
-          whileHover={{ y: -3 }}
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(0,212,255,0.3)" }}
           transition={{ duration: 0.2 }}
-          className="bg-white rounded-[2rem] p-6 border border-slate-200/90 shadow-2xs hover:shadow-xs transition flex flex-col justify-between"
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(0,212,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
         >
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-              <span>Total Sales Today</span>
-              <span className="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[9px] font-extrabold border border-indigo-100">
-                Live
-              </span>
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#00D4FF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#00D4FF] to-[#9C4DFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(0,212,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <ShoppingBag className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Sales Today</span>
             </div>
-            <h3 className="text-3xl font-extrabold tracking-tight text-slate-900 pt-1">
+            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1 font-mono">
               ${todaysSalesValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </h3>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
-            <span className="font-medium text-slate-400">Date: {todayStr}</span>
-            <span className="text-emerald-600 font-bold">Invoiced today</span>
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-80">{todayStr}</span>
+            <span className="text-emerald-400 font-bold font-mono">LIVE BOOK</span>
           </div>
         </motion.div>
 
         {/* CARD 6: Total Sales This Month */}
         <motion.div
-          whileHover={{ y: -3 }}
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(0,212,255,0.3)" }}
           transition={{ duration: 0.2 }}
-          className="bg-white rounded-[2rem] p-6 border border-slate-200/90 shadow-2xs hover:shadow-xs transition flex flex-col justify-between"
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(0,212,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
         >
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-              <span>Total Sales This Month</span>
-              <Calendar className="h-4 w-4 text-indigo-500 opacity-60" />
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#00D4FF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#00D4FF] to-[#9C4DFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(0,212,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <Calendar className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Sales This Month</span>
             </div>
-            <h3 className="text-3xl font-extrabold tracking-tight text-slate-900 pt-1">
+            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1 font-mono">
               ${monthlySalesValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </h3>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
-            <span>June 2026 Billing Run</span>
-            <span className="text-indigo-600 font-bold">Active Cycle</span>
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-85">Running cycle billing</span>
+            <span className="text-[#00D4FF] font-bold">Active Cycle</span>
           </div>
         </motion.div>
 
-        {/* CARD 7: Total Customer Due */}
+        {/* CARD 7: Total Purchases */}
         <motion.div
-          whileHover={{ y: -3 }}
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(0,212,255,0.3)" }}
           transition={{ duration: 0.2 }}
-          className="bg-slate-900 text-white rounded-[2rem] p-6 shadow-xs hover:shadow-lg transition flex flex-col justify-between border border-slate-850"
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(0,212,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
         >
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-              <span>Total Customer Due</span>
-              <TrendingUp className="h-4 w-4 text-amber-400" />
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#00D4FF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#00D4FF] to-[#9C4DFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(0,212,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <Archive className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Purchases</span>
             </div>
-            <h3 className="text-3xl font-black tracking-tight text-white pt-1">
+            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1 font-mono">
+              ${totalPurchasesSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </h3>
+          </div>
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-80">Procurement history</span>
+            <span className="text-emerald-400 font-bold">Completed</span>
+          </div>
+        </motion.div>
+
+        {/* CARD 8: Customer Due */}
+        <motion.div
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(245,158,11,0.4)" }}
+          transition={{ duration: 0.2 }}
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-amber-500/35 rounded-xl sm:rounded-[1.5rem] shadow-[0_0_15px_rgba(245,158,11,0.05)] hover:shadow-[0_8px_30px_rgba(245,158,11,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
+        >
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#FF9100]/8 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#FF9100] to-[#FF5E00] shrink-0 ring-2 ring-white/10 shadow-[0_0_15px_rgba(255,145,0,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <TrendingUp className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-amber-400 tracking-widest uppercase font-sans">Customer Due</span>
+            </div>
+            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-amber-500 pt-1 font-mono">
               ${totalCustomerDue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </h3>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
-            <span>Receivables Ledger</span>
-            <span className="text-amber-400 font-bold font-mono">
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-80">Receivables Ledger</span>
+            <span className="text-amber-400 font-bold font-mono text-[10px] bg-[#1E2A44] px-2.5 py-1 rounded-lg">
               {customers.filter(c => c.dueBalance > 0).length} Overdue
             </span>
           </div>
         </motion.div>
 
-        {/* CARD 8: Cumulative Profit (Adding premium calculation value with Cash & Credit breakdown) */}
+        {/* CARD 9: Customer Credit */}
         <motion.div
-          whileHover={{ y: -3 }}
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(168,85,247,0.4)" }}
           transition={{ duration: 0.2 }}
-          className="bg-white rounded-[2rem] p-6 border border-slate-200/90 shadow-2xs hover:shadow-xs transition flex flex-col justify-between"
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#A855F7]/25 rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(168,85,247,0.08)] hover:shadow-[0_8px_30px_rgba(168,85,247,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
         >
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#A855F7]/10 to-transparent rounded-full blur-2xl pointer-events-none"></div>
           <div className="space-y-4">
-            <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-              <span>Total Profit</span>
-              <Sparkles className="h-4 w-4 text-emerald-500 animate-pulse" />
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#A855F7] to-[#8B5CF6] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(168,85,247,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <Wallet className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#A855F7] uppercase tracking-widest font-sans opacity-95">Customer Credit</span>
+            </div>
+            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#A855F7] pt-1 font-mono">
+              ${totalCustomerCredit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </h3>
+          </div>
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-80">Prepayments in treasury</span>
+            <span className="text-[#A855F7] font-black font-sans tracking-wide text-[9px] uppercase bg-purple-950/40 px-2.5 py-1 rounded-lg">Liability</span>
+          </div>
+        </motion.div>
+
+        {/* CARD 10: Supplier Due */}
+        <motion.div
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(239,68,68,0.4)" }}
+          transition={{ duration: 0.2 }}
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-rose-500/25 rounded-xl sm:rounded-[1.5rem] shadow-[0_0_15px_rgba(239,68,68,0.05)] hover:shadow-[0_8px_30px_rgba(239,68,68,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
+        >
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#EF4444]/10 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#EF4444] to-[#B91C1C] shrink-0 ring-2 ring-white/15 shadow-[0_0_12px_rgba(239,68,68,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <Truck className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-rose-400 uppercase tracking-widest font-sans opacity-95">Supplier Due</span>
+            </div>
+            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#EF4444] pt-1 font-mono">
+              ${totalSupplierDue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </h3>
+          </div>
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-80">Outstanding payables</span>
+            <span className="text-rose-400 font-bold font-mono text-[10px] bg-rose-950/40 px-2.5 py-1 rounded-lg border border-rose-500/10">
+              {suppliers.filter(s => (s.dueBalance ?? 0) > 0).length} Overdue
+            </span>
+          </div>
+        </motion.div>
+
+        {/* CARD 11: Total Profit */}
+        <motion.div
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(34,197,94,0.5)" }}
+          transition={{ duration: 0.2 }}
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#22C55E]/30 rounded-xl sm:rounded-[1.5rem] shadow-[0_0_25px_rgba(34,197,94,0.06)] hover:shadow-[0_8px_35px_rgba(34,197,94,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] lg:col-span-2 h-full relative overflow-hidden group"
+        >
+          <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-[#22C55E]/10 to-transparent rounded-full blur-3xl pointer-events-none group-hover:scale-110 transition-transform"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-[#22C55E] shrink-0 ring-2 ring-white/15 shadow-[0_0_15px_rgba(34,197,94,0.4)] group-hover:scale-105 transition-transform duration-300">
+                <Sparkles className="h-5 w-5 text-white animate-pulse" />
+              </div>
+              <span className="text-[10px] font-bold text-[#22C55E] uppercase tracking-widest font-sans">Total Profit</span>
             </div>
             
             <div>
-              <h3 className="text-3xl font-extrabold tracking-tight text-slate-950">
+              <h3 className="text-2xl xs:text-3xl sm:text-4xl font-extrabold tracking-tight text-[#22C55E] font-mono">
                 ${salesProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </h3>
-              <p className="text-[10px] text-slate-400 mt-1">Total combined profit margin</p>
+              <p className="text-[10px] text-[#93A3B8] mt-1 font-sans font-medium tracking-wide">Gross accumulated trading profit margins</p>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 border-t border-slate-105 border-slate-100 pt-3">
+            <div className="grid grid-cols-2 gap-4 border-t border-[#1E2A44]/65 pt-3 w-full text-sans">
               <div>
-                <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Cash Profit</span>
-                <span className="text-sm font-extrabold text-emerald-600 block mt-0.5">
+                <span className="text-[9px] font-bold text-[#93A3B8] uppercase tracking-wider block">Cash Profit</span>
+                <span className="text-sm xs:text-base font-black text-[#22C55E] block mt-0.5 font-mono">
                   ${cashProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
-              <div className="border-l border-slate-100 pl-3">
-                <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Credit Profit</span>
-                <span className="text-sm font-extrabold text-indigo-650 text-indigo-600 block mt-0.5">
+              <div className="border-l border-[#1E2A44]/70 pl-4">
+                <span className="text-[9px] font-bold text-[#93A3B8] uppercase tracking-wider block">Credit Profit</span>
+                <span className="text-sm xs:text-base font-black text-[#4F7BFF] block mt-0.5 font-mono">
                   ${creditProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
             </div>
           </div>
           
-          <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-450 text-slate-400">
-            <span>Gross margin estimate</span>
-            <span className="font-semibold text-slate-700 font-mono">{averageProfitMargin.toFixed(1)}% Avg</span>
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="opacity-80">Gross trade margins</span>
+            <span className="font-bold text-white font-mono bg-[#1E2A44]/90 px-3 py-1 rounded-lg border border-[#1E2A44]/80">{averageProfitMargin.toFixed(1)}% Avg Margin</span>
           </div>
         </motion.div>
 
-        {/* CARD 9: Original Opening Stock Value */}
+        {/* CARD 12: Original Opening Stock Value */}
         <motion.div
-          whileHover={{ y: -3 }}
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(79,123,255,0.3)" }}
           transition={{ duration: 0.2 }}
-          className="bg-indigo-50/20 border border-indigo-100 rounded-[2rem] p-6 shadow-2xs hover:shadow-xs transition flex flex-col justify-between"
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(79,123,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
         >
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#4F7BFF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
           <div className="space-y-4">
-            <div className="flex items-center justify-between text-[10px] font-bold text-indigo-500 uppercase tracking-widest font-sans">
-              <span>Original Opening Stock Value</span>
-              <Archive className="h-4 w-4 text-indigo-500 opacity-80" />
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#4F7BFF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(79,123,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <Archive className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Opening Stock Value</span>
             </div>
 
             <div>
-              <h3 className="text-3xl font-extrabold tracking-tight text-indigo-950 font-mono">
+              <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] font-mono">
                 ${openingStockValueCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </h3>
-              <p className="text-[10px] text-slate-400 mt-1 font-sans">Total initial setup value (at Cost)</p>
+              <p className="text-[10px] text-[#93A3B8] mt-1 font-sans">Cost base setup valuation</p>
             </div>
 
-            <div className="border-t border-indigo-100/70 pt-3">
-              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block font-sans">Original Opening Stock Retail Value</span>
-              <span className="text-sm font-extrabold text-indigo-700 block mt-0.5 font-mono">
+            <div className="border-t border-[#1E2A44]/65 pt-3.5">
+              <span className="text-[9px] font-bold text-[#93A3B8] uppercase block font-sans tracking-wide">Opening Stock Retail Value</span>
+              <span className="text-xs xs:text-sm font-extrabold text-[#4F7BFF] block mt-0.5 font-mono">
                 ${openingStockValueRetail.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </span>
             </div>
           </div>
 
-          <div className="mt-4 pt-3 border-t border-indigo-100/50 flex items-center justify-between text-[11px] text-slate-400 font-sans">
-            <span>Setup Inventory base</span>
-            <span className="text-indigo-600 font-bold uppercase text-[9px] px-2 py-0.5 rounded border bg-indigo-50 border-indigo-150">Initial Stock</span>
+          <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="opacity-80">Setup reserve base</span>
+            <span className="text-[#00D4FF] font-mono text-[9px] font-bold tracking-wider bg-[#1E2A44] px-2 py-0.5 rounded border border-[#1E2A44]/80">INITIAL</span>
           </div>
         </motion.div>
 
-        {/* CARD 10: Current Inventory Asset Value */}
+        {/* CARD 13: Current Inventory Value */}
         <motion.div
-          whileHover={{ y: -3 }}
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(59,130,246,0.4)" }}
           transition={{ duration: 0.2 }}
-          className="bg-emerald-50/15 border border-emerald-100 rounded-[2rem] p-6 shadow-2xs hover:shadow-xs transition flex flex-col justify-between"
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#3B82F6]/25 rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(59,130,246,0.08)] hover:shadow-[0_8px_30px_rgba(59,130,246,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
         >
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#3B82F6]/10 to-transparent rounded-full blur-2xl pointer-events-none"></div>
           <div className="space-y-4">
-            <div className="flex items-center justify-between text-[10px] font-bold text-emerald-600 uppercase tracking-widest font-sans">
-              <span>Current Inventory Asset Value</span>
-              <Briefcase className="h-4 w-4 text-emerald-500 opacity-80" />
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#3B82F6] to-[#60A5FA] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(59,130,246,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <Briefcase className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#3B82F6] uppercase tracking-widest font-sans opacity-95">Current Inventory Value</span>
             </div>
 
             <div>
-              <h3 className="text-3xl font-extrabold tracking-tight text-emerald-950 font-mono">
+              <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#3B82F6] font-mono">
                 ${totalPurchaseValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </h3>
-              <p className="text-[10px] text-slate-400 mt-1 font-sans">Actual capital currently tied up in inventory assets</p>
+              <p className="text-[10px] text-[#93A3B8] mt-1 font-sans">Active tied assets (at Cost Price)</p>
             </div>
 
-            <div className="border-t border-emerald-100/70 pt-3">
-              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block font-sans">Valuation Basis</span>
-              <span className="text-xs font-semibold text-slate-500 block mt-0.5 font-sans">
-                Purchase Price × Current Stock
+            <div className="border-t border-[#1E2A44]/65 pt-3.5">
+              <span className="text-[9px] font-bold text-[#93A3B8] uppercase block font-sans tracking-wide">Valuation Form</span>
+              <span className="text-[10px] text-[#93A3B8] block mt-0.5">
+                Purchase Price × Stock count
               </span>
             </div>
           </div>
 
-          <div className="mt-4 pt-3 border-t border-emerald-100/50 flex items-center justify-between text-[11px] text-slate-400 font-sans">
-            <span>Live Asset Value</span>
-            <span className="text-emerald-700 font-bold uppercase text-[9px] px-2 py-0.5 rounded border bg-emerald-50 border-emerald-150">Asset Valuation</span>
+          <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="opacity-80">Inventory live capital</span>
+            <span className="text-[#3B82F6] font-mono text-[9px] font-bold tracking-wider bg-blue-950/40 px-2.5 py-1 rounded border border-[#3B82F6]/20">ASSET BASIS</span>
           </div>
         </motion.div>
 
@@ -868,7 +1006,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         
         {/* Sales trend graphic vector */}
-        <div id="dashboard-sales-trend-graph" className="lg:col-span-2 bg-white rounded-[2rem] border border-slate-200/95 p-6 sm:p-8 shadow-xs space-y-6">
+        <div id="dashboard-sales-trend-graph" className="lg:col-span-2 bg-white rounded-2xl sm:rounded-[2rem] border border-slate-200/95 p-4 sm:p-8 shadow-xs space-y-6">
           <div className="flex justify-between items-center bg-white">
             <div>
               <h4 className="font-sans text-sm font-bold tracking-tight text-slate-900 flex items-center gap-1.5">
@@ -958,7 +1096,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
         </div>
 
         {/* Ranked Products / Categories Performance bar visualizer */}
-        <div className="bg-white rounded-[2rem] border border-slate-200/95 p-6 sm:p-8 shadow-xs space-y-6">
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] border border-slate-200/95 p-4 sm:p-8 shadow-xs space-y-6">
           <div className="flex justify-between items-center bg-white">
             <div>
               <h4 className="font-sans text-sm font-bold tracking-tight text-slate-900 flex items-center gap-1.5">
@@ -1021,7 +1159,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         
         {/* Urgent Low Stock Alerts Desk */}
-        <div className="bg-white rounded-[2rem] border border-slate-200/95 p-6 sm:p-8 shadow-xs space-y-5">
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] border border-slate-200/95 p-4 sm:p-8 shadow-xs space-y-5">
           <div>
             <h4 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
@@ -1040,20 +1178,20 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
               lowStockProductsList.map((prod) => (
                 <div 
                   key={prod.id} 
-                  className="p-4 rounded-2xl border border-rose-100 bg-rose-50/10 hover:bg-rose-50/20 transition flex items-center justify-between gap-4"
+                  className="p-3.5 sm:p-4 rounded-xl sm:rounded-2xl border border-rose-100 bg-rose-50/10 hover:bg-rose-50/20 transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4"
                 >
-                  <div className="space-y-1">
+                  <div className="space-y-1 w-full">
                     <p className="text-xs font-bold text-slate-900 tracking-tight">{prod.name}</p>
-                    <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                    <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-[10px] text-slate-500">
                       <span>SKU: {prod.sku}</span>
-                      <span>•</span>
+                      <span className="hidden sm:inline">•</span>
                       <span className="text-rose-600 font-semibold">Live Stock: {prod.currentStock} / Alert {prod.minimumStockAlert}</span>
                     </div>
                   </div>
 
                   <a
                     href={`mailto:supplier@nexus.com?subject=紧急补货: ${prod.name}&body=Please dispatch emergency units of SKU ${prod.sku}.`}
-                    className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 bg-rose-100/60 border border-rose-200 hover:bg-rose-100 rounded-lg px-3 py-1.5 transition cursor-pointer"
+                    className="w-full sm:w-auto text-center justify-center inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 bg-rose-100/60 border border-rose-200 hover:bg-rose-100 rounded-lg px-3 py-2 sm:py-1.5 transition cursor-pointer shrink-0"
                   >
                     <span>Restock Order</span>
                     <ArrowUpRight className="w-3 h-3" />
@@ -1065,7 +1203,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
         </div>
 
         {/* Outstanding Receivables Tracking Desk */}
-        <div className="bg-white rounded-[2rem] border border-slate-200/95 p-6 sm:p-8 shadow-xs space-y-5">
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] border border-slate-200/95 p-4 sm:p-8 shadow-xs space-y-5">
           <div>
             <h4 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-indigo-650 bg-indigo-600 animate-pulse"></span>
@@ -1074,7 +1212,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
             <p className="text-xs text-slate-400 mt-0.5">Live-audited operational logs captured in the Firestore database</p>
           </div>
 
-          <div className="space-y-3 max-h-[340px] overflow-y-auto pr-1">
+          <div className="space-y-3 max-h-none sm:max-h-[340px] overflow-visible sm:overflow-y-auto pr-1">
             {systemLogs.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center text-slate-400 border border-dashed border-slate-200 rounded-2xl">
                 <p className="text-xs font-bold text-slate-500">No logs found</p>
@@ -1087,9 +1225,9 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
                   : 'N/A';
                 
                 return (
-                  <div key={log.id || index} className="p-4 rounded-2xl border border-slate-100 hover:border-slate-200 hover:bg-slate-50/40 transition flex flex-col gap-2 bg-white">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
+                  <div key={log.id || index} className="p-3.5 sm:p-4 rounded-xl sm:rounded-2xl border border-slate-100 hover:border-slate-200 hover:bg-slate-50/40 transition flex flex-col gap-2 bg-white">
+                    <div className="flex flex-col xs:flex-row xs:items-center justify-between gap-1.5 xs:gap-2">
+                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider w-fit ${
                         log.action === 'Sale completed' ? 'bg-emerald-100 text-emerald-800' :
                         log.action === 'Stock updated' ? 'bg-amber-100 text-amber-800' :
                         log.action === 'Product added' ? 'bg-indigo-100 text-indigo-800' :
@@ -1109,7 +1247,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
                     <div className="flex items-center gap-1.5 pt-1.5 border-t border-slate-50">
                       <Clock className="w-2.5 h-2.5 text-slate-400 shrink-0" />
                       <span className="text-[9px] font-semibold text-slate-550 text-slate-500">Operator:</span>
-                      <span className="text-[9px] text-indigo-600 font-bold font-mono truncate max-w-[200px]" title={log.user}>
+                      <span className="text-[9px] text-indigo-600 font-bold font-mono break-all sm:truncate sm:max-w-[200px]" title={log.user}>
                         {log.user || 'System'}
                       </span>
                     </div>
@@ -1188,55 +1326,67 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
                     </div>
                   )}
 
-                  <form onSubmit={handleSaveCapital} className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
-                    <div>
-                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">Amount ($ USD)</label>
-                      <div className="relative">
-                        <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                        <input 
-                          type="number"
-                          step="0.01"
-                          required
-                          placeholder="50,000.00"
-                          value={newCapAmount}
-                          onChange={(e) => setNewCapAmount(e.target.value)}
-                          disabled={userRole !== 'admin'}
-                          className="w-full bg-white border border-slate-200 rounded-xl pl-9 pr-4 py-2.5 text-xs font-semibold text-slate-900 focus:outline-hidden focus:border-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
-                        />
-                      </div>
+                  <form onSubmit={handleSaveCapital} className="grid grid-cols-1 md:grid-cols-3 gap-5 items-start">
+                    {/* Amount */}
+                    <div className="relative w-full">
+                      <DollarSign className="absolute left-3.5 top-[18px] w-4 h-4 text-slate-400" />
+                      <input 
+                        type="number"
+                        step="0.01"
+                        required
+                        id="cap-amount-field"
+                        placeholder=" "
+                        value={newCapAmount}
+                        onChange={(e) => setNewCapAmount(e.target.value)}
+                        disabled={userRole !== 'admin'}
+                        className="peer w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                      />
+                      <label htmlFor="cap-amount-field" className="absolute left-9 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-9 peer-focus:top-1.5 peer-focus:left-9 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                        Amount ($ USD) <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
                     </div>
 
-                    <div>
-                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">Contribution Date</label>
+                    {/* Completion date */}
+                    <div className="relative w-full">
                       <input 
                         type="date"
                         required
+                        id="cap-date-field"
+                        placeholder=" "
                         value={newCapDate}
                         onChange={(e) => setNewCapDate(e.target.value)}
                         disabled={userRole !== 'admin'}
-                        className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-xs font-semibold text-slate-900 focus:outline-hidden focus:border-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                        className="peer w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed cursor-pointer"
                       />
+                      <label htmlFor="cap-date-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                        Contribution Date <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
                     </div>
 
-                    <div>
-                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5 block">Source Note / Equity Reference</label>
+                    {/* Note */}
+                    <div className="relative w-full">
                       <input 
                         type="text"
-                        placeholder="e.g. Series A seed round, cash injection"
+                        id="cap-note-field"
+                        placeholder=" "
                         value={newCapNote}
                         onChange={(e) => setNewCapNote(e.target.value)}
                         disabled={userRole !== 'admin'}
-                        className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-xs font-semibold text-slate-900 focus:outline-hidden focus:border-slate-400 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                        className="peer w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed"
                       />
+                      <label htmlFor="cap-note-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                        Source Note / Equity Reference
+                      </label>
                     </div>
 
-                    <div className="md:col-span-3 flex justify-end">
+                    <div className="md:col-span-3 flex justify-end pt-2">
                       <button 
                         type="submit"
                         disabled={userRole !== 'admin'}
-                        className="bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs px-5 py-2.5 rounded-xl transition shadow-3xs disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[11px] uppercase tracking-wider px-5 py-2.5 rounded-xl transition shadow-xs hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer inline-flex items-center gap-1.5 h-10"
                       >
-                        Inflow Capital Investment
+                        <Save className="w-3.5 h-3.5" />
+                        <span>Inflow Capital Investment</span>
                       </button>
                     </div>
                   </form>
@@ -1246,8 +1396,8 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
                 <div className="space-y-3">
                   <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">Equity Injection Registers</h4>
                   
-                  <div className="border border-slate-100 rounded-2xl overflow-hidden bg-white">
-                    <table className="w-full text-left text-xs border-collapse">
+                  <div className="border border-slate-100 rounded-2xl overflow-x-auto bg-white scrollbar-thin">
+                    <table className="w-full text-left text-xs border-collapse min-w-[600px]">
                       <thead>
                         <tr className="bg-slate-50 border-b border-slate-100 text-slate-400 font-bold uppercase tracking-wider text-[9px]">
                           <th className="p-4">Investment ID</th>

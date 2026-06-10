@@ -110,6 +110,17 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
     };
   }, []);
 
+  useEffect(() => {
+    const handleTrigger = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail?.tab === 'procurement') {
+        openForm();
+      }
+    };
+    window.addEventListener('nexus-trigger-add-modal', handleTrigger);
+    return () => window.removeEventListener('nexus-trigger-add-modal', handleTrigger);
+  }, []);
+
   // --- Form Helper: Pre-fill purchase price upon product selection ---
   const handleProductSelect = (selectedId: string) => {
     const selectedProd = products.find(p => p.id === selectedId);
@@ -717,28 +728,29 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       </div>
 
       {/* FILTER CONTROL RAILS */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 bg-white border border-slate-200 rounded-[2rem] p-4 shadow-3xs">
+      <div className="bg-white border border-slate-200 rounded-[2rem] p-4 shadow-3xs flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         {/* Search */}
-        <div className="relative flex-1 max-w-md">
+        <div className="relative w-full md:max-w-md shrink-0">
           <Search className="absolute left-4 top-3.5 h-4 w-4 text-slate-400" />
           <input 
             type="text"
             placeholder="Search by supplier, item description, payments..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full text-xs font-medium border border-slate-200 rounded-2xl py-3 pl-11 pr-4 bg-slate-50 focus:bg-white focus:outline-none focus:border-indigo-550 focus:ring-1 focus:ring-indigo-500 transition duration-150"
+            className="w-full text-xs font-semibold border border-slate-200 rounded-2xl py-3.5 pl-11 pr-4 bg-slate-50 focus:bg-white focus:outline-none focus:border-indigo-550 focus:ring-1 focus:ring-indigo-500 transition duration-150 h-11"
           />
         </div>
 
-        {/* Tab filters and Creation button */}
-        <div className="flex items-center gap-3 self-end sm:self-auto">
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200/60 shrink-0">
+        {/* Tab filters and Action Button stacked on mobile, row on tablet/desktop */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full md:w-auto font-sans">
+          
+          <div className="w-full sm:flex-1 md:w-auto flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200/60 shrink-0 h-11">
             {(['All', 'Cash', 'Credit'] as const).map((filter) => (
               <button
                 key={filter}
                 type="button"
                 onClick={() => setPaymentFilter(filter)}
-                className={`px-3 py-1.5 text-[10px] font-extrabold rounded-lg uppercase tracking-widest transition cursor-pointer ${
+                className={`flex-1 md:flex-initial text-center px-4 py-2 text-xs md:text-[10px] md:px-3 md:py-1.5 font-extrabold rounded-lg uppercase tracking-widest transition cursor-pointer whitespace-nowrap min-h-[36px] flex items-center justify-center ${
                   paymentFilter === filter 
                     ? 'bg-white text-indigo-650 text-indigo-600 shadow-2xs border border-slate-200/40' 
                     : 'text-slate-500 hover:text-slate-800'
@@ -753,7 +765,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
             <button
               type="button"
               onClick={() => openForm()}
-              className="inline-flex items-center gap-1.5 cursor-pointer bg-indigo-650 bg-indigo-600 hover:bg-indigo-705 hover:bg-indigo-700 text-white rounded-xl px-4 py-2.5 text-xs font-bold transition shadow-xs hover:shadow-sm"
+              className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-1.5 cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-5 py-3 md:py-2.5 text-xs font-bold transition shadow-xs hover:shadow-sm"
             >
               <Plus className="h-4 w-4" />
               <span>Enter Purchase Order</span>
@@ -774,91 +786,138 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           </span>
         </div>
 
-        <div className="overflow-x-auto">
+        <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-xs bg-white">
           {filteredPurchases.length === 0 ? (
-            <div className="py-16 text-center space-y-3">
-              <div className="w-12 h-12 bg-slate-50 border border-slate-100 rounded-full flex items-center justify-center mx-auto text-slate-400 shadow-3xs">
-                <Clock className="w-5 h-5" />
+            <motion.div 
+              initial={{ opacity: 0, y: 12 }} 
+              animate={{ opacity: 1, y: 0 }} 
+              transition={{ duration: 0.3 }}
+              className="mx-auto max-w-md w-full my-8 text-center flex flex-col items-center gap-4.5"
+            >
+              <div className="relative group">
+                <div className="absolute inset-0 bg-indigo-200/20 rounded-full blur-xl group-hover:scale-125 transition duration-300"></div>
+                <div className="relative w-16 h-16 bg-white border border-slate-100 rounded-2xl shadow-3xs flex items-center justify-center text-slate-400 group-hover:text-indigo-600 transition-all duration-300">
+                  <Box className="h-8 w-8 text-slate-400 transition-transform duration-300 group-hover:scale-110" />
+                </div>
               </div>
               <div>
-                <h4 className="text-xs font-bold text-slate-800 uppercase tracking-widest">No matching procurement records</h4>
-                <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-                  {searchQuery ? 'Adjust your text search or toggle filter options.' : 'Record your first company-supplier procurement order to activate stocks.'}
+                <h4 className="text-sm font-bold text-slate-900 uppercase tracking-widest leading-none">
+                  {purchases.length === 0 ? 'No Procurement Logs' : 'No Procurements Found'}
+                </h4>
+                <p className="text-xs text-slate-500 mt-2 max-w-xs leading-relaxed font-semibold">
+                  {purchases.length === 0 
+                    ? 'Log company product purchases from designated suppliers to automatically restock inventories and maintain trade accounts.'
+                    : searchQuery || paymentFilter !== 'All'
+                      ? "No records matched your actively specified searching terms or settlement choices."
+                      : 'No procurement transactions detected. Empty your filters or record a new buy.'}
                 </p>
               </div>
-            </div>
+              <div className="flex gap-2.5 pt-1.5 flex-wrap justify-center">
+                {purchases.length > 0 && (searchQuery || paymentFilter !== 'All') ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery('');
+                      setPaymentFilter('All');
+                    }}
+                    className="bg-white border border-slate-200 hover:border-slate-350 text-slate-700 font-extrabold text-[11px] uppercase tracking-wider px-5 py-2.5 rounded-xl transition cursor-pointer shadow-3xs"
+                  >
+                    Reset Search Filters
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => openForm()}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[11px] uppercase tracking-wider h-10 px-5 rounded-xl transition cursor-pointer shadow-xs hover:shadow-md inline-flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Record New Procurement</span>
+                  </button>
+                )}
+              </div>
+            </motion.div>
           ) : (
-            <table className="w-full text-left border-collapse table-auto">
-              <thead>
-                <tr className="bg-slate-500/5 border-b border-slate-100 text-slate-450 text-[10px] font-black uppercase tracking-widest text-slate-500">
-                  <th className="py-4.5 px-6 sm:px-8">Date</th>
-                  <th className="py-4.5 px-5">Procurement Reference</th>
-                  <th className="py-4.5 px-5">Supplier Channel</th>
-                  <th className="py-4.5 px-5">Product Unit</th>
-                  <th className="py-4.5 px-5 text-center">Unit Cost</th>
-                  <th className="py-4.5 px-5 text-center">Purchased Quantity</th>
-                  <th className="py-4.5 px-5 text-right">Debit Total</th>
-                  <th className="py-4.5 px-6 sm:px-8 text-center shrink-0">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
-                {filteredPurchases.map((purchase) => (
-                  <tr key={purchase.id} className={`hover:bg-slate-50/50 transition duration-100 group ${purchase.status === 'voided' || purchase.status === 'VOID' ? 'opacity-45 bg-slate-50/50 line-through text-slate-400' : ''}`}>
-                    <td className="py-4 px-6 sm:px-8 font-mono text-slate-500 font-bold whitespace-nowrap">
-                      {new Date(purchase.purchaseDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
-                    </td>
-                    <td className="py-4 px-5">
-                      <div className="flex items-center gap-1.5 font-mono text-[10px] text-indigo-600 font-bold uppercase">
-                        <span>{purchase.id.substring(0, 15)}</span>
-                      </div>
-                    </td>
-                    <td className="py-4 px-5 font-bold text-slate-900 whitespace-nowrap">
-                      {purchase.supplierName}
-                    </td>
-                    <td className="py-4 px-5 whitespace-nowrap">
-                      <div className="font-bold text-slate-850 text-slate-800">{purchase.productName}</div>
-                      <div className="font-mono text-[9px] text-slate-400 uppercase mt-0.5">Product ID: {purchase.productId.substring(0, 8)}</div>
-                    </td>
-                    <td className="py-4 px-5 text-center font-bold text-slate-800 font-mono">
-                      ${purchase.purchasePrice.toFixed(2)}
-                    </td>
-                    <td className="py-4 px-5 text-center font-bold text-slate-900 font-mono">
-                      x{purchase.quantity}
-                    </td>
-                    <td className="py-4 px-5 text-right font-black font-mono whitespace-nowrap">
-                      <span className="text-slate-900">${purchase.totalAmount.toFixed(2)}</span>
-                      <span className={`block text-[9px] font-extrabold uppercase mt-0.5 tracking-wider ${
-                        purchase.paymentType === 'Cash' 
-                          ? 'text-emerald-600' 
-                          : 'text-amber-500'
-                      }`}>
-                        {purchase.paymentType}
-                      </span>
-                    </td>
-                    <td className="py-4 px-6 sm:px-8 text-center whitespace-nowrap">
-                      {purchase.status === 'voided' || purchase.status === 'VOID' ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-2.5 py-0.5 text-[9px] font-mono font-bold text-slate-400">
-                          VOIDED
-                        </span>
-                      ) : (
-                        <div className="flex items-center justify-center gap-1.5">
-                          {userRole === 'admin' && (
-                            <button
-                              type="button"
-                              onClick={() => voidTransaction(purchase.id)}
-                              title="Void procurement log and reverse parameters"
-                              className="p-2 text-slate-500 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 rounded-xl transition cursor-pointer"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </td>
+            <div className="overflow-x-auto max-h-[500px]">
+              <table className="w-full text-left border-collapse table-auto">
+                <thead className="sticky top-0 bg-slate-50 z-10 shadow-[0_1px_0_0_rgba(226,232,240,1)]">
+                  <tr className="bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    <th className="py-3 px-3 sm:py-4 sm:px-8 min-w-[100px] md:min-w-[120px] whitespace-nowrap">Date</th>
+                    <th className="py-3 px-4 sm:py-4 sm:px-5 min-w-[110px] md:min-w-[150px] whitespace-nowrap">Procurement Reference</th>
+                    <th className="py-3 px-4 sm:py-4 sm:px-5 min-w-[130px] md:min-w-[165px] whitespace-nowrap">Supplier Channel</th>
+                    <th className="py-3 px-4 sm:py-4 sm:px-5 min-w-[140px] md:min-w-[190px] whitespace-nowrap">Product Unit</th>
+                    <th className="py-3 px-4 sm:py-4 sm:px-5 text-center min-w-[80px] md:min-w-[100px] whitespace-nowrap">Unit Cost</th>
+                    <th className="py-3 px-4 sm:py-4 sm:px-5 text-center min-w-[70px] md:min-w-[120px] whitespace-nowrap">Purchased Qty</th>
+                    <th className="py-3 px-4 sm:py-4 sm:px-5 text-right min-w-[110px] md:min-w-[130px] whitespace-nowrap">Debit Total</th>
+                    <th className="py-3 px-3 sm:py-4 sm:px-8 text-center min-w-[70px] md:min-w-[100px] shrink-0 whitespace-nowrap">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
+                  {filteredPurchases.map((purchase) => (
+                    <tr 
+                      key={purchase.id} 
+                      className={`hover:bg-indigo-50/20 even:bg-slate-50/30 transition duration-150 group ${
+                        purchase.status === 'voided' || purchase.status === 'VOID' 
+                          ? 'opacity-40 bg-slate-50/50 line-through text-slate-400' 
+                          : ''
+                      }`}
+                    >
+                       <td className="py-3 px-3 sm:py-4 sm:px-8 font-mono text-slate-500 font-bold whitespace-nowrap">
+                        {new Date(purchase.purchaseDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                      </td>
+                      <td className="py-3 px-4 sm:py-4 sm:px-5 whitespace-nowrap">
+                        <div className="flex items-center gap-1.5 font-mono text-[10px] text-indigo-600 font-bold uppercase">
+                          <span>{purchase.id.substring(0, 15)}</span>
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 sm:py-4 sm:px-5 font-bold text-slate-900 whitespace-nowrap">
+                        {purchase.supplierName}
+                      </td>
+                      <td className="py-3 px-4 sm:py-4 sm:px-5 whitespace-nowrap">
+                        <div className="font-bold text-slate-800">{purchase.productName}</div>
+                        <div className="font-mono text-[9px] text-slate-450 uppercase mt-0.5">Product ID: {purchase.productId.substring(0, 8)}</div>
+                      </td>
+                      <td className="py-3 px-4 sm:py-4 sm:px-5 text-center font-bold text-slate-800 font-mono whitespace-nowrap">
+                        ${purchase.purchasePrice.toFixed(2)}
+                      </td>
+                      <td className="py-3 px-4 sm:py-4 sm:px-5 text-center font-bold text-slate-900 font-mono whitespace-nowrap">
+                        x{purchase.quantity}
+                      </td>
+                      <td className="py-3 px-4 sm:py-4 sm:px-5 text-right whitespace-nowrap">
+                        <span className="text-slate-900 font-black font-mono font-sans block text-sm">${purchase.totalAmount.toFixed(2)}</span>
+                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold border uppercase tracking-wider mt-1.5 ${
+                          purchase.paymentType === 'Cash' 
+                            ? 'bg-emerald-50 border-emerald-250/60 text-emerald-700 shadow-3xs' 
+                            : 'bg-blue-50 border-blue-200 text-blue-700 shadow-3xs'
+                        }`}>
+                          {purchase.paymentType === 'Cash' ? 'Paid / Cash' : 'Credit / Terms'}
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 sm:py-4 sm:px-8 text-center whitespace-nowrap">
+                        {purchase.status === 'voided' || purchase.status === 'VOID' ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider bg-rose-50 text-rose-700 border border-rose-200 shadow-3xs animate-fade-in">
+                            <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse"></span>
+                            Void
+                          </span>
+                        ) : (
+                          <div className="flex items-center justify-center gap-1.5">
+                            {userRole === 'admin' && (
+                              <button
+                                type="button"
+                                onClick={() => voidTransaction(purchase.id)}
+                                title="Void procurement log and reverse parameters"
+                                className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 rounded-xl transition cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </div>
@@ -903,19 +962,19 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                 </div>
 
                 {/* Form fields */}
-                <form onSubmit={handleSavePurchase} className="space-y-5">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <form onSubmit={handleSavePurchase} className="space-y-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                     {/* Supplier Field */}
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Target Supplier *</label>
+                    <div className="relative w-full">
                       <select
+                        id="form-procurement-supplier-field"
                         disabled={isSaving}
                         value={formData.supplierId}
                         onChange={(e) => setFormData({ ...formData, supplierId: e.target.value })}
-                        className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-semibold focus:outline-none transition bg-white appearance-none cursor-pointer ${
+                        className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 bg-white appearance-none cursor-pointer disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                           errors.supplierId 
-                            ? 'border-rose-300 text-rose-800 bg-rose-50/20' 
-                            : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500'
+                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455 focus:ring-rose-450' 
+                            : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
                         }`}
                       >
                         <option value="">-- Choose Supplier --</option>
@@ -925,20 +984,28 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                           </option>
                         ))}
                       </select>
-                      {errors.supplierId && <p className="text-[10px] font-bold text-rose-500">{errors.supplierId}</p>}
+                      <label htmlFor="form-procurement-supplier-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Target Supplier <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                      {errors.supplierId && (
+                        <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                          <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                          <span>{errors.supplierId}</span>
+                        </div>
+                      )}
                     </div>
 
                     {/* Product Selection */}
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Inventory Product *</label>
+                    <div className="relative w-full">
                       <select
+                        id="form-procurement-product-field"
                         disabled={isSaving}
                         value={formData.productId}
                         onChange={(e) => handleProductSelect(e.target.value)}
-                        className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-semibold focus:outline-none transition bg-white appearance-none cursor-pointer ${
+                        className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 bg-white appearance-none cursor-pointer disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                           errors.productId 
-                            ? 'border-rose-300 text-rose-800 bg-rose-50/20' 
-                            : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500'
+                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455 focus:ring-rose-450' 
+                            : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
                         }`}
                       >
                         <option value="">-- Choose Product --</option>
@@ -948,66 +1015,87 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                           </option>
                         ))}
                       </select>
-                      {errors.productId && <p className="text-[10px] font-bold text-rose-500">{errors.productId}</p>}
+                      <label htmlFor="form-procurement-product-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Inventory Product <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                      {errors.productId && (
+                        <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                          <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                          <span>{errors.productId}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                     {/* Unit Purchase Price */}
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Unit Purchase Price ($) *</label>
-                      <div className="relative">
-                        <span className="absolute left-3.5 top-2.5 text-slate-400 text-xs font-bold">$</span>
-                        <input
-                          type="number"
-                          step="0.01"
-                          required
-                          disabled={isSaving}
-                          value={formData.purchasePrice}
-                          onChange={(e) => setFormData({ ...formData, purchasePrice: e.target.value })}
-                          className={`w-full rounded-xl border py-2.5 pl-8 pr-3.5 text-xs font-semibold focus:outline-none transition disabled:bg-slate-50 ${
-                            errors.purchasePrice 
-                              ? 'border-rose-300 text-rose-800 bg-rose-50/20' 
-                              : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500'
-                          }`}
-                          placeholder="0.00"
-                        />
-                      </div>
-                      {errors.purchasePrice && <p className="text-[10px] font-bold text-rose-500">{errors.purchasePrice}</p>}
+                    <div className="relative w-full">
+                      <span className="absolute left-3.5 top-[18px] text-slate-400 text-xs font-bold leading-none">$</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        required
+                        id="form-procurement-price-field"
+                        disabled={isSaving}
+                        value={formData.purchasePrice}
+                        onChange={(e) => setFormData({ ...formData, purchasePrice: e.target.value })}
+                        placeholder=" "
+                        className={`peer w-full rounded-xl border pl-7 pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                          errors.purchasePrice 
+                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455 focus:ring-rose-450' 
+                            : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
+                        }`}
+                      />
+                      <label htmlFor="form-procurement-price-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-7 peer-focus:top-1.5 peer-focus:left-3.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                        Unit Cost ($) <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                      {errors.purchasePrice && (
+                        <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                          <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                          <span>{errors.purchasePrice}</span>
+                        </div>
+                      )}
                     </div>
 
                     {/* Quantity Procured */}
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Quantity Units Purchased *</label>
+                    <div className="relative w-full">
                       <input
                         type="number"
                         min="1"
                         required
+                        id="form-procurement-qty-field"
                         disabled={isSaving}
                         value={formData.quantity}
                         onChange={(e) => setFormData({ ...formData, quantity: e.target.value })}
-                        className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-semibold focus:outline-none transition disabled:bg-slate-50 ${
+                        placeholder=" "
+                        className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                           errors.quantity 
-                            ? 'border-rose-300 text-rose-800 bg-rose-50/20' 
-                            : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500'
+                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455 focus:ring-rose-450' 
+                            : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
                         }`}
-                        placeholder="Quantity"
                       />
-                      {errors.quantity && <p className="text-[10px] font-bold text-rose-500">{errors.quantity}</p>}
+                      <label htmlFor="form-procurement-qty-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                        Quantity Purchased <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                      {errors.quantity && (
+                        <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                          <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                          <span>{errors.quantity}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                     {/* Payment Account Type */}
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Supplier Terms *</label>
-                      <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200">
+                    <div className="relative w-full">
+                      <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 h-[52.2px] items-center">
                         {(['Cash', 'Credit'] as const).map((method) => (
                           <button
                             key={method}
                             type="button"
                             onClick={() => setFormData({ ...formData, paymentType: method })}
-                            className={`flex-1 text-center py-2 text-xs font-extrabold rounded-lg uppercase tracking-widest transition cursor-pointer ${
+                            className={`flex-1 text-center py-2 text-xs font-extrabold rounded-lg uppercase tracking-wider transition cursor-pointer ${
                               formData.paymentType === method 
                                 ? 'bg-white text-indigo-600 shadow-2xs border border-slate-200/40' 
                                 : 'text-slate-500 hover:text-slate-800'
@@ -1017,19 +1105,25 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                           </button>
                         ))}
                       </div>
+                      <span className="absolute -top-2.5 left-3 px-1.5 bg-white text-[10px] font-extrabold text-slate-400 uppercase tracking-widest leading-none">
+                        Supplier Terms <span className="text-rose-500 font-extrabold">*</span>
+                      </span>
                     </div>
 
                     {/* Purchase date */}
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Date Settled *</label>
+                    <div className="relative w-full">
                       <input 
                         type="date"
                         required
+                        id="form-procurement-date-field"
                         disabled={isSaving}
                         value={formData.purchaseDate}
                         onChange={(e) => setFormData({ ...formData, purchaseDate: e.target.value })}
-                        className="w-full rounded-xl border border-slate-200 bg-white py-2 px-3 text-xs font-semibold text-slate-850 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none transition duration-150 cursor-pointer"
+                        className="peer w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold text-slate-850 focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition duration-150 cursor-pointer h-[52px]"
                       />
+                      <label htmlFor="form-procurement-date-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Date Settled <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
                     </div>
                   </div>
 
@@ -1038,23 +1132,23 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                     <motion.div 
                       initial={{ opacity: 0, height: 0 }}
                       animate={{ opacity: 1, height: 'auto' }}
-                      className="bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-2 mt-4"
+                      className="bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-2 mt-4 shadow-3xs"
                     >
                       <div className="flex justify-between items-center text-xs">
-                        <span className="text-slate-450 text-slate-500 font-bold uppercase tracking-wider">Item details:</span>
-                        <span className="font-extrabold text-slate-850 text-slate-700">
+                        <span className="text-slate-500 font-bold uppercase tracking-wider">Item details:</span>
+                        <span className="font-extrabold text-slate-700">
                           {selectedProductDetails?.name || 'Item'} (x{parseInt(formData.quantity) || 1})
                         </span>
                       </div>
                       <div className="flex justify-between items-center text-xs">
-                        <span className="text-slate-450 text-slate-500 font-bold uppercase tracking-wider">Purchase margin:</span>
+                        <span className="text-slate-500 font-bold uppercase tracking-wider">Purchase margin:</span>
                         <span className="font-extrabold text-slate-500">
                           Retail selling is ${selectedProductDetails?.sellingPrice.toFixed(2) || '0.00'}
                         </span>
                       </div>
                       <div className="border-t border-slate-200/60 my-2 pt-2 flex justify-between items-center">
                         <span className="text-xs font-black text-slate-900 uppercase tracking-wider">Gross debit sum:</span>
-                        <span className="text-sm font-black text-indigo-650 text-indigo-600 font-mono">
+                        <span className="text-sm font-black text-indigo-600 font-mono">
                           ${((parseInt(formData.quantity) || 1) * (parseFloat(formData.purchasePrice) || 0)).toFixed(2)}
                         </span>
                       </div>
@@ -1062,12 +1156,12 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                   )}
 
                   {/* Submission and Cancel controls */}
-                  <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
+                  <div className="flex items-center justify-end gap-3 pt-5 border-t border-slate-100">
                     <button
                       type="button"
                       disabled={isSaving}
                       onClick={() => setIsFormOpen(false)}
-                      className="cursor-pointer border border-slate-200 hover:bg-slate-50 text-slate-650 text-slate-700 rounded-xl px-4 py-2.5 text-xs font-bold transition"
+                      className="cursor-pointer border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl px-4 py-2.5 text-xs font-bold transition"
                     >
                       Cancel
                     </button>

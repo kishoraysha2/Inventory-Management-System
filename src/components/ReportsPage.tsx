@@ -794,10 +794,10 @@ export default function ReportsPage() {
   }
 
   return (
-    <div id="nexus-reports-root" className="space-y-8 animate-fade-in font-sans pb-12 print:space-y-4 print:pb-0">
+    <div id="nexus-reports-root" className="space-y-8 animate-fade-in font-sans pb-12 print:space-y-4 print:pb-0 w-full max-w-full overflow-x-clip">
       
       {/* HEADER SECTION AND CONTROLS */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 print:border-b print:pb-3">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 print:border-b print:pb-3 pb-2 w-full max-w-full">
         <div>
           <h2 className="text-xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 animate-pulse print:hidden"></span>
@@ -809,75 +809,59 @@ export default function ReportsPage() {
         </div>
 
         {/* Date Filters Container */}
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 bg-white border border-slate-200/90 rounded-[2rem] p-3 shadow-2xs print:bg-transparent print:border-none print:shadow-none print:p-0">
+        <div className="w-full lg:w-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-3 bg-white border border-slate-200/90 rounded-[2rem] p-4 sm:p-3 shadow-2xs lg:shadow-3xs print:bg-transparent print:border-none print:shadow-none print:p-0">
           
-          <div className="flex items-center gap-1.5 px-3 py-1 bg-slate-50 rounded-xl border border-slate-100 print:bg-transparent print:border-none print:p-0">
-            <Calendar className="w-4 h-4 text-indigo-500 shrink-0 print:text-slate-800" />
-            <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest leading-none print:text-slate-700">Date Range</span>
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-indigo-50/60 rounded-xl border border-indigo-100/40 shrink-0 print:hidden self-start sm:self-auto">
+            <Calendar className="w-4 h-4 text-indigo-600 shrink-0" />
+            <span className="text-[10px] font-black text-indigo-700 uppercase tracking-widest leading-none">Date Range</span>
           </div>
 
-          {/* Quick ranges selectors - hidden on print */}
-          <div className="flex flex-wrap items-center gap-1.5 print:hidden">
-            <button 
-              type="button"
-              onClick={() => setQuickRange('30_days')} 
-              className={`text-[10px] font-bold px-2.5 py-1 rounded-xl border transition cursor-pointer ${
-                startDate === '2026-05-01' && endDate === '2026-06-01'
-                  ? 'bg-slate-900 border-slate-900 text-white' 
-                  : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-slate-200'
-              }`}
-            >
-              30D
-            </button>
-            <button 
-              type="button"
-              onClick={() => setQuickRange('90_days')} 
-              className={`text-[10px] font-bold px-2.5 py-1 rounded-xl border transition cursor-pointer ${
-                startDate === '2026-03-01' && endDate === '2026-06-01'
-                  ? 'bg-slate-900 border-slate-900 text-white' 
-                  : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-slate-200'
-              }`}
-            >
-              90D
-            </button>
-            <button 
-              type="button"
-              onClick={() => setQuickRange('this_year')} 
-              className={`text-[10px] font-bold px-2.5 py-1 rounded-xl border transition cursor-pointer ${
-                startDate === '2026-01-01' && endDate === '2026-06-01'
-                  ? 'bg-slate-900 border-slate-900 text-white' 
-                  : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-slate-200'
-              }`}
-            >
-              YTD
-            </button>
-            <button 
-              type="button"
-              onClick={() => setQuickRange('all_time')} 
-              className={`text-[10px] font-bold px-2.5 py-1 rounded-xl border transition cursor-pointer ${
-                startDate === '2020-01-01' && endDate === '2026-06-01'
-                  ? 'bg-slate-900 border-slate-900 text-white' 
-                  : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-slate-200'
-              }`}
-            >
-              Max
-            </button>
-          </div>
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full">
+            {/* Quick ranges selectors - hidden on print */}
+            <div className="grid grid-cols-4 sm:flex items-center gap-1.5 print:hidden w-full sm:w-auto">
+              {(['30_days', '90_days', 'this_year', 'all_time'] as const).map((range) => {
+                const labelMap: Record<string, string> = {
+                  '30_days': '30D',
+                  '90_days': '90D',
+                  'this_year': 'YTD',
+                  'all_time': 'Max'
+                };
+                const isSelected = (range === '30_days' && startDate === '2026-05-01' && endDate === '2026-06-01') ||
+                                   (range === '90_days' && startDate === '2026-03-01' && endDate === '2026-06-01') ||
+                                   (range === 'this_year' && startDate === '2026-01-01' && endDate === '2026-06-01') ||
+                                   (range === 'all_time' && startDate === '2020-01-01' && endDate === '2026-06-01');
+                return (
+                  <button 
+                    key={range}
+                    type="button"
+                    onClick={() => setQuickRange(range)} 
+                    className={`text-[10px] font-extrabold px-2 py-2.5 sm:py-1.5 rounded-xl border transition cursor-pointer text-center whitespace-nowrap ${
+                      isSelected
+                        ? 'bg-slate-900 border-slate-900 text-white shadow-xs' 
+                        : 'bg-slate-50 text-slate-600 hover:bg-slate-100 border-slate-200'
+                    }`}
+                  >
+                    {labelMap[range]}
+                  </button>
+                );
+              })}
+            </div>
 
-          <div className="flex items-center gap-2 print:hidden">
-            <input 
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="px-2 py-1.5 border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 focus:outline-none focus:border-indigo-500 cursor-pointer"
-            />
-            <span className="text-slate-400 text-xs font-semibold">to</span>
-            <input 
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              className="px-2 py-1.5 border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 focus:outline-none focus:border-indigo-500 cursor-pointer"
-            />
+            <div className="flex items-center gap-2 print:hidden w-full sm:w-auto min-w-0">
+              <input 
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="w-full min-w-0 sm:w-auto min-h-[38px] px-2.5 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 bg-slate-50 focus:bg-white focus:outline-none focus:border-indigo-500 cursor-pointer shadow-3xs"
+              />
+              <span className="text-slate-400 text-xs font-bold shrink-0">to</span>
+              <input 
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="w-full min-w-0 sm:w-auto min-h-[38px] px-2.5 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 bg-slate-50 focus:bg-white focus:outline-none focus:border-indigo-500 cursor-pointer shadow-3xs"
+              />
+            </div>
           </div>
 
           {/* Label visible only on Print */}
@@ -892,8 +876,8 @@ export default function ReportsPage() {
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start print:grid-cols-4">
         
         {/* REPORT TYPE SELECTOR (LEFT COLUMN) */}
-        <div className="space-y-2 lg:col-span-1 print:hidden">
-          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1 px-1">Select Report View</span>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:flex lg:flex-col gap-2 lg:col-span-1 print:hidden">
+          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1 px-1 col-span-full">Select Report View</span>
           
           {(['sales', 'purchases', 'profit_loss', 'customer_due', 'supplier_due', 'tax_vat', 'activity_logs'] as ReportType[]).map((type) => {
             const isActive = activeReport === type;
@@ -942,41 +926,41 @@ export default function ReportsPage() {
         <div className="lg:col-span-3 print:col-span-4 space-y-6 print:w-full">
           
           {/* HIGH-FIDELITY BENTO SUMMARIES */}
-          <div className="bg-white border border-slate-205 border-slate-200/95 rounded-[2.5rem] p-6 sm:p-8 shadow-2xs space-y-6 print:shadow-none print:border-none print:p-2">
+          <div className="bg-white border border-slate-200/95 rounded-[2.5rem] p-6 sm:p-8 shadow-2xs space-y-6 print:shadow-none print:border-none print:p-2">
             
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 border-b border-slate-100 pb-5">
               <div>
                 <span className="text-[10px] font-bold text-indigo-600 uppercase tracking-widest block print:hidden">Audit Dashboard Summaries</span>
                 <h3 className="text-lg font-bold text-slate-950 mt-0.5 capitalize print:text-xl">{activeReport.replace('_', ' ')} Calculations</h3>
               </div>
 
               {/* ACTION DOWNLOAD BUTTONS */}
-              <div className="flex items-center gap-2 print:hidden">
+              <div className="flex flex-col md:flex-row items-stretch md:items-center gap-3 print:hidden w-full xl:w-auto font-sans">
                 <button
                   type="button"
                   onClick={handleExportCSV}
-                  className="inline-flex items-center gap-1.5 cursor-pointer bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl px-4 py-2.5 text-xs font-bold transition shadow-3xs hover:shadow-2xs"
+                  className="w-full md:w-auto inline-flex items-center justify-center gap-1.5 cursor-pointer bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl px-4 py-3 md:py-2.5 text-xs font-bold transition shadow-3xs hover:shadow-2xs min-h-[44px] md:min-h-[38px]"
                 >
-                  <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-                  <span>Export Excel (CSV)</span>
+                  <FileSpreadsheet className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span className="whitespace-nowrap">Export Excel (CSV)</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={handleExportPDF}
-                  className="inline-flex items-center gap-1.5 cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-4 py-2.5 text-xs font-bold transition shadow-3xs hover:shadow-2xs"
+                  className="w-full md:w-auto inline-flex items-center justify-center gap-1.5 cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-4 py-3 md:py-2.5 text-xs font-bold transition shadow-3xs hover:shadow-2xs min-h-[44px] md:min-h-[38px]"
                 >
-                  <FileText className="w-4 h-4 text-indigo-200" />
-                  <span>Download PDF Document</span>
+                  <FileText className="w-4 h-4 text-indigo-200 shrink-0" />
+                  <span className="whitespace-nowrap">Download PDF Document</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => window.print()}
-                  className="inline-flex items-center gap-1.5 cursor-pointer bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl px-4 py-2.5 text-xs font-bold transition shadow-3xs hover:shadow-2xs"
+                  className="w-full md:w-auto inline-flex items-center justify-center gap-1.5 cursor-pointer bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl px-4 py-3 md:py-2.5 text-xs font-bold transition shadow-3xs hover:shadow-2xs min-h-[44px] md:min-h-[38px]"
                 >
-                  <Printer className="w-4 h-4 text-slate-600" />
-                  <span>Print Report</span>
+                  <Printer className="w-4 h-4 text-slate-600 shrink-0" />
+                  <span className="whitespace-nowrap">Print Report</span>
                 </button>
               </div>
             </div>
@@ -1147,8 +1131,8 @@ export default function ReportsPage() {
                   </div>
                 </div>
 
-                <div className="relative pt-2">
-                  <svg viewBox={`0 0 ${trendWidthSvg} ${trendHeightSvg}`} className="w-full h-[140px] max-h-[140px] overflow-visible">
+                <div className="relative pt-2 w-full overflow-hidden">
+                  <svg viewBox={`0 0 ${trendWidthSvg} ${trendHeightSvg}`} className="w-full h-[140px] max-h-[140px] overflow-hidden">
                     <defs>
                       <linearGradient id="reports-indigo-grad" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="#4f46e5" stopOpacity="0.25" />
@@ -1278,12 +1262,12 @@ export default function ReportsPage() {
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-900 text-white rounded-t-2xl">
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl">Sale ID / Date</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Customer</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Product Item</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-center">Qty</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Payment</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right rounded-tr-xl">Nett Value</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl min-w-[120px] whitespace-nowrap">Sale ID / Date</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[140px] whitespace-nowrap">Customer</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[160px] whitespace-nowrap">Product Item</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-center min-w-[70px] whitespace-nowrap">Qty</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[100px] whitespace-nowrap">Payment</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right rounded-tr-xl min-w-[110px] whitespace-nowrap">Nett Value</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -1296,16 +1280,16 @@ export default function ReportsPage() {
                     ) : (
                       searchableSales.map((item) => (
                         <tr key={item.id} className="hover:bg-slate-50/50 transition duration-150">
-                          <td className="py-4 px-5">
+                          <td className="py-4 px-5 whitespace-nowrap">
                             <span className="font-mono font-bold text-xs text-indigo-600 block">{item.id.substring(item.id.length - 8).toUpperCase()}</span>
                             <span className="text-[10px] text-slate-440 text-slate-400 font-semibold">{item.saleDate.split('T')[0]}</span>
                           </td>
-                          <td className="py-4 px-5 text-xs font-bold text-slate-800 capitalize">{item.customerName}</td>
-                          <td className="py-4 px-5">
+                          <td className="py-4 px-5 text-xs font-bold text-slate-800 capitalize whitespace-nowrap">{item.customerName}</td>
+                          <td className="py-4 px-5 whitespace-nowrap">
                             <span className="text-xs font-bold text-slate-800 block">{item.productName}</span>
                           </td>
-                          <td className="py-4 px-5 text-xs font-bold text-center text-slate-700">x{item.quantity}</td>
-                          <td className="py-4 px-5 text-xs">
+                          <td className="py-4 px-5 text-xs font-bold text-center text-slate-700 whitespace-nowrap">x{item.quantity}</td>
+                          <td className="py-4 px-5 text-xs whitespace-nowrap">
                             <span className={`inline-flex items-center px-2 py-0.5 rounded-full border font-bold text-[9px] ${
                               item.paymentType === 'Cash' 
                                 ? 'bg-emerald-50 border-emerald-100 text-emerald-800' 
@@ -1314,7 +1298,7 @@ export default function ReportsPage() {
                               {item.paymentType}
                             </span>
                           </td>
-                          <td className="py-4 px-5 text-xs font-bold text-slate-900 text-right">${item.totalAmount.toFixed(2)}</td>
+                          <td className="py-4 px-5 text-xs font-bold text-slate-900 text-right whitespace-nowrap">${item.totalAmount.toFixed(2)}</td>
                         </tr>
                       ))
                     )}
@@ -1326,12 +1310,12 @@ export default function ReportsPage() {
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-900 text-white">
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl">SKU / Code</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Product Name</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Category</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-center">Remaining Stock</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right">Unit Purchase</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right rounded-tr-xl">Current Stock Valuation</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl min-w-[120px] whitespace-nowrap">SKU / Code</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[160px] whitespace-nowrap">Product Name</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[130px] whitespace-nowrap">Category</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-center min-w-[140px] whitespace-nowrap">Remaining Stock</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right min-w-[125px] whitespace-nowrap">Unit Purchase</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right rounded-tr-xl min-w-[160px] whitespace-nowrap">Current Stock Valuation</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -1346,10 +1330,10 @@ export default function ReportsPage() {
                         const stockVal = p.purchasePrice * p.currentStock;
                         return (
                           <tr key={p.id} className="hover:bg-slate-50/50 transition duration-150">
-                            <td className="py-4 px-5 font-mono text-xs text-indigo-650 text-indigo-600 font-semibold">{p.sku}</td>
-                            <td className="py-4 px-5 text-xs font-bold text-slate-800">{p.name}</td>
-                            <td className="py-4 px-5 text-xs text-slate-500 capitalize">{p.category}</td>
-                            <td className="py-4 px-5 text-xs text-center">
+                            <td className="py-4 px-5 font-mono text-xs text-indigo-600 font-semibold whitespace-nowrap">{p.sku}</td>
+                            <td className="py-4 px-5 text-xs font-bold text-slate-800 whitespace-nowrap">{p.name}</td>
+                            <td className="py-4 px-5 text-xs text-slate-500 capitalize whitespace-nowrap">{p.category}</td>
+                            <td className="py-4 px-5 text-xs text-center whitespace-nowrap">
                               <span className={`inline-flex items-center px-2 py-0.5 rounded-full font-bold text-[10px] ${
                                 p.currentStock <= p.minimumStockAlert 
                                   ? 'bg-rose-50 border border-rose-100 text-rose-700' 
@@ -1358,8 +1342,8 @@ export default function ReportsPage() {
                                 {p.currentStock} Units
                               </span>
                             </td>
-                            <td className="py-4 px-5 text-xs font-semibold text-right text-slate-600">${p.purchasePrice.toFixed(2)}</td>
-                            <td className="py-4 px-5 text-xs font-bold text-right text-slate-900">${stockVal.toFixed(2)}</td>
+                            <td className="py-4 px-5 text-xs font-semibold text-right text-slate-600 whitespace-nowrap">${p.purchasePrice.toFixed(2)}</td>
+                            <td className="py-4 px-5 text-xs font-bold text-right text-slate-900 whitespace-nowrap">${stockVal.toFixed(2)}</td>
                           </tr>
                         );
                       })
@@ -1396,12 +1380,12 @@ export default function ReportsPage() {
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-900 text-white">
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl">Customer Account ID</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Billing Name</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Contact Phone</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Billing Address</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Account Type</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right rounded-tr-xl">Outstanding Balance Due</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl min-w-[140px] whitespace-nowrap">Customer Account ID</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[150px] whitespace-nowrap">Billing Name</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[130px] whitespace-nowrap">Contact Phone</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[180px] whitespace-nowrap">Billing Address</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[120px] whitespace-nowrap">Account Type</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right rounded-tr-xl min-w-[160px] whitespace-nowrap">Outstanding Balance Due</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -1414,11 +1398,11 @@ export default function ReportsPage() {
                     ) : (
                       searchableCustomers.map((c) => (
                         <tr key={c.id} className="hover:bg-slate-50/50 transition duration-150">
-                          <td className="py-4 px-5 font-mono text-xs text-slate-400">{c.id.substring(0, 10)}...</td>
-                          <td className="py-4 px-5 text-xs font-bold text-slate-800 capitalize">{c.name}</td>
-                          <td className="py-4 px-5 text-xs text-slate-500">{c.phone}</td>
-                          <td className="py-4 px-5 text-xs text-slate-500 truncate max-w-[180px]" title={c.address}>{c.address}</td>
-                          <td className="py-4 px-5 text-xs">
+                          <td className="py-4 px-5 font-mono text-xs text-slate-400 whitespace-nowrap">{c.id.substring(0, 10)}...</td>
+                          <td className="py-4 px-5 text-xs font-bold text-slate-800 capitalize whitespace-nowrap">{c.name}</td>
+                          <td className="py-4 px-5 text-xs text-slate-500 whitespace-nowrap">{c.phone}</td>
+                          <td className="py-4 px-5 text-xs text-slate-500 truncate max-w-[180px] whitespace-nowrap" title={c.address}>{c.address}</td>
+                          <td className="py-4 px-5 text-xs whitespace-nowrap">
                             <span className={`inline-flex items-center px-2 py-0.5 rounded-full font-bold text-[9px] border ${
                               c.customerType === 'Cash' 
                                 ? 'bg-emerald-50 border-emerald-100 text-emerald-800' 
@@ -1427,7 +1411,7 @@ export default function ReportsPage() {
                               {c.customerType}
                             </span>
                           </td>
-                          <td className="py-4 px-5 text-xs text-right">
+                          <td className="py-4 px-5 text-xs text-right whitespace-nowrap">
                             <span className={`font-mono font-bold ${c.dueBalance > 0 ? 'text-rose-600 text-sm' : 'text-slate-500'}`}>
                               ${c.dueBalance.toFixed(2)}
                             </span>
@@ -1443,11 +1427,11 @@ export default function ReportsPage() {
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-900 text-white">
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl">Supplier Account Code</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Entity Name</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Contact Details</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Sector Label</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right rounded-tr-xl">Outstanding Debt Payables</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl min-w-[150px] whitespace-nowrap">Supplier Account Code</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[160px] whitespace-nowrap">Entity Name</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[150px] whitespace-nowrap">Contact Details</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[125px] whitespace-nowrap">Sector Label</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right rounded-tr-xl min-w-[160px] whitespace-nowrap">Outstanding Debt Payables</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -1462,14 +1446,14 @@ export default function ReportsPage() {
                         const debt = s.dueBalance ?? 0;
                         return (
                           <tr key={s.id} className="hover:bg-slate-50/50 transition duration-150">
-                            <td className="py-4 px-5 font-mono text-xs text-slate-400">{s.id.substring(0, 10)}...</td>
-                            <td className="py-4 px-5 text-xs font-bold text-slate-800">{s.name}</td>
-                            <td className="py-4 px-5">
+                            <td className="py-4 px-5 font-mono text-xs text-slate-400 whitespace-nowrap">{s.id.substring(0, 10)}...</td>
+                            <td className="py-4 px-5 text-xs font-bold text-slate-800 whitespace-nowrap">{s.name}</td>
+                            <td className="py-4 px-5 whitespace-nowrap">
                               <span className="text-xs text-slate-500 block">{s.phone}</span>
                               <span className="text-[10px] text-slate-400 block">{s.email || 'N/A'}</span>
                             </td>
-                            <td className="py-4 px-5 text-xs text-slate-500 capitalize">{s.category ?? 'Primary Materials'}</td>
-                            <td className="py-4 px-5 text-xs text-right">
+                            <td className="py-4 px-5 text-xs text-slate-500 capitalize whitespace-nowrap">{s.category ?? 'Primary Materials'}</td>
+                            <td className="py-4 px-5 text-xs text-right whitespace-nowrap">
                               <span className={`font-mono font-bold ${debt > 0 ? 'text-rose-600 text-sm' : 'text-slate-500'}`}>
                                 ${debt.toFixed(2)}
                               </span>
@@ -1486,11 +1470,11 @@ export default function ReportsPage() {
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-900 text-white">
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl">Trade Transaction ID</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Customer Entity</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-center">VAT rate</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right">Tax Accrued Liabilities</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right rounded-tr-xl">Nett Value (Subtotal)</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl min-w-[160px] whitespace-nowrap">Trade Transaction ID</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[160px] whitespace-nowrap">Customer Entity</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-center min-w-[100px] whitespace-nowrap">VAT rate</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right min-w-[160px] whitespace-nowrap">Tax Accrued Liabilities</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider text-right rounded-tr-xl min-w-[160px] whitespace-nowrap">Nett Value (Subtotal)</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -1504,11 +1488,11 @@ export default function ReportsPage() {
                       searchableSales.map((item) => {
                         return (
                           <tr key={item.id} className="hover:bg-slate-50/50 transition duration-150">
-                            <td className="py-4 px-5 font-mono text-xs text-indigo-600 block">{item.id.substring(item.id.length - 12).toUpperCase()}</td>
-                            <td className="py-4 px-5 text-xs font-bold text-slate-800 capitalize">{item.customerName}</td>
-                            <td className="py-4 px-5 text-xs text-center font-bold text-slate-500">{item.taxRatePercent}%</td>
-                            <td className="py-4 px-5 text-xs font-bold text-right text-rose-600 font-mono">${item.taxAmount?.toFixed(2)}</td>
-                            <td className="py-4 px-5 text-xs font-bold text-right text-slate-900 font-mono">${item.subtotal?.toFixed(2)}</td>
+                            <td className="py-4 px-5 font-mono text-xs text-indigo-600 whitespace-nowrap">{item.id.substring(item.id.length - 12).toUpperCase()}</td>
+                            <td className="py-4 px-5 text-xs font-bold text-slate-800 capitalize whitespace-nowrap">{item.customerName}</td>
+                            <td className="py-4 px-5 text-xs text-center font-bold text-slate-500 whitespace-nowrap">{item.taxRatePercent}%</td>
+                            <td className="py-4 px-5 text-xs font-bold text-right text-rose-600 font-mono whitespace-nowrap">${item.taxAmount?.toFixed(2)}</td>
+                            <td className="py-4 px-5 text-xs font-bold text-right text-slate-900 font-mono whitespace-nowrap">${item.subtotal?.toFixed(2)}</td>
                           </tr>
                         );
                       })
@@ -1521,10 +1505,10 @@ export default function ReportsPage() {
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-900 text-white">
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl">Timestamp</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Activity Action</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider">Logged Operator</th>
-                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tr-xl">Details Context</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tl-xl min-w-[130px] whitespace-nowrap">Timestamp</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[150px] whitespace-nowrap">Activity Action</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider min-w-[160px] whitespace-nowrap">Logged Operator</th>
+                      <th className="py-3 px-5 text-xs font-bold uppercase tracking-wider rounded-tr-xl min-w-[200px] whitespace-nowrap">Details Context</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -1538,10 +1522,10 @@ export default function ReportsPage() {
                       searchableSystemLogs.map((item, index) => {
                         return (
                           <tr key={item.id || index} className="hover:bg-slate-50/50 transition duration-150">
-                            <td className="py-4 px-5 font-mono text-xs text-slate-500">
+                            <td className="py-4 px-5 font-mono text-xs text-slate-500 whitespace-nowrap">
                               {item.timestamp ? new Date(item.timestamp).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : 'N/A'}
                             </td>
-                            <td className="py-4 px-5 text-xs font-bold">
+                            <td className="py-4 px-5 text-xs font-bold whitespace-nowrap">
                               <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
                                 item.action === 'Sale completed' ? 'bg-emerald-100 text-emerald-800' :
                                 item.action === 'Stock updated' ? 'bg-amber-100 text-amber-800' :
@@ -1553,7 +1537,7 @@ export default function ReportsPage() {
                                 {item.action}
                               </span>
                             </td>
-                            <td className="py-4 px-5 text-xs font-semibold text-slate-750 text-slate-700">{item.user || 'System'}</td>
+                            <td className="py-4 px-5 text-xs font-semibold text-slate-750 text-slate-700 whitespace-nowrap">{item.user || 'System'}</td>
                             <td className="py-4 px-5 text-xs text-slate-600 font-sans leading-relaxed">{item.details}</td>
                           </tr>
                         );

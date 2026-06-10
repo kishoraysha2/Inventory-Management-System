@@ -172,6 +172,17 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
     }
   }, [feedback]);
 
+  useEffect(() => {
+    const handleTrigger = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail?.tab === 'products') {
+        openForm();
+      }
+    };
+    window.addEventListener('nexus-trigger-add-modal', handleTrigger);
+    return () => window.removeEventListener('nexus-trigger-add-modal', handleTrigger);
+  }, []);
+
   // --- Derived Categories ---
   const categoriesList = ['All', ...Array.from(new Set(products.map(p => p.category))).filter(Boolean)];
 
@@ -688,118 +699,156 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
                   </p>
                 </div>
               ) : filteredProducts.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-20 text-center text-slate-450 text-slate-400">
-                  <div className="w-14 h-14 bg-slate-50 border border-slate-100 rounded-full flex items-center justify-center text-slate-400 mb-3">
-                    <ShoppingBag className="h-6 w-6" />
+                <motion.div 
+                  initial={{ opacity: 0, y: 12 }} 
+                  animate={{ opacity: 1, y: 0 }} 
+                  transition={{ duration: 0.3 }}
+                  className="mx-auto max-w-md w-full my-6 bg-slate-50/50 border border-slate-200/60 rounded-3xl p-8 text-center flex flex-col items-center gap-4.5 shadow-3xs hover:shadow-2xs transition-all"
+                >
+                  <div className="relative group">
+                    <div className="absolute inset-0 bg-indigo-200/20 rounded-full blur-xl group-hover:scale-125 transition duration-300"></div>
+                    <div className="relative w-16 h-16 bg-white border border-slate-100 rounded-2xl shadow-3xs flex items-center justify-center text-slate-400 group-hover:text-indigo-600 transition-all duration-300">
+                      <Package className="h-8 w-8 text-slate-400 transition-transform duration-300 group-hover:scale-110" />
+                    </div>
                   </div>
-                  <p className="text-sm font-semibold text-slate-650 text-slate-700">No products found</p>
-                  <p className="text-xs text-slate-400 mt-1 max-w-sm">
-                    {searchQuery ? 'Double check search parameters or reset limits' : 'Start registering and indexing items to construct the database'}
-                  </p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-4">
-                  {filteredProducts.map((product) => {
-                    const isLowStock = product.currentStock <= product.minimumStockAlert;
-                    const isInactive = product.status === 'inactive';
-                    return (
-                      <motion.div
-                        key={product.id}
-                        layoutId={`product-card-${product.id}`}
-                        className={`border rounded-2xl p-5 hover:shadow-xs transition duration-300 flex flex-col md:flex-row md:items-center justify-between gap-4 ${
-                          isInactive
-                            ? 'border-slate-200 bg-slate-50/70 opacity-75'
-                            : isLowStock 
-                            ? 'border-amber-250 bg-amber-50/5 hover:border-amber-300 bg-white' 
-                            : 'border-slate-200 hover:border-indigo-200 bg-white'
-                        }`}
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900 uppercase tracking-widest leading-none">
+                      {products.length === 0 ? 'No Inventory Items' : 'No Products Found'}
+                    </h4>
+                    <p className="text-xs text-slate-500 mt-2 max-w-xs leading-relaxed font-semibold">
+                      {products.length === 0 
+                        ? 'Initialize and catalogue your product catalog items to calculate margins, manage stock limits, and track sales.'
+                        : searchQuery || selectedCategory !== 'All' || stockStatusFilter !== 'All'
+                          ? "We couldn't locate any products matching your active search context or category filters."
+                          : 'No matching components were found. Revise your search attributes or append a new item.'}
+                    </p>
+                  </div>
+                  <div className="flex gap-2.5 pt-1.5 flex-wrap justify-center">
+                    {products.length > 0 && (searchQuery || selectedCategory !== 'All' || stockStatusFilter !== 'All') ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery('');
+                          setSelectedCategory('All');
+                          setStockStatusFilter('All');
+                        }}
+                        className="bg-white border border-slate-200 hover:border-slate-350 text-slate-700 font-extrabold text-[11px] uppercase tracking-wider px-5 py-2.5 rounded-xl transition cursor-pointer shadow-3xs"
                       >
-                        {/* Middle info container */}
-                        <div className="space-y-2.5 min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <h4 className="text-sm font-bold text-slate-900 truncate">{product.name}</h4>
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-50 border border-slate-100 text-slate-500">
-                              <Tag className="h-2.5 w-2.5" />
-                              {product.category}
-                            </span>
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono bg-indigo-50 border border-indigo-100 text-indigo-700 rounded-lg">
-                              <Hash className="h-2.5 w-2.5" />
-                              {product.sku}
-                            </span>
-
-                          </div>
-
-                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-1">
-                            {/* Buying price */}
-                            <div>
-                              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Purchase Cost</span>
-                              <span className="text-xs font-semibold text-slate-705 text-slate-705 block mt-0.5">${product.purchasePrice.toFixed(2)}</span>
-                            </div>
-                            {/* Selling price */}
-                            <div>
-                              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Retail Selling</span>
-                              <span className="text-xs font-semibold text-slate-900 block mt-0.5">${product.sellingPrice.toFixed(2)}</span>
-                            </div>
-                            {/* Current Stock */}
-                            <div>
-                              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Warehouse Stock</span>
-                              <span className={`text-xs font-extrabold block mt-0.5 ${isLowStock ? 'text-rose-600' : 'text-slate-900'}`}>
-                                {product.currentStock} Units
-                              </span>
-                            </div>
-                            {/* Minimum alert */}
-                            <div>
-                              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Minimum Alert</span>
-                              <span className="text-xs font-medium text-slate-500 block mt-0.5">{product.minimumStockAlert} Units</span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Right side alert & triggers */}
-                        <div className="flex items-center justify-between md:justify-end gap-6 border-t md:border-t-0 border-slate-100 pt-3 md:pt-0 shrink-0">
-                          
-                          {/* Alert state banner */}
-                          <div className="text-left md:text-right">
-                            {product.status === 'inactive' ? (
-                              <div className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-2.5 py-1 text-[10px] font-bold text-slate-600 antialiased shrink-0">
-                                <span>Inactive / Retired</span>
-                              </div>
-                            ) : isLowStock ? (
-                              <div className="inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 px-2.5 py-1 text-[10px] font-bold text-amber-800 antialiased shrink-0">
-                                <AlertTriangle className="h-3 w-3 text-amber-600" />
-                                <span>Low Stock</span>
-                              </div>
-                            ) : (
-                              <div className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-100 px-2.5 py-1 text-[10px] font-bold text-emerald-800 antialiased shrink-0">
-                                <span>Active / Safe</span>
-                              </div>
-                            )}
-                          </div>
-
-                           {userRole === 'admin' && (
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => openForm(product)}
-                                className="p-2.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition"
-                                title="Edit product parameters"
-                              >
-                                <Edit2 className="h-4 w-4" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteTrigger(product)}
-                                className="p-2.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition"
-                                title="Permeantly delete product description"
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </button>
-                            </div>
-                           )}
-                        </div>
-                      </motion.div>
-                    );
-                  })}
+                        Reset Search Filters
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => openForm(null)}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[11px] uppercase tracking-wider h-10 px-5 rounded-xl transition cursor-pointer shadow-xs hover:shadow-md inline-flex items-center gap-1.5"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Initialize Catalog Item</span>
+                      </button>
+                    )}
+                  </div>
+                </motion.div>
+              ) : (
+                <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-xs bg-white">
+                  <div className="overflow-x-auto max-h-[500px]">
+                    <table className="w-full text-left border-collapse table-auto">
+                      <thead className="sticky top-0 bg-slate-50 z-10 shadow-[0_1px_0_0_rgba(226,232,240,1)]">
+                        <tr className="bg-slate-50 text-[10px] font-black uppercase tracking-wider text-slate-500">
+                          <th className="py-4 px-6">Product Item</th>
+                          <th className="py-4 px-5">SKU / Code</th>
+                          <th className="py-4 px-5 text-right font-mono">Purchase Cost</th>
+                          <th className="py-4 px-5 text-right font-mono">Retail Price</th>
+                          <th className="py-4 px-5 text-center">Warehouse Stock</th>
+                          <th className="py-4 px-5 text-center">Min Alert</th>
+                          <th className="py-4 px-5 text-center">Status</th>
+                          {userRole === 'admin' && <th className="py-4 px-6 text-center">Actions</th>}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
+                        {filteredProducts.map((product) => {
+                          const isLowStock = product.currentStock <= product.minimumStockAlert;
+                          const isInactive = product.status === 'inactive';
+                          return (
+                            <tr 
+                              key={product.id} 
+                              className={`hover:bg-indigo-50/20 transition duration-150 ${
+                                isInactive 
+                                  ? 'bg-slate-50/40 opacity-70' 
+                                  : isLowStock 
+                                  ? 'bg-amber-50/15 hover:bg-amber-50/25' 
+                                  : 'even:bg-slate-50/30'
+                              }`}
+                            >
+                              <td className="py-4 px-6 whitespace-nowrap">
+                                <div className="font-bold text-slate-900">{product.name}</div>
+                                <div className="inline-flex items-center gap-1 text-[10px] text-slate-400 mt-0.5">
+                                  <Tag className="h-3 w-3 shrink-0 text-slate-400" />
+                                  <span>{product.category}</span>
+                                </div>
+                              </td>
+                              <td className="py-4 px-5 font-mono text-indigo-700 whitespace-nowrap">
+                                <span className="bg-indigo-50 border border-indigo-100 rounded px-1.5 py-0.5 font-bold">
+                                  {product.sku}
+                                </span>
+                              </td>
+                              <td className="py-4 px-5 text-right font-mono font-bold text-slate-700 whitespace-nowrap">
+                                ${product.purchasePrice.toFixed(2)}
+                              </td>
+                              <td className="py-4 px-5 text-right font-mono font-bold text-slate-900 whitespace-nowrap">
+                                ${product.sellingPrice.toFixed(2)}
+                              </td>
+                              <td className="py-4 px-5 text-center whitespace-nowrap">
+                                <span className={`font-mono font-black text-sm ${isLowStock ? 'text-rose-600' : 'text-slate-900'}`}>
+                                  {product.currentStock} Units
+                                </span>
+                              </td>
+                              <td className="py-4 px-5 text-center font-mono text-slate-500 whitespace-nowrap">
+                                {product.minimumStockAlert} Units
+                              </td>
+                              <td className="py-4 px-5 text-center whitespace-nowrap">
+                                {isInactive ? (
+                                  <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-50 border border-slate-200 px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-slate-500 shadow-3xs">
+                                    Retired
+                                  </span>
+                                ) : isLowStock ? (
+                                  <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-50 border border-orange-200 px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-orange-700 shadow-3xs">
+                                    <AlertTriangle className="h-2.5 w-2.5 text-orange-600 animate-pulse shrink-0" />
+                                    Low Stock
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-250/60 px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-emerald-700 shadow-3xs">
+                                    Class Safe
+                                  </span>
+                                )}
+                              </td>
+                              {userRole === 'admin' && (
+                                <td className="py-4 px-6 text-center whitespace-nowrap">
+                                  <div className="flex items-center justify-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => openForm(product)}
+                                      className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition"
+                                      title="Edit product parameters"
+                                    >
+                                      <Edit2 className="h-4 w-4" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteTrigger(product)}
+                                      className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition"
+                                      title="Permanently delete product description"
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </button>
+                                  </div>
+                                </td>
+                              )}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </div>
@@ -897,168 +946,223 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
               </div>
 
               {/* Form inputs body */}
-              <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-5">
+              <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-6">
                 
                 {/* Name */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Product Name *</label>
+                <div className="relative w-full">
                   <input
                     type="text"
                     required
                     disabled={isSaving}
+                    id="product-form-name-field"
                     value={formData.name}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50/50 ${
+                    placeholder=" "
+                    className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                       errors.name 
-                        ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                        : 'border-slate-200 focus:border-indigo-500 focus:ring-1'
+                        ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                        : 'border-slate-200 focus:border-indigo-605'
                     }`}
-                    placeholder="E.g., Carbon Aero-Helmet V2"
                   />
-                  {errors.name && <p className="text-[10px] font-bold text-rose-500">{errors.name}</p>}
+                  <label htmlFor="product-form-name-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                    Product Name <span className="text-rose-500 font-extrabold">*</span>
+                  </label>
+                  {errors.name && (
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                      <span>{errors.name}</span>
+                    </div>
+                  )}
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   {/* SKU */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">SKU Code *</label>
+                  <div className="relative w-full">
                     <input
                       type="text"
                       required
                       disabled={isSaving}
+                      id="product-form-sku-field"
                       value={formData.sku}
                       onChange={(e) => setFormData({ ...formData, sku: e.target.value })}
-                      className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50/50 ${
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                         errors.sku 
-                          ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                          : 'border-slate-200 focus:border-indigo-500 focus:ring-1'
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                          : 'border-slate-200 focus:border-indigo-605'
                       }`}
-                      placeholder="E.g., AGP-ATH-001"
                     />
-                    {errors.sku && <p className="text-[10px] font-bold text-rose-500">{errors.sku}</p>}
+                    <label htmlFor="product-form-sku-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      SKU Code <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.sku && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                        <span>{errors.sku}</span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Category */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Category Designation *</label>
+                  <div className="relative w-full">
                     <input
                       type="text"
                       required
                       disabled={isSaving}
+                      id="product-form-cat-field"
                       value={formData.category}
                       onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                      className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50/50 ${
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                         errors.category 
-                          ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                          : 'border-slate-200 focus:border-indigo-500 focus:ring-1'
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                          : 'border-slate-200 focus:border-indigo-605'
                       }`}
-                      placeholder="E.g., Safety Gear"
                     />
-                    {errors.category && <p className="text-[10px] font-bold text-rose-500">{errors.category}</p>}
+                    <label htmlFor="product-form-cat-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Category Designation <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.category && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                        <span>{errors.category}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   {/* Purchase Price */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Purchase Unit Cost ($) *</label>
-                    <div className="relative">
-                      <span className="absolute left-3.5 top-2.5 text-slate-400 text-xs font-bold">$</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        required
-                        disabled={isSaving}
-                        value={formData.purchasePrice}
-                        onChange={(e) => setFormData({ ...formData, purchasePrice: e.target.value })}
-                        className={`w-full rounded-xl border py-2.5 pl-8 pr-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50/50 ${
-                          errors.purchasePrice 
-                            ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                            : 'border-slate-200 focus:border-indigo-500 focus:ring-1'
-                        }`}
-                        placeholder="0.00"
-                      />
-                    </div>
-                    {errors.purchasePrice && <p className="text-[10px] font-bold text-rose-500">{errors.purchasePrice}</p>}
+                  <div className="relative w-full">
+                    <span className="absolute left-3.5 top-[18px] text-slate-400 text-xs font-bold leading-none">$</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      disabled={isSaving}
+                      id="product-form-purchasePrice-field"
+                      value={formData.purchasePrice}
+                      onChange={(e) => setFormData({ ...formData, purchasePrice: e.target.value })}
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border pl-[26px] pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                        errors.purchasePrice 
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                          : 'border-slate-200 focus:border-indigo-605'
+                      }`}
+                    />
+                    <label htmlFor="product-form-purchasePrice-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-[26px] peer-focus:top-1.5 peer-focus:left-3.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Purchase Unit Cost ($) <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.purchasePrice && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                        <span>{errors.purchasePrice}</span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Selling Price */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Retail Selling Price ($) *</label>
-                    <div className="relative">
-                      <span className="absolute left-3.5 top-2.5 text-slate-400 text-xs font-bold">$</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        required
-                        disabled={isSaving}
-                        value={formData.sellingPrice}
-                        onChange={(e) => setFormData({ ...formData, sellingPrice: e.target.value })}
-                        className={`w-full rounded-xl border py-2.5 pl-8 pr-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50/50 ${
-                          errors.sellingPrice 
-                            ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                            : 'border-slate-200 focus:border-indigo-500 focus:ring-1'
-                        }`}
-                        placeholder="0.00"
-                      />
-                    </div>
-                    {errors.sellingPrice && <p className="text-[10px] font-bold text-rose-500">{errors.sellingPrice}</p>}
+                  <div className="relative w-full">
+                    <span className="absolute left-3.5 top-[18px] text-slate-400 text-xs font-bold leading-none">$</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      disabled={isSaving}
+                      id="product-form-sellingPrice-field"
+                      value={formData.sellingPrice}
+                      onChange={(e) => setFormData({ ...formData, sellingPrice: e.target.value })}
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border pl-[26px] pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                        errors.sellingPrice 
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                          : 'border-slate-200 focus:border-indigo-605'
+                      }`}
+                    />
+                    <label htmlFor="product-form-sellingPrice-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-[26px] peer-focus:top-1.5 peer-focus:left-3.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Retail Selling Price ($) <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.sellingPrice && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-505 shrink-0" />
+                        <span>{errors.sellingPrice}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   {/* Current Stock */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Current Stock Units *</label>
+                  <div className="relative w-full">
                     <input
                       type="number"
                       required
                       disabled={isSaving || !!editingProduct}
+                      id="product-form-currentStock-field"
                       value={formData.currentStock}
                       onChange={(e) => setFormData({ ...formData, currentStock: e.target.value })}
-                      className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50/50 ${
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                         errors.currentStock 
-                          ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                          : 'border-slate-200 focus:border-indigo-500 focus:ring-1'
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                          : 'border-slate-200 focus:border-indigo-605'
                       }`}
-                      placeholder="E.g., 24"
                     />
-                    {errors.currentStock && <p className="text-[10px] font-bold text-rose-500">{errors.currentStock}</p>}
+                    <label htmlFor="product-form-currentStock-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Current Stock Units <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.currentStock && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                        <span>{errors.currentStock}</span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Minimum alert */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Minimum Alert Threshold *</label>
+                  <div className="relative w-full">
                     <input
                       type="number"
                       required
                       disabled={isSaving}
+                      id="product-form-min-field"
                       value={formData.minimumStockAlert}
                       onChange={(e) => setFormData({ ...formData, minimumStockAlert: e.target.value })}
-                      className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50/50 ${
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                         errors.minimumStockAlert 
-                          ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                          : 'border-slate-200 focus:border-indigo-500 focus:ring-1'
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                          : 'border-slate-200 focus:border-indigo-605'
                       }`}
-                      placeholder="E.g., 5"
                     />
-                    {errors.minimumStockAlert && <p className="text-[10px] font-bold text-rose-500">{errors.minimumStockAlert}</p>}
+                    <label htmlFor="product-form-min-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Minimum Alert Threshold <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.minimumStockAlert && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                        <span>{errors.minimumStockAlert}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 {/* Show status selection only when editing an existing product */}
                 {editingProduct && (
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Product Status *</label>
+                  <div className="relative w-full">
                     <select
+                      id="product-form-status-field"
                       disabled={isSaving}
                       value={formData.status}
                       onChange={(e) => setFormData({ ...formData, status: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 py-2.5 px-3.5 text-xs font-medium focus:outline-none focus:border-indigo-500 focus:ring-1 transition disabled:opacity-60 disabled:bg-slate-50/50 cursor-pointer text-slate-700 bg-white"
+                      className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 bg-white appearance-none cursor-pointer disabled:opacity-60 disabled:bg-slate-50 h-[52px] text-slate-700"
                     >
                       <option value="active">Active (Available for sales/procurements)</option>
                       <option value="inactive">Inactive / Retired (Archived and read-only)</option>
                     </select>
+                    <label htmlFor="product-form-status-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                      Product Status <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
                   </div>
                 )}
 

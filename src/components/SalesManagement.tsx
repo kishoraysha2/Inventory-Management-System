@@ -441,6 +441,17 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
     }
   }, [feedback]);
 
+  useEffect(() => {
+    const handleTrigger = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail?.tab === 'sales') {
+        openForm();
+      }
+    };
+    window.addEventListener('nexus-trigger-add-modal', handleTrigger);
+    return () => window.removeEventListener('nexus-trigger-add-modal', handleTrigger);
+  }, []);
+
   // --- Handle Product Selection logic to auto-fill prices ---
   const handleProductChange = (selectedProdId: string) => {
     const selectedProd = products.find(p => p.id === selectedProdId);
@@ -844,7 +855,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
           <div>
             <div className="flex items-center justify-between mb-2">
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Total Credit Sales</span>
-              <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-amber-50 border border-amber-100 text-amber-700 uppercase">
+              <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-blue-50 border border-blue-100 text-blue-700 uppercase">
                 Receivables
               </span>
             </div>
@@ -954,153 +965,203 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
                   </p>
                 </div>
               ) : filteredSalesList.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-20 text-center text-slate-400">
-                  <div className="w-14 h-14 bg-slate-50 border border-slate-100 rounded-full flex items-center justify-center mb-3">
-                    <ShoppingBag className="h-6 w-6 text-slate-400" />
+                <motion.div 
+                  initial={{ opacity: 0, y: 12 }} 
+                  animate={{ opacity: 1, y: 0 }} 
+                  transition={{ duration: 0.3 }}
+                  className="mx-auto max-w-md w-full my-6 bg-slate-50/50 border border-slate-200/60 rounded-3xl p-8 text-center flex flex-col items-center gap-4.5 shadow-3xs hover:shadow-2xs transition-all"
+                >
+                  <div className="relative group">
+                    <div className="absolute inset-0 bg-indigo-200/20 rounded-full blur-xl group-hover:scale-125 transition duration-300"></div>
+                    <div className="relative w-16 h-16 bg-white border border-slate-100 rounded-2xl shadow-3xs flex items-center justify-center text-slate-400 group-hover:text-indigo-600 transition-all duration-300">
+                      <ShoppingBag className="h-8 w-8 text-slate-400 transition-transform duration-300 group-hover:scale-110" />
+                    </div>
                   </div>
-                  <p className="text-sm font-semibold text-slate-700">
-                    {sales.length === 0 ? 'No sales found' : 'No matching sales logged'}
-                  </p>
-                  <p className="text-xs text-slate-400 mt-1 max-w-sm">
-                    {searchQuery ? 'Double check spelling or swap filters' : 'Start logging sales transactions to configure financial calculations'}
-                  </p>
-                </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900 uppercase tracking-widest leading-none">
+                      {sales.length === 0 ? 'No Sales Yet' : 'No Sales Found'}
+                    </h4>
+                    <p className="text-xs text-slate-500 mt-2 max-w-xs leading-relaxed font-semibold">
+                      {sales.length === 0 
+                        ? 'Log your customer sales orders and settlements to build real-time profit reports, ledger charts, and inventory balances.'
+                        : searchQuery || paymentFilter !== 'All'
+                          ? "We couldn't identify any transactions mapping to your active filters or text inputs."
+                          : 'No matched sales logs. Clean up filters or register a new transaction.'}
+                    </p>
+                  </div>
+                  <div className="flex gap-2.5 pt-1.5 flex-wrap justify-center">
+                    {sales.length > 0 && (searchQuery || paymentFilter !== 'All') ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery('');
+                          setPaymentFilter('All');
+                        }}
+                        className="bg-white border border-slate-200 hover:border-slate-350 text-slate-705 font-extrabold text-[11px] uppercase tracking-wider px-5 py-2.5 rounded-xl transition cursor-pointer shadow-3xs"
+                      >
+                        Reset Search Filters
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => openForm()}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[11px] uppercase tracking-wider h-10 px-5 rounded-xl transition cursor-pointer shadow-xs hover:shadow-md inline-flex items-center gap-1.5"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Log First Sales Order</span>
+                      </button>
+                    )}
+                  </div>
+                </motion.div>
               ) : (
-                <div className="grid grid-cols-1 gap-3">
-                  {filteredSalesList.map((sale) => (
-                    <motion.div
-                      key={sale.id}
-                      layoutId={`sale-card-${sale.id}`}
-                      className={`border border-slate-200 rounded-2xl p-5 hover:border-indigo-200 hover:shadow-xs transition duration-300 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
-                        sale.status === 'voided' || sale.status === 'VOID' ? 'opacity-45 bg-slate-50 line-through text-slate-400' : ''
-                      }`}
-                    >
-                      <div className="space-y-2 min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-extrabold text-slate-900 capitalize">{sale.customerName}</span>
-                          <ArrowRight className="h-3 w-3 text-slate-400 shrink-0" />
-                          <span className="text-xs font-medium text-slate-655 text-slate-600 shrink-0">{sale.productName}</span>
-                        </div>
+                <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-xs bg-white">
+                  <div className="overflow-x-auto max-h-[550px]">
+                    <table className="w-full text-left border-collapse table-auto">
+                      <thead className="sticky top-0 bg-slate-50 z-10 shadow-[0_1px_0_0_rgba(226,232,240,1)]">
+                        <tr className="bg-slate-50 text-[10px] font-black uppercase tracking-wider text-slate-500">
+                          <th className="py-4 px-6">Sale Date</th>
+                          <th className="py-4 px-5">Customer & Product</th>
+                          <th className="py-4 px-5">Qty & Unit Price</th>
+                          <th className="py-4 px-5">Settlement Type</th>
+                          <th className="py-4 px-5">Credit Status / Progress</th>
+                          <th className="py-4 px-5 text-right font-mono">Invoice Total</th>
+                          <th className="py-4 px-6 text-center">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
+                        {filteredSalesList.map((sale) => {
+                          const isVoided = sale.status === 'voided' || sale.status === 'VOID';
+                          const isCredit = sale.paymentType === 'Credit';
+                          const creditInfo = isCredit && !isVoided
+                            ? creditSalesPaymentInfo.get(sale.id) || { amountPaid: 0, remainingBalance: sale.totalAmount, status: 'Unpaid' }
+                            : null;
 
-                        <div className="grid grid-cols-3 gap-4 pt-1 text-[11px]">
-                          <div>
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Volume / Price</span>
-                            <span className="font-semibold text-slate-700 block mt-0.5">
-                              x{sale.quantity} @ ${sale.sellingPrice.toFixed(2)}
-                            </span>
-                          </div>
-
-                          <div>
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Logged Date</span>
-                            <span className="font-medium text-slate-500 block mt-0.5">
-                              {new Date(sale.saleDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
-                            </span>
-                          </div>
-
-                          <div>
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Settlement Type</span>
-                            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold mt-0.5 border ${
-                              sale.paymentType === 'Cash' 
-                                ? 'bg-emerald-50 border-emerald-100 text-emerald-800' 
-                                : 'bg-amber-50 border-amber-200 text-amber-800'
-                            }`}>
-                              <CreditCard className="h-2.5 w-2.5 shrink-0" />
-                              {sale.paymentType}
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Credit Sale Payment Visibility */}
-                        {sale.paymentType === 'Credit' && (sale.status !== 'VOID' && sale.status !== 'voided') && (() => {
-                          const info = creditSalesPaymentInfo.get(sale.id) || { amountPaid: 0, remainingBalance: sale.totalAmount, status: 'Unpaid' };
                           return (
-                            <div className="mt-3 pt-3 border-t border-dashed border-slate-100 space-y-2">
-                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
-                                <div>
-                                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Payment Status</span>
-                                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-black mt-0.5 border ${
-                                    info.status === 'Fully Paid'
-                                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                                      : info.status === 'Partially Paid'
-                                      ? 'bg-amber-50 text-amber-800 border-amber-200'
-                                      : 'bg-rose-50 text-rose-800 border-rose-200'
-                                  }`}>
-                                    <span className={`h-1.5 w-1.5 rounded-full ${
-                                      info.status === 'Fully Paid' ? 'bg-emerald-500 animate-pulse' : info.status === 'Partially Paid' ? 'bg-amber-500' : 'bg-rose-500'
-                                    }`}></span>
-                                    {info.status}
-                                  </span>
-                                </div>
-                                <div className="text-left sm:text-right">
-                                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Invoice Total</span>
-                                  <span className="font-bold text-slate-700 block mt-0.5">
-                                    ${sale.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                  </span>
-                                </div>
-                                <div className="text-left sm:text-right">
-                                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Amount Paid</span>
-                                  <span className="font-bold text-emerald-600 block mt-0.5">
-                                    ${info.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                  </span>
-                                </div>
-                                <div className="text-left sm:text-right">
-                                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Remaining Balance</span>
-                                  <span className="font-bold text-rose-605 text-rose-605 block mt-0.5">
-                                    ${info.remainingBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                  </span>
-                                </div>
-                              </div>
-                              <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
-                                <div 
-                                  className={`h-full rounded-full transition-all duration-300 ${
-                                    info.status === 'Fully Paid' ? 'bg-emerald-500' : 'bg-amber-500'
-                                  }`}
-                                  style={{ width: `${Math.min(100, (info.amountPaid / sale.totalAmount) * 100)}%` }}
-                                ></div>
-                              </div>
-                            </div>
-                          );
-                        })()}
-                      </div>
+                            <tr 
+                              key={sale.id}
+                              className={`hover:bg-indigo-50/20 even:bg-slate-50/30 transition duration-150 ${
+                                isVoided ? 'opacity-40 bg-slate-50 line-through text-slate-400' : ''
+                              }`}
+                            >
+                              {/* Date */}
+                              <td className="py-4 px-6 font-mono text-slate-500 font-bold whitespace-nowrap">
+                                {new Date(sale.saleDate).toLocaleDateString(undefined, { 
+                                  month: 'short', 
+                                  day: 'numeric', 
+                                  year: 'numeric' 
+                                })}
+                              </td>
 
-                      {/* Selling cost display */}
-                      <div className="text-left sm:text-right flex sm:flex-col justify-between sm:justify-center items-center sm:items-end border-t sm:border-t-0 border-slate-100 pt-3.5 sm:pt-0 shrink-0 gap-3">
-                        <div>
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block sm:mb-0.5">Grand Total</span>
-                          <span className="text-sm font-bold text-indigo-600 block">
-                            ${sale.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          </span>
-                        </div>
-                        
-                        <div className="flex gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedSaleForInvoice(sale)}
-                            className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50/50 hover:bg-indigo-50 px-3.5 py-2 text-xs font-bold text-indigo-600 hover:text-indigo-700 transition cursor-pointer shrink-0"
-                          >
-                            <FileText className="h-3.5 w-3.5" />
-                            <span>Tax Invoice</span>
-                          </button>
-                          {sale.status === 'voided' || sale.status === 'VOID' ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-3 py-1.5 text-[9px] font-mono font-bold text-slate-400 select-none">
-                              VOIDED
-                            </span>
-                          ) : (
-                            userRole === 'admin' && (
-                              <button
-                                type="button"
-                                onClick={() => voidTransaction(sale.id)}
-                                className="inline-flex items-center gap-1 p-2 rounded-xl border border-rose-200 bg-rose-50/50 hover:bg-rose-50 text-xs font-bold text-rose-600 hover:text-rose-700 transition cursor-pointer shrink-0"
-                                title="Void sale transaction"
-                              >
-                                <span>Void</span>
-                              </button>
-                            )
-                          )}
-                        </div>
-                      </div>
-                    </motion.div>
-                  ))}
+                              {/* Customer & Product */}
+                              <td className="py-4 px-5 whitespace-nowrap">
+                                <div className="font-extrabold text-slate-900 capitalize">{sale.customerName}</div>
+                                <div className="text-[11px] text-slate-500 font-normal flex items-center gap-1 mt-0.5">
+                                  <span>{sale.productName}</span>
+                                </div>
+                              </td>
+
+                              {/* Qty & Unit Price */}
+                              <td className="py-4 px-5 font-mono whitespace-nowrap text-slate-700">
+                                <span className="font-bold text-slate-900">x{sale.quantity}</span> @ ${sale.sellingPrice.toFixed(2)}
+                              </td>
+
+                              {/* Settlement */}
+                              <td className="py-4 px-5 whitespace-nowrap">
+                                <span className={`inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wide px-2.5 py-0.5 rounded-full border ${
+                                  sale.paymentType === 'Cash' 
+                                    ? 'bg-emerald-50 border-emerald-250/60 text-emerald-700 shadow-3xs' 
+                                    : 'bg-blue-50 border-blue-200 text-blue-700 shadow-3xs'
+                                }`}>
+                                  <CreditCard className="h-2.5 w-2.5 shrink-0" />
+                                  {sale.paymentType}
+                                </span>
+                              </td>
+
+                              {/* Credit progression */}
+                              <td className="py-4 px-5">
+                                {isVoided ? (
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-rose-50 text-rose-700 border border-rose-200 shadow-3xs">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse"></span>
+                                    Void
+                                  </span>
+                                ) : isCredit && creditInfo ? (
+                                  <div className="space-y-1.5 max-w-[200px]">
+                                    <div className="flex items-center justify-between text-[10px]">
+                                      <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-extrabold border uppercase tracking-wider ${
+                                        creditInfo.status === 'Fully Paid'
+                                          ? 'bg-emerald-50 text-emerald-700 border-emerald-250/60 shadow-3xs'
+                                          : 'bg-orange-55 bg-orange-50 text-orange-705 text-orange-700 border border-orange-200/60 shadow-3xs'
+                                      }`}>
+                                        <span className={`h-1.5 w-1.5 rounded-full ${
+                                          creditInfo.status === 'Fully Paid' ? 'bg-emerald-500' : 'bg-orange-55 bg-orange-500'
+                                        }`}></span>
+                                        {creditInfo.status === 'Fully Paid' ? 'Paid' : 'Pending'}
+                                      </span>
+                                      <span className="font-mono text-slate-400 font-bold">
+                                        {Math.round((creditInfo.amountPaid / sale.totalAmount) * 100)}%
+                                      </span>
+                                    </div>
+                                    <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
+                                      <div 
+                                        className={`h-full rounded-full transition-all duration-300 ${
+                                          creditInfo.status === 'Fully Paid' ? 'bg-emerald-500' : 'bg-orange-55 bg-orange-400 bg-orange-500'
+                                        }`}
+                                        style={{ width: `${Math.min(100, (creditInfo.amountPaid / sale.totalAmount) * 100)}%` }}
+                                      ></div>
+                                    </div>
+                                    <div className="flex justify-between font-mono text-[9px] text-slate-400">
+                                      <span>Paid: ${creditInfo.amountPaid.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                                      <span>Bal: ${creditInfo.remainingBalance.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider bg-emerald-50 text-emerald-705 text-emerald-700 border border-emerald-250/60 shadow-3xs">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                                    Success / Paid
+                                  </span>
+                                )}
+                              </td>
+
+                              {/* Total Price */}
+                              <td className="py-4 px-5 text-right font-black font-mono text-sm text-indigo-600 whitespace-nowrap">
+                                ${sale.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </td>
+
+                              {/* Actions */}
+                              <td className="py-4 px-6 text-center whitespace-nowrap">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedSaleForInvoice(sale)}
+                                    className="inline-flex items-center gap-1 rounded-xl border border-indigo-200 bg-indigo-50/50 hover:bg-indigo-55 px-3 py-1.5 text-[11px] font-bold text-indigo-600 hover:text-indigo-700 transition cursor-pointer"
+                                  >
+                                    <FileText className="h-3.5 w-3.5" />
+                                    <span>Tax Invoice</span>
+                                  </button>
+                                  {isVoided ? (
+                                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-2.5 py-1 text-[9px] font-mono font-bold text-slate-400 select-none">
+                                      VOIDED
+                                    </span>
+                                  ) : (
+                                    userRole === 'admin' && (
+                                      <button
+                                        type="button"
+                                        onClick={() => voidTransaction(sale.id)}
+                                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-rose-200 bg-rose-50/50 hover:bg-rose-50 text-[11px] font-bold text-rose-600 hover:text-rose-700 transition cursor-pointer"
+                                        title="Void sale transaction"
+                                      >
+                                        <span>Void</span>
+                                      </button>
+                                    )
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </div>
@@ -1190,175 +1251,225 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
               </div>
 
               {/* Form body */}
-              <form onSubmit={handleSubmitSymbol} className="p-6 sm:p-8 space-y-5">
+              <form onSubmit={handleSubmitSymbol} className="p-6 sm:p-8 space-y-6">
                 
                 {/* Select Customer */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Customer Name *</label>
+                <div className="relative w-full">
                   {customers.length === 0 ? (
-                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 font-medium">
+                    <div className="p-3.5 bg-rose-50 border border-rose-100 rounded-xl text-xs text-rose-800 font-medium animate-fade-in shadow-3xs">
                       ⚠️ No customers registered in index. Please configure Customer profiles inside directory first.
                     </div>
                   ) : (
-                    <select
-                      value={formData.customerId}
-                      onChange={(e) => handleCustomerChange(e.target.value)}
-                      required
-                      className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-semibold focus:outline-none transition cursor-pointer ${
-                        errors.customerId 
-                          ? 'border-rose-300 text-rose-800 bg-rose-50/10' 
-                          : 'border-slate-200 focus:border-indigo-500'
-                      }`}
-                    >
-                      <option value="">-- Choose Customer profile --</option>
-                      {customers.filter(cust => cust.status !== 'inactive').map((cust) => (
-                        <option key={cust.id} value={cust.id}>
-                          {cust.name} ({cust.customerType} - Due: ${cust.dueBalance.toFixed(2)})
-                        </option>
-                      ))}
-                    </select>
+                    <div className="relative w-full">
+                      <select
+                        id="form-sales-customer-field"
+                        value={formData.customerId}
+                        onChange={(e) => handleCustomerChange(e.target.value)}
+                        required
+                        className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 bg-white appearance-none cursor-pointer disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                          errors.customerId 
+                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                            : 'border-slate-200 focus:border-indigo-605'
+                        }`}
+                      >
+                        <option value="">-- Choose Customer profile --</option>
+                        {customers.filter(cust => cust.status !== 'inactive').map((cust) => (
+                          <option key={cust.id} value={cust.id}>
+                            {cust.name} ({cust.customerType} - Due: ${cust.dueBalance.toFixed(2)})
+                          </option>
+                        ))}
+                      </select>
+                      <label htmlFor="form-sales-customer-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Customer Name <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                    </div>
                   )}
-                  {errors.customerId && <p className="text-[10px] font-bold text-rose-500">{errors.customerId}</p>}
+                  {errors.customerId && (
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                      <span>{errors.customerId}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Select Product */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Product Specification *</label>
+                <div className="relative w-full">
                   {products.filter(p => p.status !== 'inactive').length === 0 ? (
-                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 font-medium">
+                    <div className="p-3.5 bg-rose-50 border border-rose-100 rounded-xl text-xs text-rose-800 font-medium animate-fade-in shadow-3xs">
                       ⚠️ No active products cataloged inside database. Add or reactivate products first.
                     </div>
                   ) : (
-                    <select
-                      value={formData.productId}
-                      onChange={(e) => handleProductChange(e.target.value)}
-                      required
-                      className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-semibold focus:outline-none transition cursor-pointer ${
-                        errors.productId
-                          ? 'border-rose-305 text-rose-805 text-rose-800 bg-rose-50/10' 
-                          : 'border-slate-200 focus:border-indigo-505 focus:border-indigo-500'
-                      }`}
-                    >
-                      <option value="">-- Choose Product SKU --</option>
-                      {products.filter(p => p.status !== 'inactive').map((p) => {
-                        const outOfStock = p.currentStock <= 0;
-                        return (
-                          <option key={p.id} value={p.id} disabled={outOfStock}>
-                            {p.name} ({p.currentStock > 0 ? `${p.currentStock} units left` : 'OUT OF STOCK'} • SRP: ${p.sellingPrice.toFixed(2)})
-                          </option>
-                        );
-                      })}
-                    </select>
+                    <div className="relative w-full">
+                      <select
+                        id="form-sales-product-field"
+                        value={formData.productId}
+                        onChange={(e) => handleProductChange(e.target.value)}
+                        required
+                        className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 bg-white appearance-none cursor-pointer disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                          errors.productId
+                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                            : 'border-slate-200 focus:border-indigo-605'
+                        }`}
+                      >
+                        <option value="">-- Choose Product SKU --</option>
+                        {products.filter(p => p.status !== 'inactive').map((p) => {
+                          const outOfStock = p.currentStock <= 0;
+                          return (
+                            <option key={p.id} value={p.id} disabled={outOfStock}>
+                              {p.name} ({p.currentStock > 0 ? `${p.currentStock} units left` : 'OUT OF STOCK'} • SRP: ${p.sellingPrice.toFixed(2)})
+                            </option>
+                          );
+                        })}
+                      </select>
+                      <label htmlFor="form-sales-product-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Product Specification <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                    </div>
                   )}
-                  {errors.productId && <p className="text-[10px] font-bold text-rose-500">{errors.productId}</p>}
+                  {errors.productId && (
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                      <span>{errors.productId}</span>
+                    </div>
+                  )}
                 </div>
 
-                {/* Grid Inputs for Quantity & Pricing */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                              {/* Grid Inputs for Quantity & Pricing */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   
                   {/* Quantity input */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Quantity Trade Units *</label>
+                  <div className="relative w-full">
                     <input
                       type="number"
                       required
                       min="1"
+                      id="form-sales-qty-field"
                       value={formData.quantity}
                       onChange={(e) => setFormData({ ...formData, quantity: e.target.value })}
-                      className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none transition ${
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                         errors.quantity
-                          ? 'border-rose-300 text-rose-800 bg-rose-50/20' 
-                          : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-505'
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                          : 'border-slate-200 focus:border-indigo-605'
                       }`}
-                      placeholder="Enter amount"
                     />
-                    {errors.quantity && <p className="text-[10px] font-bold text-rose-500">{errors.quantity}</p>}
+                    <label htmlFor="form-sales-qty-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Quantity Trade Units <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.quantity && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-505 shrink-0" />
+                        <span>{errors.quantity}</span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Selling price */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Selling Price Override ($) *</label>
-                    <div className="relative">
-                      <span className="absolute left-3.5 top-2.5 text-slate-400 text-xs font-semibold">$</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        required
-                        value={formData.sellingPrice}
-                        onChange={(e) => setFormData({ ...formData, sellingPrice: e.target.value })}
-                        className={`w-full rounded-xl border py-2.5 pl-8 pr-3.5 text-xs font-medium focus:outline-none transition ${
-                          errors.sellingPrice 
-                            ? 'border-rose-300 text-rose-800 bg-rose-50/20' 
-                            : 'border-slate-200 focus:border-indigo-505 focus:border-indigo-500 focus:ring-1'
-                        }`}
-                        placeholder="0.00"
-                      />
-                    </div>
-                    {errors.sellingPrice && <p className="text-[10px] font-bold text-rose-500">{errors.sellingPrice}</p>}
+                  <div className="relative w-full">
+                    <span className="absolute left-3.5 top-[18px] text-slate-400 text-xs font-semibold leading-none">$</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      id="form-sales-price-field"
+                      value={formData.sellingPrice}
+                      onChange={(e) => setFormData({ ...formData, sellingPrice: e.target.value })}
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border pl-[26px] pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                        errors.sellingPrice 
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                          : 'border-slate-200 focus:border-indigo-605'
+                      }`}
+                    />
+                    <label htmlFor="form-sales-price-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-[26px] peer-focus:top-1.5 peer-focus:left-3.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Selling Price Override ($) <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.sellingPrice && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-505 shrink-0" />
+                        <span>{errors.sellingPrice}</span>
+                      </div>
+                    )}
                   </div>
 
                 </div>
 
                 {/* Date and Settlement selection */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   {/* Settlement Segment Choice */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Settlement Type *</label>
-                    <div className="flex bg-slate-50 border border-slate-100 p-1 rounded-xl">
+                  <div className="relative w-full">
+                    <div className="flex bg-slate-50 border border-slate-200 p-1 rounded-xl h-[52px] items-center">
                       {([ 'Cash', 'Credit' ] as const).map((typeOpt) => (
                         <button
                           key={typeOpt}
                           type="button"
                           onClick={() => setFormData({ ...formData, paymentType: typeOpt })}
-                          className={`flex-1 text-center py-2 text-xs font-bold rounded-lg transition cursor-pointer ${
+                          className={`flex-1 text-center py-2 text-xs font-extrabold rounded-lg uppercase tracking-wider transition cursor-pointer ${
                             formData.paymentType === typeOpt 
-                              ? 'bg-white text-indigo-650 text-indigo-600 shadow-xs border border-slate-100' 
-                              : 'text-slate-500 hover:text-slate-800'
+                              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/40' 
+                              : 'text-slate-500 hover:text-slate-800 opacity-80'
                           }`}
                         >
                           {typeOpt}
                         </button>
                       ))}
                     </div>
+                    <span className="absolute -top-2.5 left-3 px-1.5 bg-white text-[10px] font-extrabold text-slate-400 uppercase tracking-widest leading-none">
+                      Settlement Type <span className="text-rose-500 font-extrabold">*</span>
+                    </span>
                   </div>
 
                   {/* Completion date */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Sale Completion Date *</label>
+                  <div className="relative w-full">
                     <input
                       type="date"
                       required
+                      id="form-sales-date-field"
                       value={formData.saleDate}
                       onChange={(e) => setFormData({ ...formData, saleDate: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 py-2.5 px-3.5 text-xs font-medium focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-505"
+                      className="peer w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition duration-150 cursor-pointer h-[52px]"
                     />
-                    {errors.saleDate && <p className="text-[10px] font-bold text-rose-505">{errors.saleDate}</p>}
+                    <label htmlFor="form-sales-date-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                      Sale Completion Date <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.saleDate && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-505 shrink-0" />
+                        <span>{errors.saleDate}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 {/* Tax Configuration Segment */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Tax / VAT Rate (%) *</label>
-                    <div className="relative">
-                      <span className="absolute right-3.5 top-2.5 text-slate-400 text-xs font-semibold">%</span>
-                      <input
-                        type="number"
-                        min="0"
-                        max="100"
-                        step="0.1"
-                        required
-                        value={formData.taxRatePercent}
-                        onChange={(e) => setFormData({ ...formData, taxRatePercent: e.target.value })}
-                        className={`w-full rounded-xl border py-2.5 pl-3.5 pr-8 text-xs font-medium focus:outline-none transition ${
-                          errors.taxRatePercent 
-                            ? 'border-rose-300 text-rose-800 bg-rose-50/20' 
-                            : 'border-slate-200 focus:border-indigo-500 focus:ring-1'
-                        }`}
-                        placeholder="15"
-                      />
-                    </div>
-                    {errors.taxRatePercent && <p className="text-[10px] font-bold text-rose-500">{errors.taxRatePercent}</p>}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                  <div className="relative w-full">
+                    <span className="absolute right-3.5 top-4.5 text-slate-400 text-xs font-semibold leading-none">%</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.1"
+                      required
+                      id="form-sales-tax-field"
+                      value={formData.taxRatePercent}
+                      onChange={(e) => setFormData({ ...formData, taxRatePercent: e.target.value })}
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border pl-3.5 pr-8 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                        errors.taxRatePercent 
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                          : 'border-slate-200 focus:border-indigo-605'
+                      }`}
+                    />
+                    <label htmlFor="form-sales-tax-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600 font-bold">
+                      Tax / VAT Rate (%) <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.taxRatePercent && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                        <span>{errors.taxRatePercent}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 

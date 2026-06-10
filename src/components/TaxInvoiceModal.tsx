@@ -749,10 +749,10 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
                       <div>
                         <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block sm:mb-0.5 mt-2.5">Payment Terms Method</span>
-                        <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
+                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold border uppercase tracking-wider ${
                           sale.paymentType === 'Cash' 
-                            ? 'bg-emerald-50 border-emerald-100 text-emerald-800' 
-                            : 'bg-amber-50 border-amber-100 text-amber-800'
+                            ? 'bg-emerald-50 border-emerald-250/60 text-emerald-700 shadow-3xs' 
+                            : 'bg-blue-50 border-blue-200 text-blue-700 shadow-3xs'
                         }`}>
                           {sale.paymentType === 'Credit' ? 'Credit Account (Net 30)' : 'Immediate Settled Trade'}
                         </span>
@@ -926,17 +926,15 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-bold uppercase tracking-wider text-slate-700">Settlement Status:</span>
-                        <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-black border uppercase ${
+                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-extrabold border uppercase tracking-wider ${
                           paymentInfo.status === 'Fully Paid'
-                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                            : paymentInfo.status === 'Partially Paid'
-                            ? 'bg-amber-50 text-amber-800 border-amber-200'
-                            : 'bg-rose-50 text-rose-800 border-rose-200'
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200 shadow-3xs'
+                            : 'bg-orange-50 text-orange-700 border-orange-200 shadow-3xs'
                         }`}>
                           <span className={`h-1.5 w-1.5 rounded-full ${
-                            paymentInfo.status === 'Fully Paid' ? 'bg-emerald-500 animate-pulse' : paymentInfo.status === 'Partially Paid' ? 'bg-amber-500' : 'bg-rose-500'
+                            paymentInfo.status === 'Fully Paid' ? 'bg-emerald-500' : 'bg-orange-500'
                           }`}></span>
-                          {paymentInfo.status}
+                          {paymentInfo.status === 'Fully Paid' ? 'Paid' : paymentInfo.status === 'Partially Paid' ? 'Pending' : 'Pending'}
                         </span>
                       </div>
                     </div>

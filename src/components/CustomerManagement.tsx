@@ -142,6 +142,17 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
     }
   }, [feedback]);
 
+  useEffect(() => {
+    const handleTrigger = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail?.tab === 'customers') {
+        openForm();
+      }
+    };
+    window.addEventListener('nexus-trigger-add-modal', handleTrigger);
+    return () => window.removeEventListener('nexus-trigger-add-modal', handleTrigger);
+  }, []);
+
   // --- Open Form for Create/Edit ---
   const openForm = (customer: Customer | null = null) => {
     if (customer) {
@@ -598,105 +609,150 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                   </p>
                 </div>
               ) : filteredCustomers.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-16 text-center text-slate-400">
-                  <div className="w-12 h-12 bg-slate-50 border border-slate-100 rounded-full flex items-center justify-center text-slate-350 mb-3">
-                    <Users className="h-6 w-6 text-slate-400" />
+                <motion.div 
+                  initial={{ opacity: 0, y: 12 }} 
+                  animate={{ opacity: 1, y: 0 }} 
+                  transition={{ duration: 0.3 }}
+                  className="mx-auto max-w-md w-full my-6 bg-slate-50/50 border border-slate-200/60 rounded-3xl p-8 text-center flex flex-col items-center gap-4.5 shadow-3xs hover:shadow-2xs transition-all"
+                >
+                  <div className="relative group">
+                    <div className="absolute inset-0 bg-indigo-200/20 rounded-full blur-xl group-hover:scale-125 transition duration-300"></div>
+                    <div className="relative w-16 h-16 bg-white border border-slate-100 rounded-2xl shadow-3xs flex items-center justify-center text-slate-400 group-hover:text-indigo-600 transition-all duration-300">
+                      <Users className="h-8 w-8 text-slate-400 transition-transform duration-300 group-hover:scale-110" />
+                    </div>
                   </div>
-                  <p className="text-sm font-semibold text-slate-600">No Customers Identified</p>
-                  <p className="text-xs text-slate-400 mt-1 max-w-sm">
-                    {searchQuery ? 'Adjust search inputs or apply empty filter parameters' : 'Begin registering clients to establish trade history ledgers'}
-                  </p>
-                </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900 uppercase tracking-widest leading-none">
+                      {customersState.length === 0 ? 'No Customers Registered' : 'No Customers Found'}
+                    </h4>
+                    <p className="text-xs text-slate-500 mt-2 max-w-xs leading-relaxed font-semibold">
+                      {customersState.length === 0 
+                        ? 'Begin registering your accounts and clients to activate trade logs, billing lists, and outstanding ledger records.'
+                        : searchQuery || filterType !== 'All'
+                          ? "We couldn't find any profiles matching your search filters or active segment types."
+                          : 'No matching records were located. Clear your filtering parameters or create a new registry.'}
+                    </p>
+                  </div>
+                  <div className="flex gap-2.5 pt-1.5 flex-wrap justify-center">
+                    {customersState.length > 0 && (searchQuery || filterType !== 'All') ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery('');
+                          setFilterType('All');
+                        }}
+                        className="bg-white border border-slate-200 hover:border-slate-350 text-slate-700 font-extrabold text-[11px] uppercase tracking-wider px-5 py-2.5 rounded-xl transition cursor-pointer shadow-3xs"
+                      >
+                        Reset Search Filters
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => openForm()}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[11px] uppercase tracking-wider h-10 px-5 rounded-xl transition cursor-pointer shadow-xs hover:shadow-md inline-flex items-center gap-1.5"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Register First Customer</span>
+                      </button>
+                    )}
+                  </div>
+                </motion.div>
               ) : (
-                <div className="grid grid-cols-1 gap-4">
-                  {filteredCustomers.map((customer) => (
-                    <motion.div
-                      key={customer.id}
-                      layoutId={`customer-card-${customer.id}`}
-                      className="border border-slate-200 rounded-2xl p-5 hover:border-indigo-200 hover:shadow-xs transition duration-300 bg-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4"
-                    >
-                      <div className="space-y-2">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <h4 className="text-sm font-bold text-slate-900">{customer.name}</h4>
-                          <span className={`inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full ${
-                            customer.customerType === 'Credit' 
-                              ? 'bg-orange-50 text-orange-700 border border-orange-100' 
-                              : 'bg-emerald-50 text-emerald-700 border border-emerald-100'
-                          }`}>
-                            {customer.customerType} Account
-                          </span>
-                          {customer.status === 'inactive' ? (
-                            <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-100 text-slate-500 border border-slate-200">
-                              Inactive
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
-                              Active
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 text-xs text-slate-500">
-                          <span className="flex items-center gap-1.5 min-w-0">
-                            <Phone className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                            <span className="truncate">{customer.phone}</span>
-                          </span>
-                          <span className="flex items-center gap-1.5 min-w-0">
-                            <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                            <span className="truncate">{customer.address || 'No Address Provided'}</span>
-                          </span>
-                        </div>
-                        
-                        <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
-                          <Calendar className="h-3 w-3 shrink-0" />
-                          <span>Added {new Date(customer.createdDate).toLocaleDateString(undefined, { dateStyle: 'medium' })}</span>
-                        </div>
-                      </div>
-
-                      {/* Right Section: Balance and Action Hooks */}
-                      <div className="flex items-center justify-between sm:justify-end gap-6 border-t sm:border-t-0 border-slate-100 pt-3 sm:pt-0 shrink-0">
-                        <div className="flex gap-6 items-center">
-                          <div className="text-left sm:text-right">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none block">Outstanding Due</span>
-                            <span className={`text-lg font-extrabold block mt-1 ${
-                              customer.dueBalance > 0 ? 'text-rose-600' : 'text-slate-705 text-slate-700'
-                            }`}>
-                              ${customer.dueBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                            </span>
-                          </div>
-                          {(customer.customerCredit || 0) > 0 && (
-                            <div className="text-left sm:text-right border-l border-slate-155 border-slate-100 pl-4">
-                              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest leading-none block">Customer Credit</span>
-                              <span className="text-lg font-extrabold block mt-1 text-emerald-600">
-                                ${customer.customerCredit.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-xs bg-white">
+                  <div className="overflow-x-auto max-h-[500px]">
+                    <table className="w-full text-left border-collapse table-auto">
+                      <thead className="sticky top-0 bg-slate-50 z-10 shadow-[0_1px_0_0_rgba(226,232,240,1)]">
+                        <tr className="bg-slate-50 text-[10px] font-black uppercase tracking-wider text-slate-500">
+                          <th className="py-4 px-6">Customer Name</th>
+                          <th className="py-4 px-5">Type / Status</th>
+                          <th className="py-4 px-5">Contact Details</th>
+                          <th className="py-4 px-5">Date Added</th>
+                          <th className="py-4 px-5 text-right">Outstanding Due</th>
+                          <th className="py-4 px-5 text-right">Customer Credit</th>
+                          {userRole === 'admin' && <th className="py-4 px-6 text-center">Actions</th>}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
+                        {filteredCustomers.map((customer) => (
+                          <tr 
+                            key={customer.id} 
+                            className="hover:bg-indigo-50/20 even:bg-slate-50/30 transition duration-150"
+                          >
+                            <td className="py-4 px-6 font-bold text-slate-900 whitespace-nowrap">
+                              {customer.name}
+                            </td>
+                            <td className="py-4 px-5 whitespace-nowrap space-x-1.5 matches-status-design font-sans">
+                              <span className={`inline-flex items-center px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full border shadow-3xs ${
+                                customer.customerType === 'Credit' 
+                                  ? 'bg-blue-50 text-blue-700 border-blue-200' 
+                                  : 'bg-emerald-50 text-emerald-700 border-emerald-250/60'
+                              }`}>
+                                {customer.customerType} Account
                               </span>
-                            </div>
-                          )}
-                        </div>
-
-                        {userRole === 'admin' && (
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => openForm(customer)}
-                              className="p-2 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition cursor-pointer"
-                              title="Edit customer account details"
-                            >
-                              <Edit2 className="h-4 w-4" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteClick(customer)}
-                              className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition cursor-pointer"
-                              title="Delete customer record permanently"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </motion.div>
-                  ))}
+                              {customer.status === 'inactive' ? (
+                                <span className="inline-flex items-center px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-slate-50 text-slate-500 border border-slate-200 shadow-3xs">
+                                  Inactive
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 shadow-3xs">
+                                  Active
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-4 px-5 whitespace-nowrap">
+                              <div className="flex flex-col gap-0.5">
+                                <span className="flex items-center gap-1.5 text-slate-700">
+                                  <Phone className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                  <span>{customer.phone}</span>
+                                </span>
+                                <span className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                                  <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                  <span className="truncate max-w-[200px]">{customer.address || 'No Address'}</span>
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-4 px-5 font-mono text-slate-500 whitespace-nowrap">
+                              {new Date(customer.createdDate).toLocaleDateString(undefined, { dateStyle: 'medium' })}
+                            </td>
+                            <td className={`py-4 px-5 text-right font-black font-mono whitespace-nowrap text-sm ${
+                              customer.dueBalance > 0 ? 'text-rose-600' : 'text-slate-700'
+                            }`}>
+                              ${customer.dueBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="py-4 px-5 text-right font-black font-mono text-emerald-600 whitespace-nowrap text-sm">
+                              {(customer.customerCredit || 0) > 0 ? (
+                                `$${customer.customerCredit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                              ) : (
+                                <span className="text-slate-300">-</span>
+                              )}
+                            </td>
+                            {userRole === 'admin' && (
+                              <td className="py-4 px-6 text-center whitespace-nowrap">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => openForm(customer)}
+                                    className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition cursor-pointer"
+                                    title="Edit customer account details"
+                                  >
+                                    <Edit2 className="h-4 w-4" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteClick(customer)}
+                                    className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition cursor-pointer"
+                                    title="Delete customer record permanently"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                </div>
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </div>
@@ -797,123 +853,160 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
               </div>
 
               {/* Form container body */}
-              <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-5">
+              <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-6">
                 
                 {/* Customer Name */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Customer Name *</label>
+                <div className="relative w-full">
                   <input
                     type="text"
                     required
+                    id="form-customer-name-field"
                     disabled={isSaving}
                     value={formData.name}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50 ${
+                    placeholder=" "
+                    className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                       errors.name 
-                        ? 'border-rose-450 border-rose-350 text-rose-800 bg-rose-50/20' 
-                        : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500'
+                        ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                        : 'border-slate-200 focus:border-indigo-600 focus:ring-indigo-650'
                     }`}
-                    placeholder="E.g., John Doe Retailers"
                   />
-                  {errors.name && <p className="text-[10px] font-bold text-rose-500">{errors.name}</p>}
+                  <label htmlFor="form-customer-name-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                    Customer Name <span className="text-rose-500 font-extrabold">*</span>
+                  </label>
+                  {errors.name && (
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                      <span>{errors.name}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Grid row: Phone & Customer Type */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   {/* Phone */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Phone Number *</label>
+                  <div className="relative w-full">
                     <input
                       type="text"
                       required
+                      id="form-customer-phone-field"
                       disabled={isSaving}
                       value={formData.phone}
                       onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                      className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50 ${
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                         errors.phone 
-                          ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                          : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500'
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                          : 'border-slate-200 focus:border-indigo-600 focus:ring-indigo-650'
                       }`}
-                      placeholder="E.g., +1 (555) 0192"
                     />
-                    {errors.phone && <p className="text-[10px] font-bold text-rose-500">{errors.phone}</p>}
+                    <label htmlFor="form-customer-phone-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Phone Number <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.phone && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                        <span>{errors.phone}</span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Customer Type */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Customer Type *</label>
+                  <div className="relative w-full">
                     <select
+                      id="form-customer-type-field"
                       disabled={isSaving}
                       value={formData.customerType}
                       onChange={(e) => setFormData({ ...formData, customerType: e.target.value as 'Cash' | 'Credit' })}
-                      className="w-full rounded-xl border border-slate-200 bg-white py-2.5 px-3.5 text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition cursor-pointer disabled:opacity-60 disabled:bg-slate-50"
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 transition cursor-pointer disabled:opacity-60 disabled:bg-slate-50 text-slate-800 h-[52px]"
                     >
                       <option value="Cash">Cash Account (Immediate Settling)</option>
                       <option value="Credit">Credit Account (Invoice Cycle Term)</option>
                     </select>
+                    <label htmlFor="form-customer-type-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none">
+                      Customer Type <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
                   </div>
                 </div>
 
                 {/* Address */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Address Description</label>
+                <div className="relative w-full">
                   <textarea
                     rows={2}
+                    id="form-customer-address-field"
                     disabled={isSaving}
                     value={formData.address}
                     onChange={(e) => setFormData({ ...formData, address: e.target.value })}
-                    className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none resize-none transition disabled:opacity-60 disabled:bg-slate-50 ${
+                    placeholder=" "
+                    className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none resize-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 min-h-[70px] ${
                       errors.address 
-                        ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                        : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500'
+                        ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                        : 'border-slate-200 focus:border-indigo-600 focus:ring-indigo-650'
                     }`}
-                    placeholder="E.g., Sector 4, Warehouse Building B, Suite 102"
                   />
-                  {errors.address && <p className="text-[10px] font-bold text-rose-500">{errors.address}</p>}
+                  <label htmlFor="form-customer-address-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                    Address Description
+                  </label>
+                  {errors.address && (
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                      <span>{errors.address}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Due Balance */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Outstanding Due Balance ($) *</label>
-                  <div className="relative">
-                    <span className="absolute left-3.5 top-3 text-xs font-bold text-slate-400 shrink-0">$</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      required
-                      disabled={isSaving || !!editingCustomer}
-                      value={formData.dueBalance}
-                      onChange={(e) => setFormData({ ...formData, dueBalance: e.target.value })}
-                      className={`w-full rounded-xl border py-2.5 pl-8 pr-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50 ${
-                        errors.dueBalance 
-                          ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                          : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-550'
-                      }`}
-                      placeholder="0.00"
-                    />
-                  </div>
-                  {errors.dueBalance && <p className="text-[10px] font-bold text-rose-500">{errors.dueBalance}</p>}
-                  <p className="text-[10px] text-slate-425 text-slate-400 font-sans mt-1">Record unpaid account entries here. Default is 0.00.</p>
+                <div className="relative w-full">
+                  <span className="absolute left-3.5 top-4.5 text-xs font-bold text-slate-400 shrink-0">$</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    required
+                    id="form-customer-due-field"
+                    disabled={isSaving || !!editingCustomer}
+                    value={formData.dueBalance}
+                    onChange={(e) => setFormData({ ...formData, dueBalance: e.target.value })}
+                    placeholder=" "
+                    className={`peer w-full rounded-xl border pl-7 pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                      errors.dueBalance 
+                        ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                        : 'border-slate-200 focus:border-indigo-600 focus:ring-indigo-650'
+                    }`}
+                  />
+                  <label htmlFor="form-customer-due-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-7 peer-focus:top-1.5 peer-focus:left-3.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                    Outstanding Due Balance ($) <span className="text-rose-500 font-extrabold">*</span>
+                  </label>
+                  {errors.dueBalance ? (
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                      <span>{errors.dueBalance}</span>
+                    </div>
+                  ) : (
+                    <p className="text-[10px] text-slate-400 font-sans mt-1.5 pl-1">Record unpaid account entries here. Default is 0.00.</p>
+                  )}
                 </div>
 
                 {/* Show status selection only when editing an existing customer */}
                 {editingCustomer && (
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Customer Status *</label>
+                  <div className="relative w-full">
                     <select
+                      id="form-customer-status-field"
                       disabled={isSaving}
                       value={formData.status}
                       onChange={(e) => setFormData({ ...formData, status: e.target.value as 'active' | 'inactive' })}
-                      className="w-full rounded-xl border border-slate-200 py-2.5 px-3.5 text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition cursor-pointer disabled:opacity-60 disabled:bg-slate-50 text-slate-700 bg-white"
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 transition cursor-pointer disabled:opacity-60 disabled:bg-slate-50 text-slate-800 h-[52px]"
                     >
                       <option value="active">Active (Available for transactions)</option>
                       <option value="inactive">Inactive (Suspended / Read-only)</option>
                     </select>
+                    <label htmlFor="form-customer-status-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none">
+                      Customer Status <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
                   </div>
                 )}
 
                 {/* Action buttons footer */}
-                <div className="flex justify-end items-center gap-3 pt-4 border-t border-slate-100">
+                <div className="flex justify-end items-center gap-3 pt-5 border-t border-slate-100">
                   <button
                     type="button"
                     disabled={isSaving}

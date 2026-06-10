@@ -103,6 +103,17 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
     }
   }, [feedback]);
 
+  useEffect(() => {
+    const handleTrigger = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail?.tab === 'suppliers') {
+        openForm();
+      }
+    };
+    window.addEventListener('nexus-trigger-add-modal', handleTrigger);
+    return () => window.removeEventListener('nexus-trigger-add-modal', handleTrigger);
+  }, []);
+
   // --- Open Form for Create/Edit ---
   const openForm = (supplier: Supplier | null = null) => {
     if (supplier) {
@@ -543,109 +554,154 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
                   </p>
                 </div>
               ) : filteredSuppliers.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-16 text-center text-slate-400">
-                  <div className="w-12 h-12 bg-slate-50 border border-slate-100 rounded-full flex items-center justify-center text-slate-350 mb-3 block">
-                    <Truck className="h-6 w-6 text-slate-400" />
+                <motion.div 
+                  initial={{ opacity: 0, y: 12 }} 
+                  animate={{ opacity: 1, y: 0 }} 
+                  transition={{ duration: 0.3 }}
+                  className="mx-auto max-w-md w-full my-6 bg-slate-50/50 border border-slate-200/60 rounded-3xl p-8 text-center flex flex-col items-center gap-4.5 shadow-3xs hover:shadow-2xs transition-all"
+                >
+                  <div className="relative group">
+                    <div className="absolute inset-0 bg-indigo-200/20 rounded-full blur-xl group-hover:scale-125 transition duration-300"></div>
+                    <div className="relative w-16 h-16 bg-white border border-slate-100 rounded-2xl shadow-3xs flex items-center justify-center text-slate-400 group-hover:text-indigo-600 transition-all duration-300">
+                      <Truck className="h-8 w-8 text-slate-400 transition-transform duration-300 group-hover:scale-110" />
+                    </div>
                   </div>
-                  <p className="text-sm font-semibold text-slate-600 font-sans">No suppliers found</p>
-                  <p className="text-xs text-slate-400 mt-1 max-w-sm">
-                    {searchQuery ? 'Adjust search inputs or apply empty filter parameters' : 'Begin registering channels to establish trade history ledgers'}
-                  </p>
-                </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900 uppercase tracking-widest leading-none">
+                      {suppliers.length === 0 ? 'No Suppliers Registered' : 'No Suppliers Found'}
+                    </h4>
+                    <p className="text-xs text-slate-500 mt-2 max-w-xs leading-relaxed font-semibold">
+                      {suppliers.length === 0 
+                        ? 'Begin registering your supplier channels to execute stock procurements and reconcile payables.'
+                        : searchQuery || filterType !== 'All'
+                          ? "We couldn't track down any matching records under your search parameters or filter limits."
+                          : 'No matching suppliers found. Clear your filters or create a new supplier entry.'}
+                    </p>
+                  </div>
+                  <div className="flex gap-2.5 pt-1.5 flex-wrap justify-center">
+                    {suppliers.length > 0 && (searchQuery || filterType !== 'All') ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery('');
+                          setFilterType('All');
+                        }}
+                        className="bg-white border border-slate-200 hover:border-slate-350 text-slate-700 font-extrabold text-[11px] uppercase tracking-wider px-5 py-2.5 rounded-xl transition cursor-pointer shadow-3xs"
+                      >
+                        Reset Search Filters
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => openForm()}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[11px] uppercase tracking-wider h-10 px-5 rounded-xl transition cursor-pointer shadow-xs hover:shadow-md inline-flex items-center gap-1.5"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Register First Supplier</span>
+                      </button>
+                    )}
+                  </div>
+                </motion.div>
               ) : (
-                <div className="grid grid-cols-1 gap-4">
-                  {filteredSuppliers.map((supplier) => (
-                    <motion.div
-                      key={supplier.id}
-                      layoutId={`supplier-card-${supplier.id}`}
-                      className="border border-slate-200 rounded-2xl p-5 hover:border-indigo-200 hover:shadow-xs transition duration-300 bg-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4"
-                    >
-                      <div className="space-y-2 min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <h4 className="text-sm font-bold text-slate-900 truncate">{supplier.name}</h4>
-                          <span className={`inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full ${
-                            (supplier.paymentType || 'Cash') === 'Credit' 
-                              ? 'bg-orange-50 text-orange-700 border border-orange-100' 
-                              : 'bg-emerald-50 text-emerald-700 border border-emerald-100'
-                          }`}>
-                            {(supplier.paymentType || 'Cash')} Terms
-                          </span>
-                          {supplier.category && (
-                            <span className="inline-flex items-center px-2 py-0.5 text-[10px] bg-slate-50 border border-slate-100 text-slate-500 rounded-full">
-                              {supplier.category}
-                            </span>
-                          )}
-                          {supplier.status === 'inactive' ? (
-                            <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-100 text-slate-500 border border-slate-200">
-                              Inactive
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
-                              Active
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 text-xs text-slate-500">
-                          <span className="flex items-center gap-1.5 min-w-0">
-                            <Phone className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                            <span className="truncate">{supplier.phone}</span>
-                          </span>
-                          <span className="flex items-center gap-1.5 min-w-0">
-                            <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                            <span className="truncate">{supplier.address || 'No Address Provided'}</span>
-                          </span>
-                        </div>
-
-                        {supplier.contactPerson && (
-                          <div className="text-[11px] text-slate-450 text-slate-400">
-                            Representative: <span className="text-slate-650 text-slate-600 font-bold">{supplier.contactPerson}</span>
-                            {supplier.email && <span className="ml-1 text-indigo-500 shrink-0">({supplier.email})</span>}
-                          </div>
-                        )}
-                        
-                        {supplier.createdDate && (
-                          <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
-                            <Calendar className="h-3 w-3 shrink-0" />
-                            <span>Trade profile active since {new Date(supplier.createdDate).toLocaleDateString(undefined, { dateStyle: 'medium' })}</span>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Right Section: Balance and Action Hooks */}
-                      <div className="flex items-center justify-between sm:justify-end gap-6 border-t sm:border-t-0 border-slate-100 pt-3 sm:pt-0 shrink-0">
-                        <div className="text-left sm:text-right">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none block">Outstanding Payable</span>
-                          <span className={`text-lg font-extrabold block mt-1 ${
-                            (supplier.dueBalance ?? 0) > 0 ? 'text-amber-600' : 'text-slate-705 text-slate-700'
-                          }`}>
-                            ${(supplier.dueBalance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          </span>
-                        </div>
-
-                        {userRole === 'admin' && (
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => openForm(supplier)}
-                              className="p-2 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition"
-                              title="Edit supplier contract terms"
-                            >
-                              <Edit2 className="h-4 w-4" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteClick(supplier)}
-                              className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition"
-                              title="Delete supplier permanently from channels"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </motion.div>
-                  ))}
+                <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-xs bg-white">
+                  <div className="overflow-x-auto max-h-[500px]">
+                    <table className="w-full text-left border-collapse table-auto">
+                      <thead className="sticky top-0 bg-slate-50 z-10 shadow-[0_1px_0_0_rgba(226,232,240,1)]">
+                        <tr className="bg-slate-50 text-[10px] font-black uppercase tracking-wider text-slate-500">
+                          <th className="py-4 px-6">Supplier Channel</th>
+                          <th className="py-4 px-5">Type / Status</th>
+                          <th className="py-4 px-5">Contact Details</th>
+                          <th className="py-4 px-5">Representative</th>
+                          <th className="py-4 px-5 text-right">Outstanding Payable</th>
+                          {userRole === 'admin' && <th className="py-4 px-6 text-center">Actions</th>}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
+                        {filteredSuppliers.map((supplier) => (
+                          <tr 
+                            key={supplier.id}
+                            className="hover:bg-indigo-50/20 even:bg-slate-50/30 transition duration-150"
+                          >
+                            <td className="py-4 px-6 font-bold text-slate-900 whitespace-nowrap">
+                              <div>{supplier.name}</div>
+                              {supplier.createdDate && (
+                                <span className="text-[9px] font-normal text-slate-400">
+                                  Since {new Date(supplier.createdDate).toLocaleDateString(undefined, { dateStyle: 'short' })}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-4 px-5 whitespace-nowrap space-x-1.5 matches-status-design font-sans">
+                              <span className={`inline-flex items-center px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full border shadow-3xs ${
+                                (supplier.paymentType || 'Cash') === 'Credit' 
+                                  ? 'bg-blue-50 text-blue-700 border-blue-200' 
+                                  : 'bg-emerald-50 text-emerald-700 border-emerald-250/60'
+                              }`}>
+                                {(supplier.paymentType || 'Cash')} Terms
+                              </span>
+                              {supplier.status === 'inactive' ? (
+                                <span className="inline-flex items-center px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-slate-50 text-slate-500 border border-slate-200 shadow-3xs">
+                                  Inactive
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 shadow-3xs">
+                                  Active
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-4 px-5 whitespace-nowrap">
+                              <div className="flex flex-col gap-0.5">
+                                <span className="flex items-center gap-1.5 text-slate-700">
+                                  <Phone className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                  <span>{supplier.phone}</span>
+                                </span>
+                                <span className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                                  <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                  <span className="truncate max-w-[200px]">{supplier.address || 'No Address'}</span>
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-4 px-5 whitespace-nowrap">
+                              {supplier.contactPerson ? (
+                                <div>
+                                  <div className="font-bold text-slate-805 text-slate-805">{supplier.contactPerson}</div>
+                                  {supplier.email && <div className="text-[10px] text-indigo-500">{supplier.email}</div>}
+                                </div>
+                              ) : (
+                                <span className="text-slate-300">-</span>
+                              )}
+                            </td>
+                            <td className={`py-4 px-5 text-right font-black font-mono whitespace-nowrap text-sm ${
+                              (supplier.dueBalance ?? 0) > 0 ? 'text-amber-600' : 'text-slate-700'
+                            }`}>
+                              ${(supplier.dueBalance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </td>
+                            {userRole === 'admin' && (
+                              <td className="py-4 px-6 text-center whitespace-nowrap">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => openForm(supplier)}
+                                    className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-slate-50 transition"
+                                    title="Edit supplier contract terms"
+                                  >
+                                    <Edit2 className="h-4 w-4" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteClick(supplier)}
+                                    className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-slate-50 transition"
+                                    title="Delete supplier permanently from channels"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                </div>
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </div>
@@ -746,123 +802,160 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
               </div>
 
               {/* Form container body */}
-              <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-5">
+              <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-6">
                 
                 {/* Supplier Name */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Supplier Name *</label>
+                <div className="relative w-full">
                   <input
                     type="text"
                     required
+                    id="form-supplier-name-field"
                     disabled={isSaving}
                     value={formData.name}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50 ${
+                    placeholder=" "
+                    className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                       errors.name 
-                        ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                        : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-505'
+                        ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                        : 'border-slate-200 focus:border-indigo-600 focus:ring-indigo-650'
                     }`}
-                    placeholder="E.g., Cascade Industrial Supply Co."
                   />
-                  {errors.name && <p className="text-[10px] font-bold text-rose-500">{errors.name}</p>}
+                  <label htmlFor="form-supplier-name-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                    Supplier Name <span className="text-rose-500 font-extrabold">*</span>
+                  </label>
+                  {errors.name && (
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                      <span>{errors.name}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Grid row: Phone & Payment Type */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   {/* Phone */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Phone Number *</label>
+                  <div className="relative w-full">
                     <input
                       type="text"
                       required
+                      id="form-supplier-phone-field"
                       disabled={isSaving}
                       value={formData.phone}
                       onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                      className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50 ${
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                         errors.phone 
-                          ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                          : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-505'
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                          : 'border-slate-200 focus:border-indigo-600 focus:ring-indigo-650'
                       }`}
-                      placeholder="E.g., +1 (800) 555-5021"
                     />
-                    {errors.phone && <p className="text-[10px] font-bold text-rose-500">{errors.phone}</p>}
+                    <label htmlFor="form-supplier-phone-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Phone Number <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
+                    {errors.phone && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                        <span>{errors.phone}</span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Payment Type */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Payment Type *</label>
+                  <div className="relative w-full">
                     <select
+                      id="form-supplier-payment-field"
                       disabled={isSaving}
                       value={formData.paymentType}
                       onChange={(e) => setFormData({ ...formData, paymentType: e.target.value as 'Cash' | 'Credit' })}
-                      className="w-full rounded-xl border border-slate-200 bg-white py-2.5 px-3.5 text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-505 transition cursor-pointer disabled:opacity-60 disabled:bg-slate-50"
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 transition cursor-pointer disabled:opacity-60 disabled:bg-slate-50 text-slate-800 h-[52px]"
                     >
                       <option value="Cash">Cash Account (Settled Immediately)</option>
                       <option value="Credit">Credit Terms (deferred invoice)</option>
                     </select>
+                    <label htmlFor="form-supplier-payment-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none">
+                      Payment Type <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
                   </div>
                 </div>
 
                 {/* Address */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Address Description</label>
+                <div className="relative w-full">
                   <textarea
                     rows={2}
+                    id="form-supplier-address-field"
                     disabled={isSaving}
                     value={formData.address}
                     onChange={(e) => setFormData({ ...formData, address: e.target.value })}
-                    className={`w-full rounded-xl border py-2.5 px-3.5 text-xs font-medium focus:outline-none resize-none transition disabled:opacity-60 disabled:bg-slate-50 ${
+                    placeholder=" "
+                    className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none resize-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 min-h-[70px] ${
                       errors.address 
-                        ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                        : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-505'
+                        ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                        : 'border-slate-200 focus:border-indigo-600 focus:ring-indigo-650'
                     }`}
-                    placeholder="E.g., Building C, Suite 400, Industrial Trade Zone, Vancouver"
                   />
-                  {errors.address && <p className="text-[10px] font-bold text-rose-500">{errors.address}</p>}
+                  <label htmlFor="form-supplier-address-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                    Address Description
+                  </label>
+                  {errors.address && (
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                      <span>{errors.address}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Due Balance */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Outstanding Due Balance ($) *</label>
-                  <div className="relative">
-                    <span className="absolute left-3.5 top-3 text-xs font-bold text-slate-400 shrink-0">$</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      required
-                      disabled={isSaving || !!editingSupplier}
-                      value={formData.dueBalance}
-                      onChange={(e) => setFormData({ ...formData, dueBalance: e.target.value })}
-                      className={`w-full rounded-xl border py-2.5 pl-8 pr-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 disabled:bg-slate-50 ${
-                        errors.dueBalance 
-                          ? 'border-rose-350 text-rose-800 bg-rose-50/20' 
-                          : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-505'
-                      }`}
-                      placeholder="0.00"
-                    />
-                  </div>
-                  {errors.dueBalance && <p className="text-[10px] font-bold text-rose-500">{errors.dueBalance}</p>}
-                  <p className="text-[10px] text-slate-400 mt-1 font-sans">Outstanding liabilities owed to this supplier. Default is 0.00.</p>
+                <div className="relative w-full">
+                  <span className="absolute left-3.5 top-4.5 text-xs font-bold text-slate-400 shrink-0">$</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    required
+                    id="form-supplier-due-field"
+                    disabled={isSaving || !!editingSupplier}
+                    value={formData.dueBalance}
+                    onChange={(e) => setFormData({ ...formData, dueBalance: e.target.value })}
+                    placeholder=" "
+                    className={`peer w-full rounded-xl border pl-7 pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                      errors.dueBalance 
+                        ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                        : 'border-slate-200 focus:border-indigo-600 focus:ring-indigo-650'
+                    }`}
+                  />
+                  <label htmlFor="form-supplier-due-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-7 peer-focus:top-1.5 peer-focus:left-3.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                    Outstanding Due Balance ($) <span className="text-rose-500 font-extrabold">*</span>
+                  </label>
+                  {errors.dueBalance ? (
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                      <span>{errors.dueBalance}</span>
+                    </div>
+                  ) : (
+                    <p className="text-[10px] text-slate-400 mt-1.5 pl-1 font-sans">Outstanding liabilities owed to this supplier. Default is 0.00.</p>
+                  )}
                 </div>
 
                 {/* Show status selection only when editing an existing supplier */}
                 {editingSupplier && (
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Supplier Status *</label>
+                  <div className="relative w-full">
                     <select
+                      id="form-supplier-status-field"
                       disabled={isSaving}
                       value={formData.status}
                       onChange={(e) => setFormData({ ...formData, status: e.target.value as 'active' | 'inactive' })}
-                      className="w-full rounded-xl border border-slate-200 py-2.5 px-3.5 text-xs font-semibold focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition cursor-pointer disabled:opacity-60 disabled:bg-slate-50 text-slate-700 bg-white"
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 transition cursor-pointer disabled:opacity-60 disabled:bg-slate-50 text-slate-800 h-[52px]"
                     >
                       <option value="active">Active (Available for transactions)</option>
                       <option value="inactive">Inactive (Suspended / Read-only)</option>
                     </select>
+                    <label htmlFor="form-supplier-status-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none">
+                      Supplier Status <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
                   </div>
                 )}
 
                 {/* Action buttons footer */}
-                <div className="flex justify-end items-center gap-3 pt-4 border-t border-slate-100">
+                <div className="flex justify-end items-center gap-3 pt-5 border-t border-slate-100">
                   <button
                     type="button"
                     disabled={isSaving}

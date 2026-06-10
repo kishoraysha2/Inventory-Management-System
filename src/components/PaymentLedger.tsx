@@ -302,6 +302,17 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
     }
   }, [feedback]);
 
+  useEffect(() => {
+    const handleTrigger = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail?.tab === 'ledger') {
+        handleOpenRecordModal();
+      }
+    };
+    window.addEventListener('nexus-trigger-add-modal', handleTrigger);
+    return () => window.removeEventListener('nexus-trigger-add-modal', handleTrigger);
+  }, []);
+
   // --- Reset Filter Form ---
   const handleResetFilters = () => {
     setPersonFilter('');
@@ -1105,13 +1116,49 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                   ))}
                 </div>
               ) : activeRecordsCount === 0 ? (
-                <div className="flex flex-col items-center justify-center py-16 text-center text-slate-400 border border-dashed border-slate-200 rounded-2xl bg-slate-50/20">
-                  <div className="p-3 bg-slate-100 rounded-full text-slate-400 mb-3">
-                    <History className="h-6 w-6" />
+                <motion.div 
+                  initial={{ opacity: 0, y: 12 }} 
+                  animate={{ opacity: 1, y: 0 }} 
+                  transition={{ duration: 0.3 }}
+                  className="mx-auto max-w-md w-full my-8 bg-slate-50/50 border border-slate-200/60 rounded-3xl p-8 text-center flex flex-col items-center gap-4.5 shadow-3xs"
+                >
+                  <div className="relative group">
+                    <div className="absolute inset-0 bg-indigo-200/20 rounded-full blur-xl group-hover:scale-125 transition duration-300"></div>
+                    <div className="relative w-16 h-16 bg-white border border-slate-100 rounded-2xl shadow-3xs flex items-center justify-center text-slate-400 group-hover:text-indigo-600 transition-all duration-300">
+                      <History className="h-8 w-8 text-slate-400 transition-transform duration-300 group-hover:scale-110" />
+                    </div>
                   </div>
-                  <p className="text-xs font-bold text-slate-600">No payment logs identified</p>
-                  <p className="text-[11px] text-slate-400 mt-0.5 max-w-sm">No ledger matches active filters or payments. Click record payments to register first settlement activity.</p>
-                </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900 uppercase tracking-widest leading-none">
+                      {(activeSegment === 'customers' ? customerPayments : supplierPayments).length === 0 ? 'No Payments Logged' : 'No Payments Identified'}
+                    </h4>
+                    <p className="text-xs text-slate-500 mt-2 max-w-xs leading-relaxed font-semibold">
+                      {(activeSegment === 'customers' ? customerPayments : supplierPayments).length === 0 
+                        ? 'Begin recording financial settlements and invoice payments to reconcile customer or supplier balances.'
+                        : 'No payment logs matched your actively specified searching filters or date boundaries.'}
+                    </p>
+                  </div>
+                  <div className="flex gap-2.5 pt-1.5 flex-wrap justify-center">
+                    {(activeSegment === 'customers' ? customerPayments : supplierPayments).length > 0 && (personFilter || startDate || endDate) ? (
+                      <button
+                        type="button"
+                        onClick={handleResetFilters}
+                        className="bg-white border border-slate-200 hover:border-slate-350 text-slate-700 font-extrabold text-[11px] uppercase tracking-wider px-5 py-2.5 rounded-xl transition cursor-pointer shadow-3xs"
+                      >
+                        Reset Search Filters
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleOpenRecordModal()}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[11px] uppercase tracking-wider h-10 px-5 rounded-xl transition cursor-pointer shadow-xs hover:shadow-md inline-flex items-center gap-1.5"
+                      >
+                        <PlusCircle className="w-3.5 h-3.5" />
+                        <span>Record First Settlement</span>
+                      </button>
+                    )}
+                  </div>
+                </motion.div>
               ) : (
                 <div className="divide-y divide-slate-100">
                   {(activeSegment === 'customers' ? filteredCustomerPayments : filteredSupplierPayments).map((p) => (
@@ -1166,21 +1213,28 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                         </div>
 
                         {/* Void Control */}
-                        <div className="border-l border-slate-100 pl-4 flex items-center min-w-[70px]">
+                        <div className="border-l border-slate-100 pl-4 flex flex-col items-center justify-center gap-1.5 min-w-[95px]">
                           {p.status === 'voided' || p.status === 'VOID' ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-2 py-0.5 text-[9px] font-mono font-bold text-slate-400 select-none">
-                              VOIDED
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 border border-rose-200 text-rose-700 px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider shadow-3xs">
+                              <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse"></span>
+                              Void
                             </span>
                           ) : (
-                            (userRole === 'admin' || userRole === 'accountant') && (
-                              <button
-                                type="button"
-                                onClick={() => voidTransaction(p.id)}
-                                className="px-2 py-1 rounded-lg text-[10px] font-bold text-rose-500 hover:text-rose-705 text-rose-600 hover:bg-rose-50 border border-rose-100 cursor-pointer transition uppercase"
-                              >
-                                Void
-                              </button>
-                            )
+                            <>
+                              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-250/60 text-emerald-700 px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider shadow-3xs">
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                                Success
+                              </span>
+                              {(userRole === 'admin' || userRole === 'accountant') && (
+                                <button
+                                  type="button"
+                                  onClick={() => voidTransaction(p.id)}
+                                  className="px-2 py-0.5 rounded-lg text-[9px] font-extrabold text-rose-600 hover:text-white hover:bg-rose-600 border border-rose-200 cursor-pointer transition uppercase tracking-wider"
+                                >
+                                  Void
+                                </button>
+                              )}
+                            </>
                           )}
                         </div>
                       </div>
@@ -1225,22 +1279,22 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
               </div>
 
               {/* Form Body fields */}
-              <form onSubmit={handleSavePayment} className="p-6 sm:p-8 space-y-4.5">
+              <form onSubmit={handleSavePayment} className="p-6 sm:p-8 space-y-6">
                 
                 {/* Person Dropdown */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
-                    {activeSegment === 'customers' ? 'Select Customer *' : 'Select Supplier *'}
-                  </label>
+                <div className="relative w-full">
                   <select
                     disabled={isSaving}
+                    id="form-payment-person-field"
                     value={formData.personId}
                     onChange={(e) => setFormData({ ...formData, personId: e.target.value })}
-                    className={`w-full rounded-xl border bg-white py-2.5 px-3.5 text-xs font-semibold focus:outline-none focus:border-indigo-505 transition cursor-pointer disabled:opacity-60 ${
-                      formErrors.personId ? 'border-rose-300' : 'border-slate-200'
+                    className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 bg-white appearance-none cursor-pointer disabled:opacity-60 disabled:bg-slate-50 h-[52px] text-slate-700 ${
+                      formErrors.personId 
+                        ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                        : 'border-slate-200 focus:border-indigo-605'
                     }`}
                   >
-                    <option value="">{activeSegment === 'customers' ? '-- Select a client account --' : '-- Select a supplier account --'}</option>
+                    <option value="">{activeSegment === 'customers' ? '-- Choose a Client --' : '-- Choose a Supplier --'}</option>
                     {activeSegment === 'customers' ? (
                       customers.filter(c => c.status !== 'inactive').map((c) => (
                         <option key={c.id} value={c.id}>
@@ -1255,77 +1309,98 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                       ))
                     )}
                   </select>
+                  <label htmlFor="form-payment-person-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                    {activeSegment === 'customers' ? 'Customer Profile Name' : 'Supplier Business Name'} <span className="text-rose-500 font-extrabold">*</span>
+                  </label>
                   {formErrors.personId && (
-                    <p className="text-[10px] font-bold text-rose-500">{formErrors.personId}</p>
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                      <span>{formErrors.personId}</span>
+                    </div>
                   )}
                 </div>
 
                 {/* Show current due parameters */}
                 {formData.personId && selectedPersonOutstanding() !== null && (
-                  <div className="rounded-xl bg-slate-50 border border-slate-100 p-3.5 text-xs text-slate-600 space-y-1">
-                    <div className="flex justify-between">
-                      <span className="text-slate-400">Selected Outstanding Balance:</span>
-                      <strong className="text-orange-600">${selectedPersonOutstanding()?.toFixed(2)}</strong>
-                    </div>
+                  <div className="rounded-xl bg-slate-50 border border-slate-100/70 p-3.5 text-xs text-slate-600 flex justify-between items-center animate-fade-in">
+                    <span className="font-bold text-[10px] text-slate-400 uppercase tracking-wider">Account Active Balance Due:</span>
+                    <strong className="text-orange-600 font-extrabold text-[13px]">${selectedPersonOutstanding()?.toFixed(2)}</strong>
                   </div>
                 )}
 
                 {/* Grid row: Paid Amount & Date */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   {/* Amount Paid input */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Settlement Amount ($) *</label>
-                    <div className="relative">
-                      <span className="absolute left-3.5 top-3.5 text-xs font-bold text-slate-400">$</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        required
-                        disabled={isSaving}
-                        value={formData.amountPaid}
-                        onChange={(e) => setFormData({ ...formData, amountPaid: e.target.value })}
-                        placeholder="0.00"
-                        className={`w-full rounded-xl border py-2.5 pl-8 pr-3.5 text-xs font-medium focus:outline-none transition disabled:opacity-60 ${
-                          formErrors.amountPaid 
-                            ? 'border-rose-300 text-rose-800 bg-rose-50/20' 
-                            : 'border-slate-200 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-505'
-                        }`}
-                      />
-                    </div>
+                  <div className="relative w-full">
+                    <span className="absolute left-3.5 top-[18px] text-slate-400 text-xs font-bold leading-none">$</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      disabled={isSaving}
+                      id="form-payment-amount-field"
+                      value={formData.amountPaid}
+                      onChange={(e) => setFormData({ ...formData, amountPaid: e.target.value })}
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border pl-[26px] pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                        formErrors.amountPaid 
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                          : 'border-slate-200 focus:border-indigo-605'
+                      }`}
+                    />
+                    <label htmlFor="form-payment-amount-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-[26px] peer-focus:top-1.5 peer-focus:left-3.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Settlement Amount ($) <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
                     {formErrors.amountPaid && (
-                      <p className="text-[10px] font-bold text-rose-500">{formErrors.amountPaid}</p>
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                        <span>{formErrors.amountPaid}</span>
+                      </div>
                     )}
                   </div>
 
                   {/* Payment date calendar */}
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Transaction Date *</label>
+                  <div className="relative w-full">
                     <input
                       type="date"
                       required
                       disabled={isSaving}
+                      id="form-payment-date-field"
                       value={formData.paymentDate}
                       onChange={(e) => setFormData({ ...formData, paymentDate: e.target.value })}
-                      className="w-full rounded-xl border border-slate-200 py-2.5 px-3.5 text-xs font-bold text-slate-850 focus:outline-none focus:border-indigo-500 transition cursor-pointer"
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all h-[52px] bg-white cursor-pointer ${
+                        formErrors.paymentDate 
+                          ? 'border-rose-350 text-rose-800 bg-rose-50/10 focus:border-rose-455 focus:ring-1 focus:ring-rose-500' 
+                          : 'border-slate-200 focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605'
+                      }`}
                     />
+                    <label htmlFor="form-payment-date-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                      Transaction Date <span className="text-rose-500 font-extrabold">*</span>
+                    </label>
                     {formErrors.paymentDate && (
-                      <p className="text-[10px] font-bold text-rose-500">{formErrors.paymentDate}</p>
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-505 shrink-0" />
+                        <span>{formErrors.paymentDate}</span>
+                      </div>
                     )}
                   </div>
                 </div>
 
                 {/* Notes area */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Internal Transaction Notes / Memo</label>
+                <div className="relative w-full">
                   <textarea
                     rows={2}
                     disabled={isSaving}
+                    id="form-payment-notes-field"
                     value={formData.notes}
                     onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
-                    placeholder="Provide details, invoice match description, bank transaction references, check numbers..."
-                    className="w-full rounded-xl border border-slate-200 py-2.5 px-3.5 text-xs font-medium focus:outline-none focus:border-indigo-550 transition resize-none"
+                    placeholder=" "
+                    className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-indigo-605 focus:border-indigo-605 transition resize-none min-h-[76px]"
                   />
+                  <label htmlFor="form-payment-notes-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                    Internal Notes / Memo / References
+                  </label>
                 </div>
 
                 {/* Submit actions footer */}

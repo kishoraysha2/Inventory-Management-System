@@ -186,50 +186,61 @@ export default function ItemForm({
           </div>
 
           {/* Form Body */}
-          <form onSubmit={handleSubmit} className="p-6 space-y-5 overflow-y-auto flex-1 text-sm text-slate-700">
+          <form onSubmit={handleSubmit} className="p-6 space-y-6 overflow-y-auto flex-1 text-xs text-slate-700">
             {/* Row 1: Name */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                Product Name *
-              </label>
+            <div className="relative w-full">
               <input
                 id="form-name-input"
                 type="text"
                 name="name"
                 value={formData.name}
                 onChange={handleChange}
-                placeholder="e.g. Dell UltraSharp 27 Monitor"
-                className={`w-full rounded-xl border px-4 py-2.5 outline-none transition focus:border-slate-400 ${
-                  errors.name ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200'
+                placeholder=" "
+                className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                  errors.name 
+                    ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                    : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
                 }`}
               />
-              {errors.name && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.name}</p>}
+              <label htmlFor="form-name-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                Product Name <span className="text-rose-500 font-extrabold">*</span>
+              </label>
+              {errors.name && (
+                <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                  <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                  <span>{errors.name}</span>
+                </div>
+              )}
             </div>
 
             {/* Row 2: SKU & Category */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  SKU Identifier *
-                </label>
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+              <div className="relative w-full">
                 <input
                   id="form-sku-input"
                   type="text"
                   name="sku"
                   value={formData.sku}
                   onChange={handleChange}
-                  placeholder="e.g. MON-DEL-27U"
-                  className={`w-full rounded-xl border px-4 py-2.5 outline-none transition uppercase focus:border-slate-400 ${
-                    errors.sku ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200'
+                  placeholder=" "
+                  className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all uppercase placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                    errors.sku 
+                      ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                      : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
                   }`}
                 />
-                {errors.sku && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.sku}</p>}
+                <label htmlFor="form-sku-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                  SKU Identifier <span className="text-rose-500 font-extrabold">*</span>
+                </label>
+                {errors.sku && (
+                  <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                    <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                    <span>{errors.sku}</span>
+                  </div>
+                )}
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  Product Category *
-                </label>
+              <div className="relative w-full">
                 <input
                   id="form-category-input"
                   type="text"
@@ -237,9 +248,11 @@ export default function ItemForm({
                   list="categories-datalist"
                   value={formData.category}
                   onChange={handleChange}
-                  placeholder="e.g. Footwear"
-                  className={`w-full rounded-xl border px-4 py-2.5 outline-none transition focus:border-slate-400 ${
-                    errors.category ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200'
+                  placeholder=" "
+                  className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                    errors.category 
+                      ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                      : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
                   }`}
                 />
                 <datalist id="categories-datalist">
@@ -247,16 +260,21 @@ export default function ItemForm({
                     <option key={cat} value={cat} />
                   ))}
                 </datalist>
-                {errors.category && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.category}</p>}
+                <label htmlFor="form-category-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                  Product Category <span className="text-rose-500 font-extrabold">*</span>
+                </label>
+                {errors.category && (
+                  <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                    <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                    <span>{errors.category}</span>
+                  </div>
+                )}
               </div>
             </div>
 
             {/* Row 3: Prices */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  Purchase Price ($) *
-                </label>
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+              <div className="relative w-full">
                 <input
                   id="form-purchase-price-input"
                   type="number"
@@ -265,18 +283,25 @@ export default function ItemForm({
                   name="purchasePrice"
                   value={formData.purchasePrice}
                   onChange={handleChange}
-                  placeholder="150.00"
-                  className={`w-full rounded-xl border px-4 py-2.5 outline-none transition focus:border-slate-400 ${
-                    errors.purchasePrice ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200'
+                  placeholder=" "
+                  className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                    errors.purchasePrice 
+                      ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                      : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
                   }`}
                 />
-                {errors.purchasePrice && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.purchasePrice}</p>}
+                <label htmlFor="form-purchase-price-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                  Purchase Cost ($) <span className="text-rose-500 font-extrabold">*</span>
+                </label>
+                {errors.purchasePrice && (
+                  <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                    <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                    <span>{errors.purchasePrice}</span>
+                  </div>
+                )}
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  Selling Price ($) *
-                </label>
+              <div className="relative w-full">
                 <input
                   id="form-selling-price-input"
                   type="number"
@@ -285,21 +310,28 @@ export default function ItemForm({
                   name="price"
                   value={formData.price}
                   onChange={handleChange}
-                  placeholder="299.99"
-                  className={`w-full rounded-xl border px-4 py-2.5 outline-none transition focus:border-slate-400 ${
-                    errors.price ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200'
+                  placeholder=" "
+                  className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                    errors.price 
+                      ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                      : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
                   }`}
                 />
-                {errors.price && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.price}</p>}
+                <label htmlFor="form-selling-price-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                  Selling Price ($) <span className="text-rose-500 font-extrabold">*</span>
+                </label>
+                {errors.price && (
+                  <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                    <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                    <span>{errors.price}</span>
+                  </div>
+                )}
               </div>
             </div>
 
             {/* Row 4: Quantity & Threshold Alert */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  Stock Quantity *
-                </label>
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+              <div className="relative w-full">
                 <input
                   id="form-quantity-input"
                   type="number"
@@ -307,18 +339,25 @@ export default function ItemForm({
                   name="quantity"
                   value={formData.quantity}
                   onChange={handleChange}
-                  placeholder="50"
-                  className={`w-full rounded-xl border px-4 py-2.5 outline-none transition focus:border-slate-400 ${
-                    errors.quantity ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200'
+                  placeholder=" "
+                  className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                    errors.quantity 
+                      ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                      : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
                   }`}
                 />
-                {errors.quantity && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.quantity}</p>}
+                <label htmlFor="form-quantity-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                  Stock Quantity <span className="text-rose-500 font-extrabold">*</span>
+                </label>
+                {errors.quantity && (
+                  <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                    <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                    <span>{errors.quantity}</span>
+                  </div>
+                )}
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  Min Threshold Alert Level *
-                </label>
+              <div className="relative w-full">
                 <input
                   id="form-min-quantity-input"
                   type="number"
@@ -326,81 +365,98 @@ export default function ItemForm({
                   name="minQuantity"
                   value={formData.minQuantity}
                   onChange={handleChange}
-                  placeholder="10"
-                  className={`w-full rounded-xl border px-4 py-2.5 outline-none transition focus:border-slate-400 ${
-                    errors.minQuantity ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200'
+                  placeholder=" "
+                  className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                    errors.minQuantity 
+                      ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                      : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
                   }`}
                 />
-                {errors.minQuantity && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.minQuantity}</p>}
+                <label htmlFor="form-min-quantity-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                  Min Threshold Alert Level <span className="text-rose-500 font-extrabold">*</span>
+                </label>
+                {errors.minQuantity && (
+                  <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                    <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                    <span>{errors.minQuantity}</span>
+                  </div>
+                )}
               </div>
             </div>
 
             {/* Row 4: Warehouse Location */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                Storage Location / Zone
-              </label>
+            <div className="relative w-full">
               <input
                 id="form-location-input"
                 type="text"
                 name="location"
                 value={formData.location}
                 onChange={handleChange}
-                placeholder="e.g. Warehouse A - Shelf 4"
-                className="w-full rounded-xl border border-slate-200 px-4 py-2.5 outline-none transition focus:border-slate-400"
+                placeholder=" "
+                className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-605 focus:border-indigo-600 h-[52px]"
               />
+              <label htmlFor="form-location-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                Storage Location / Zone
+              </label>
             </div>
 
             {/* Row 5: Supplier Info */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  Supplier Name
-                </label>
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+              <div className="relative w-full">
                 <input
                   id="form-supplier-name-input"
                   type="text"
                   name="supplierName"
                   value={formData.supplierName}
                   onChange={handleChange}
-                  placeholder="e.g. Global Tech Distributors"
-                  className="w-full rounded-xl border border-slate-200 px-4 py-2.5 outline-none transition focus:border-slate-400"
+                  placeholder=" "
+                  className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-605 focus:border-indigo-600 h-[52px]"
                 />
+                <label htmlFor="form-supplier-name-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                  Supplier Name
+                </label>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                  Supplier Contact Email
-                </label>
+              <div className="relative w-full">
                 <input
                   id="form-supplier-email-input"
                   type="text"
                   name="supplierEmail"
                   value={formData.supplierEmail}
                   onChange={handleChange}
-                  placeholder="orders@globaltech.com"
-                  className={`w-full rounded-xl border px-4 py-2.5 outline-none transition focus:border-slate-400 ${
-                    errors.supplierEmail ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200'
+                  placeholder=" "
+                  className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                    errors.supplierEmail 
+                      ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450' 
+                      : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
                   }`}
                 />
-                {errors.supplierEmail && <p className="mt-1.5 text-xs text-rose-500 flex items-center gap-1"><AlertTriangle className="h-3 w-3" />{errors.supplierEmail}</p>}
+                <label htmlFor="form-supplier-email-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                  Supplier Contact Email
+                </label>
+                {errors.supplierEmail && (
+                  <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                    <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                    <span>{errors.supplierEmail}</span>
+                  </div>
+                )}
               </div>
             </div>
 
             {/* Row 6: Description */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                Item Description
-              </label>
+            <div className="relative w-full">
               <textarea
                 id="form-description-textarea"
                 name="description"
                 rows={3}
                 value={formData.description}
                 onChange={handleChange}
-                placeholder="Provide physical traits, specifications, or accessory details..."
-                className="w-full rounded-xl border border-slate-200 px-4 py-2.5 outline-none transition focus:border-slate-400 resize-none"
+                placeholder=" "
+                className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-605 focus:border-indigo-600 resize-none min-h-[80px]"
               />
+              <label htmlFor="form-description-textarea" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                Item Description
+              </label>
             </div>
 
             {/* Buttons */}
@@ -409,14 +465,14 @@ export default function ItemForm({
                 id="form-cancel-button"
                 type="button"
                 onClick={onClose}
-                className="rounded-xl border border-slate-250 bg-white px-5 py-2.5 font-semibold text-slate-500 hover:bg-slate-50 transition"
+                className="rounded-xl border border-slate-250 bg-white px-5 py-2.5 font-semibold text-slate-500 hover:bg-slate-50 transition text-xs"
               >
                 Cancel
               </button>
               <button
                 id="form-save-button"
                 type="submit"
-                className="flex items-center gap-2 rounded-xl bg-slate-900 px-6 py-2.5 font-semibold text-white hover:bg-slate-800 transition shadow-sm hover:shadow-md"
+                className="flex items-center gap-2 rounded-xl bg-slate-900 px-6 py-2.5 font-semibold text-white hover:bg-slate-800 transition shadow-sm hover:shadow-md text-xs"
               >
                 <Save className="h-4 w-4" />
                 {itemToEdit ? 'Save Changes' : 'Catalog Item'}

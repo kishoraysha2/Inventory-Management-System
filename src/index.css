@@ -30,3 +30,31 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
 }
+
+/* Mobile-First Touch Target & Spacing Polish */
+@media (max-width: 640px) {
+  /* Standardize touch target comfort for inputs, select, and buttons style on phones */
+  input[type="text"], 
+  input[type="number"], 
+  input[type="password"], 
+  input[type="email"], 
+  input[type="date"],
+  select, 
+  textarea,
+  button:not(.compact-btn) {
+    min-height: 44px;
+    font-size: 14px !important; /* Prevents iOS auto-zoom on lower font sizes */
+  }
+
+  /* Improve default interactive elements margins */
+  .grid {
+    gap: 1rem !important; /* Slightly tighter spacing for denser layout representation on phones */
+  }
+
+  /* Custom overflow scrolling clues shadow indicators */
+  .overflow-x-auto {
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+}
+
