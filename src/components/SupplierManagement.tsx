@@ -774,7 +774,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       {/* CREATE / EDIT DIALOG FORM MODAL */}
       <AnimatePresence>
         {isFormOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs font-sans">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm font-sans">
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -991,7 +991,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       {/* DELETE CONFIRMATION DIALOG MODAL */}
       <AnimatePresence>
         {supplierToDelete && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs font-sans">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm font-sans">
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}

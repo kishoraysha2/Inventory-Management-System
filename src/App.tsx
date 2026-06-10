@@ -2109,7 +2109,7 @@ export default function App() {
       {/* INVENTORY ADJUSTMENT MODAL */}
       <AnimatePresence>
         {adjustmentProduct && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm">
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -2236,7 +2236,7 @@ export default function App() {
               animate={{ opacity: 0.5 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsMobileMenuOpen(false)}
-              className="md:hidden fixed inset-0 bg-slate-950/60 backdrop-blur-xs z-50 cursor-pointer"
+              className="md:hidden fixed inset-0 bg-slate-950/40 backdrop-blur-sm z-50 cursor-pointer"
             />
 
             {/* Side Drawer Panel */}

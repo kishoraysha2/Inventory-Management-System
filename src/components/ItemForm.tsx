@@ -154,7 +154,7 @@ export default function ItemForm({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           onClick={onClose}
-          className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs"
+          className="fixed inset-0 bg-slate-950/40 backdrop-blur-sm"
         />
 
         {/* Modal content */}

@@ -521,6 +521,78 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
       </div>
 
       {/* --- CASH & CAPITAL ACCOUNTING LIQUIDITY DESK --- */}
+      {loading ? (
+        <div className="space-y-6 sm:space-y-8 animate-pulse">
+          {/* Liquidity Desk Skeleton */}
+          <div className="bg-[#0F1626]/60 rounded-2xl sm:rounded-[2rem] border border-[#1E2A44] p-4 sm:p-6 md:p-8 flex flex-col xl:flex-row justify-between items-stretch gap-6 w-full">
+            <div className="space-y-4 w-full xl:w-1/4 flex flex-col justify-between">
+              <div className="space-y-2">
+                <div className="h-4 bg-[#1E2A44] rounded-lg w-1/2"></div>
+                <div className="h-3 bg-[#1E2A44] rounded-lg w-full"></div>
+                <div className="h-3 bg-[#1E2A44] rounded-lg w-5/6"></div>
+              </div>
+              <div className="h-8 bg-[#1E2A44] rounded-xl w-3/4 mt-4"></div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6 xl:gap-8 w-full xl:w-3/4">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="bg-[#121B2F]/60 border border-[#1E2A44]/40 h-32 rounded-xl p-4 flex flex-col justify-between">
+                  <div className="h-3 bg-[#1E2A44] rounded w-1/3"></div>
+                  <div className="h-6 bg-[#1E2A44] rounded w-2/3"></div>
+                  <div className="h-2.5 bg-[#1E2A44] rounded w-1/2"></div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Grid of cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            {[1, 2, 3, 4].map((i) => (
+              <div key={i} className="bg-[#0F1626]/50 border border-[#1E2A44] rounded-2xl p-5 h-36 flex flex-col justify-between">
+                <div className="flex justify-between items-center">
+                  <div className="h-3 bg-[#1E2A44] rounded w-1/2"></div>
+                  <div className="w-8 h-8 rounded-lg bg-[#1E2A44]"></div>
+                </div>
+                <div className="space-y-2">
+                  <div className="h-6 bg-[#1E2A44] rounded w-3/4"></div>
+                  <div className="h-2.5 bg-[#1E2A44] rounded w-1/3"></div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Graph + ledger skeleton */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="bg-[#0F1626]/50 border border-[#1E2A44] rounded-3xl p-6 h-96 lg:col-span-2 flex flex-col justify-between">
+              <div className="flex justify-between items-center mb-4">
+                <div className="h-4 bg-[#1E2A44] rounded w-1/4"></div>
+                <div className="h-3 bg-[#1E2A44] rounded w-1/6"></div>
+              </div>
+              <div className="flex-1 bg-[#121B2F]/40 border border-[#1e2a44]/30 rounded-2xl w-full flex items-end p-4 gap-2 h-48">
+                {[40, 60, 50, 80, 70, 95, 85].map((h, b) => (
+                  <div key={b} className="flex-1 bg-[#1E2A44]/60 rounded-t" style={{ height: `${h}%` }}></div>
+                ))}
+              </div>
+              <div className="h-3 bg-[#1E2A44] rounded w-1/3 mt-4"></div>
+            </div>
+            <div className="bg-[#0F1626]/50 border border-[#1E2A44] rounded-3xl p-6 h-96 flex flex-col justify-between">
+              <div className="h-4 bg-[#1E2A44] rounded w-1/2 mb-4"></div>
+              <div className="flex-1 space-y-3">
+                {[1, 2, 3, 4, 5].map((item) => (
+                  <div key={item} className="flex items-center justify-between border-b border-[#1E2A44]/30 pb-2">
+                    <div className="space-y-1.5 flex-1">
+                      <div className="h-3 bg-[#1E2A44] rounded w-2/3"></div>
+                      <div className="h-2 bg-[#1E2A44] rounded w-1/3"></div>
+                    </div>
+                    <div className="h-4 bg-[#1E2A44] rounded w-1/6"></div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+      {/* --- CASH & CAPITAL ACCOUNTING LIQUIDITY DESK --- */}
       <div id="liquidity-desk-widget" className="bg-gradient-to-r from-[#0F1626]/90 to-[#121B2F]/90 rounded-2xl sm:rounded-[2rem] border border-[#1E2A44] p-4 sm:p-6 md:p-8 shadow-2xl flex flex-col xl:flex-row justify-between items-stretch gap-6 w-full max-w-full overflow-hidden">
         <div className="space-y-4 flex flex-col justify-between w-full xl:w-1/4">
           <div className="space-y-2">
@@ -1259,11 +1331,13 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
         </div>
 
       </div>
+      </>
+      )}
 
       {/* --- BUSINESS CAPITAL RESERVES & INVESTMENT BOARD MODAL --- */}
       <AnimatePresence>
         {isCapitalModalOpen && (
-          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="fixed inset-0 bg-slate-950/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
             <motion.div 
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}

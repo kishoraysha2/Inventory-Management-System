@@ -1251,7 +1251,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
       {/* RECORD PAYMENT MODAL DIALOG */}
       <AnimatePresence>
         {isFormOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm">
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -1439,7 +1439,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
 
       <AnimatePresence>
         {voidConfirmationPayment && (
-          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm">
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}

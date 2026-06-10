@@ -447,7 +447,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
   };
 
   return (
-    <div id="invoice-modal-global-container" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto print:bg-white print:p-0">
+    <div id="invoice-modal-global-container" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm overflow-y-auto print:bg-white print:p-0">
       
       {/* 
         Tailwind Custom styles for professional A4 web layout rendering 

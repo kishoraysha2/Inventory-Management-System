@@ -27,6 +27,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(true);
   
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingPurchase, setEditingPurchase] = useState<Purchase | null>(null);
@@ -62,8 +63,11 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       const savedProducts = localStorage.getItem('inventory_products');
       setProducts(savedProducts ? JSON.parse(savedProducts) : []);
 
+      setLoading(false);
       return;
     }
+
+    setLoading(true);
 
     // 1. Sync Purchases
     const unsubPurchases = onSnapshot(collection(db, 'purchases'), (snapshot) => {
@@ -73,12 +77,14 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       });
       const sorted = purchaseList.sort((a, b) => new Date(b.purchaseDate).getTime() - new Date(a.purchaseDate).getTime());
       setPurchases(sorted);
+      setLoading(false);
     }, (error) => {
       try {
         handleFirestoreError(error, OperationType.LIST, 'purchases');
       } catch (err: any) {
         setFeedback({ message: `Purchases read error: ${err.message}`, type: 'error' });
       }
+      setLoading(false);
     });
 
     // 2. Sync Suppliers
@@ -680,13 +686,21 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Gross Procurement Budget</span>
               <DollarSign className="h-4 w-4 text-indigo-505 text-indigo-600" />
             </div>
-            <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-              ${totalPurchasesVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </p>
+            {loading ? (
+              <div className="h-9 w-28 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
+            ) : (
+              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
+                ${totalPurchasesVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </p>
+            )}
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center justify-between">
             <span className="font-medium">Direct expense outlays</span>
-            <span className="text-indigo-600 font-bold">{purchases.length} supplier orders completed</span>
+            {loading ? (
+              <div className="h-4 w-12 bg-slate-100 rounded animate-pulse"></div>
+            ) : (
+              <span className="text-indigo-600 font-bold">{purchases.length} supplier orders completed</span>
+            )}
           </div>
         </div>
 
@@ -697,13 +711,21 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Total Units Procured</span>
               <Box className="h-4 w-4 text-emerald-500" />
             </div>
-            <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-              {totalUnitsProcured.toLocaleString()} Units
-            </p>
+            {loading ? (
+              <div className="h-9 w-20 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
+            ) : (
+              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
+                {totalUnitsProcured.toLocaleString()} Units
+              </p>
+            )}
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center justify-between">
             <span>Seeded warehouse inputs</span>
-            <span className="text-emerald-600 font-semibold font-mono">+{totalUnitsProcured > 0 ? Math.round((filteredPurchases.reduce((sum, p) => sum + p.quantity, 0) / totalUnitsProcured) * 100) : 0}% active view</span>
+            {loading ? (
+              <div className="h-4 w-16 bg-slate-100 rounded animate-pulse"></div>
+            ) : (
+              <span className="text-emerald-600 font-semibold font-mono">+{totalUnitsProcured > 0 ? Math.round((filteredPurchases.reduce((sum, p) => sum + p.quantity, 0) / totalUnitsProcured) * 100) : 0}% active view</span>
+            )}
           </div>
         </div>
 
@@ -714,15 +736,23 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Outstanding Account Payables</span>
               <Truck className="h-4 w-4 text-amber-500" />
             </div>
-            <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-              ${totalCreditDueOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </p>
+            {loading ? (
+              <div className="h-9 w-24 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
+            ) : (
+              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
+                ${totalCreditDueOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </p>
+            )}
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center justify-between">
             <span>Supplier ledger debits</span>
-            <span className="text-amber-500 font-extrabold font-mono">
-              {suppliers.filter(s => (s.dueBalance ?? 0) > 0).length} Outstanding Bills
-            </span>
+            {loading ? (
+              <div className="h-4 w-16 bg-slate-100 rounded animate-pulse"></div>
+            ) : (
+              <span className="text-amber-500 font-extrabold font-mono">
+                {suppliers.filter(s => (s.dueBalance ?? 0) > 0).length} Outstanding Bills
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -787,7 +817,27 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
         </div>
 
         <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-xs bg-white">
-          {filteredPurchases.length === 0 ? (
+          {loading ? (
+            <div className="space-y-4 p-5 animate-pulse">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <div key={n} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-100 pb-4 last:border-0 last:pb-0">
+                  <div className="space-y-2 flex-grow">
+                    <div className="h-4 bg-slate-100 rounded-md w-1/3"></div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-1">
+                      <div className="h-3.5 bg-[#f1f5f9] rounded-md w-1/2"></div>
+                      <div className="h-3.5 bg-[#f1f5f9] rounded-md w-2/3"></div>
+                      <div className="h-3.5 bg-[#f1f5f9] rounded-md w-1/2"></div>
+                      <div className="h-3.5 bg-[#f1f5f9] rounded-md w-1/3"></div>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between sm:justify-end gap-6 shrink-0 pt-3 sm:pt-0 border-t sm:border-t-0 border-slate-100 w-full sm:w-auto opacity-40">
+                    <div className="h-5 bg-slate-100 rounded-md w-20"></div>
+                    <div className="w-8 h-8 bg-slate-50 rounded-lg"></div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : filteredPurchases.length === 0 ? (
             <motion.div 
               initial={{ opacity: 0, y: 12 }} 
               animate={{ opacity: 1, y: 0 }} 
@@ -932,7 +982,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsFormOpen(false)}
-              className="fixed inset-0 bg-slate-950/40 backdrop-blur-xs"
+              className="fixed inset-0 bg-slate-950/40 backdrop-blur-sm"
             />
 
             <div className="flex min-h-full items-center justify-center p-4">
@@ -1183,7 +1233,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
 
       <AnimatePresence>
         {voidConfirmationPurchase && (
-          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm">
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
