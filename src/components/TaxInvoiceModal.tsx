@@ -17,6 +17,8 @@ import {
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { Sale, Customer, Product } from '../types';
+import { db, auth } from '../lib/firebase';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 interface TaxInvoiceModalProps {
   sale: Sale;
@@ -35,6 +37,10 @@ interface CompanyProfile {
   website: string;
   taxRegistrationId: string;
   taxRatePercent: number;
+  tradeName?: string;
+  ownerName?: string;
+  crNumber?: string;
+  logo?: string;
 }
 
 const DEFAULT_COMPANY_PROFILE: CompanyProfile = {
@@ -44,11 +50,15 @@ const DEFAULT_COMPANY_PROFILE: CompanyProfile = {
   email: "billing@apexsupply.com",
   website: "www.apexsupply.com",
   taxRegistrationId: "VAT-US948301140B",
-  taxRatePercent: 15
+  taxRatePercent: 15,
+  tradeName: "Apex Global Supply",
+  ownerName: "Apex Global LLC",
+  crNumber: "CR-1010349283",
+  logo: ""
 };
 
 export default function TaxInvoiceModal({ sale, customers, products, sales, customerPayments, onClose }: TaxInvoiceModalProps) {
-  // --- State Configuration with LocalStorage Persistence ---
+  // --- State Configuration with LocalStorage Fallback and Firestore Sync ---
   const [company, setCompany] = useState<CompanyProfile>(() => {
     const saved = localStorage.getItem('invoice_company_profile');
     if (saved) {
@@ -60,6 +70,72 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
     }
     return DEFAULT_COMPANY_PROFILE;
   });
+
+  const [isSavingCompany, setIsSavingCompany] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
+
+  // Load Business Profile from Firestore
+  useEffect(() => {
+    const fetchCompanyProfile = async () => {
+      try {
+        if (!auth.currentUser) return;
+        const snapshot = await getDoc(doc(db, 'businessProfile', 'config'));
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          setCompany({
+            name: data.name || DEFAULT_COMPANY_PROFILE.name,
+            address: data.address || DEFAULT_COMPANY_PROFILE.address,
+            phone: data.phone || DEFAULT_COMPANY_PROFILE.phone,
+            email: data.email || DEFAULT_COMPANY_PROFILE.email,
+            website: data.website || DEFAULT_COMPANY_PROFILE.website,
+            taxRegistrationId: data.taxRegistrationId || DEFAULT_COMPANY_PROFILE.taxRegistrationId,
+            taxRatePercent: typeof data.taxRatePercent === 'number' ? data.taxRatePercent : DEFAULT_COMPANY_PROFILE.taxRatePercent,
+            tradeName: data.tradeName || '',
+            ownerName: data.ownerName || '',
+            crNumber: data.crNumber || '',
+            logo: data.logo || ''
+          });
+        }
+      } catch (err) {
+        console.error("Failed to fetch Firestore company profile:", err);
+      }
+    };
+    fetchCompanyProfile();
+  }, []);
+
+  // Save Company Profile to Firestore permanent config document
+  const handleSaveCompanyProfile = async () => {
+    setIsSavingCompany(true);
+    setSaveStatus('idle');
+    try {
+      const cleanProfile = {
+        name: company.name.trim(),
+        tradeName: company.tradeName ? company.tradeName.trim() : '',
+        ownerName: company.ownerName ? company.ownerName.trim() : '',
+        taxRegistrationId: company.taxRegistrationId.trim(),
+        crNumber: company.crNumber ? company.crNumber.trim() : '',
+        address: company.address.trim(),
+        phone: company.phone.trim(),
+        email: company.email ? company.email.trim() : '',
+        website: company.website ? company.website.trim() : '',
+        logo: company.logo ? company.logo.trim() : '',
+        taxRatePercent: Number(company.taxRatePercent) || 0
+      };
+
+      if (auth.currentUser) {
+        await setDoc(doc(db, 'businessProfile', 'config'), cleanProfile);
+      }
+      localStorage.setItem('invoice_company_profile', JSON.stringify(cleanProfile));
+      setSaveStatus('success');
+      setTimeout(() => setSaveStatus('idle'), 3000);
+    } catch (err: any) {
+      console.error("Save company profile error:", err);
+      setSaveStatus('error');
+      setTimeout(() => setSaveStatus('idle'), 5000);
+    } finally {
+      setIsSavingCompany(false);
+    }
+  };
 
   // Calculate payment status, summary, and history track
   const paymentInfo = React.useMemo(() => {
@@ -561,62 +637,113 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
               <div>
                 <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1">
                   <Building2 className="h-3.5 w-3.5" />
-                  Issuer Company Credentials
+                  Issuer Business Profile
                 </h4>
                 <p className="text-[10px] text-slate-400 leading-normal">
-                  Update your tax profiles, entity name, phone numbers or address labels. All updates persist in local cache.
+                  Configure corporate parameters, VAT registration numbers, trade certificates, and logos. Saves directly to Cloud Firestore.
                 </p>
               </div>
 
               {/* Company Inputs Form */}
               <div className="space-y-4">
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Entity Legal Name</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Business Name *</label>
                   <input
                     type="text"
+                    required
                     value={company.name}
                     onChange={(e) => setCompany({ ...company, name: e.target.value })}
                     className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
-                    placeholder="Company Name"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Registration / Tax ID</label>
-                  <input
-                    type="text"
-                    value={company.taxRegistrationId}
-                    onChange={(e) => setCompany({ ...company, taxRegistrationId: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
-                    placeholder="Tax Registration ID"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Corporate Address</label>
-                  <textarea
-                    rows={2}
-                    value={company.address}
-                    onChange={(e) => setCompany({ ...company, address: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-medium focus:border-indigo-500 focus:outline-none"
+                    placeholder="Legal Entity Name"
                   />
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
                   <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Phone No</label>
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Trade Name</label>
                     <input
                       type="text"
+                      value={company.tradeName || ''}
+                      onChange={(e) => setCompany({ ...company, tradeName: e.target.value })}
+                      className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
+                      placeholder="e.g. Apex Trade"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Owner Name</label>
+                    <input
+                      type="text"
+                      value={company.ownerName || ''}
+                      onChange={(e) => setCompany({ ...company, ownerName: e.target.value })}
+                      className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
+                      placeholder="e.g. John Doe"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">VAT Number *</label>
+                    <input
+                      type="text"
+                      required
+                      value={company.taxRegistrationId}
+                      onChange={(e) => setCompany({ ...company, taxRegistrationId: e.target.value })}
+                      className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
+                      placeholder="Tax Registration ID"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">CR Number</label>
+                    <input
+                      type="text"
+                      value={company.crNumber || ''}
+                      onChange={(e) => setCompany({ ...company, crNumber: e.target.value })}
+                      className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
+                      placeholder="Commercial Registration"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Corporate Address *</label>
+                  <textarea
+                    rows={2}
+                    required
+                    value={company.address}
+                    onChange={(e) => setCompany({ ...company, address: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-medium focus:border-indigo-500 focus:outline-none"
+                    placeholder="Physical HQ Address"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block block font-bold">Logo URL (Optional)</label>
+                  <input
+                    type="text"
+                    value={company.logo || ''}
+                    onChange={(e) => setCompany({ ...company, logo: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-medium focus:border-indigo-500 focus:outline-none"
+                    placeholder="https://example.com/logo.png"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Phone No *</label>
+                    <input
+                      type="text"
+                      required
                       value={company.phone}
                       onChange={(e) => setCompany({ ...company, phone: e.target.value })}
                       className="w-full rounded-lg border border-slate-200 py-2 px-2 text-xs font-medium focus:border-indigo-500 focus:outline-none"
                     />
                   </div>
                   <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Email Address</label>
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Email Address</label>
                     <input
                       type="text"
-                      value={company.email}
+                      value={company.email || ''}
                       onChange={(e) => setCompany({ ...company, email: e.target.value })}
                       className="w-full rounded-lg border border-slate-200 py-2 px-2 text-xs font-medium focus:border-indigo-500 focus:outline-none"
                     />
@@ -625,10 +752,10 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
                 <div className="grid grid-cols-2 gap-2">
                   <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Website URL</label>
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Website URL</label>
                     <input
                       type="text"
-                      value={company.website}
+                      value={company.website || ''}
                       onChange={(e) => setCompany({ ...company, website: e.target.value })}
                       className="w-full rounded-lg border border-slate-200 py-2 px-2 text-xs font-medium focus:border-indigo-500 focus:outline-none"
                     />
@@ -636,7 +763,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
                   {/* Customizable VAT Tax rate percentage */}
                   <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block block mb-0.5">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block block mb-0.5 font-bold">
                       Tax / VAT Rate (%)
                     </label>
                     <div className="relative">
@@ -651,6 +778,30 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                       />
                     </div>
                   </div>
+                </div>
+
+                {/* Cloud Saving Action Trigger */}
+                <div className="pt-2">
+                  {saveStatus === 'success' && (
+                    <div className="rounded-lg bg-emerald-50 border border-emerald-250/50 p-2 text-[10px] font-bold text-emerald-700 animate-slide-up flex items-center gap-1.5 mb-2">
+                      <Check className="h-3.5 w-3.5 shrink-0 text-emerald-650" />
+                      <span>Saved permanently to Firestore</span>
+                    </div>
+                  )}
+                  {saveStatus === 'error' && (
+                    <div className="rounded-lg bg-rose-50 border border-rose-150 p-2 text-[10px] font-bold text-rose-700 animate-slide-up mb-2">
+                      Error saving profile to Cloud DB.
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleSaveCompanyProfile}
+                    disabled={isSavingCompany}
+                    className="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-xs font-bold text-white py-2.5 transition shadow-2xs hover:shadow-md cursor-pointer disabled:opacity-60"
+                  >
+                    {isSavingCompany ? 'Saving Cloud...' : 'Save Company Profile'}
+                  </button>
                 </div>
 
                 <div className="w-full h-[1px] bg-slate-200 my-2"></div>
@@ -698,13 +849,31 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                 <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-6 pb-6 border-b border-slate-100 sm:border-slate-200">
                   
                   {/* Company metadata profile block (left side) */}
-                  <div className="space-y-2 max-w-lg">
+                  <div className="space-y-2.5 max-w-lg text-xs">
+                    {company.logo && (
+                      <div className="mb-2 max-h-12 flex items-center">
+                        <img src={company.logo} alt="Company Logo" referrerPolicy="no-referrer" className="max-h-12 max-w-[150px] object-contain" />
+                      </div>
+                    )}
+                    
                     <div className="flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-indigo-600 animate-pulse"></span>
-                      <h1 className="text-xl font-extrabold text-slate-900 uppercase tracking-tight">{company.name}</h1>
+                      <h1 className="text-lg font-extrabold text-slate-900 uppercase tracking-tight">{company.name}</h1>
                     </div>
-                    
-                    <div className="space-y-1 text-xs text-slate-500 leading-relaxed">
+
+                    {company.tradeName && (
+                      <p className="text-slate-700 font-semibold text-xs leading-none">
+                        Trade: <span className="font-bold">{company.tradeName}</span>
+                      </p>
+                    )}
+
+                    {company.crNumber && (
+                      <p className="text-slate-505 text-slate-500 text-[11px] leading-none font-mono">
+                        CR Number: <span className="font-bold">{company.crNumber}</span>
+                      </p>
+                    )}
+
+                    <div className="space-y-1 text-slate-500 leading-relaxed pt-0.5">
                       <p className="font-medium text-slate-600 flex items-center gap-1.5">
                         <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
                         <span>{company.address}</span>
@@ -715,15 +884,25 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                           <Phone className="h-3 w-3" />
                           <span className="text-slate-500">{company.phone}</span>
                         </span>
-                        <span>•</span>
-                        <span className="flex items-center gap-1">
-                          <Mail className="h-3 w-3" />
-                          <span className="text-slate-500">{company.email}</span>
-                        </span>
+                        {company.email && (
+                          <>
+                            <span>•</span>
+                            <span className="flex items-center gap-1">
+                              <Mail className="h-3 w-3" />
+                              <span className="text-slate-500">{company.email}</span>
+                            </span>
+                          </>
+                        )}
+                        {company.website && (
+                          <>
+                            <span>•</span>
+                            <span className="text-slate-500 font-mono tracking-tight">{company.website}</span>
+                          </>
+                        )}
                       </div>
                       
-                      <p className="text-[11px] font-bold text-indigo-650 text-indigo-600 pt-0.5 mt-0.5">
-                        Issuer Registration Code / Tax ID: <span className="font-mono text-slate-705">{company.taxRegistrationId}</span>
+                      <p className="text-[11px] font-bold text-indigo-600 pt-0.5 mt-0.5">
+                        VAT Number: <span className="font-mono text-slate-700 bg-slate-50 border border-slate-100 px-1.5 py-0.5 rounded">{company.taxRegistrationId}</span>
                       </p>
                     </div>
                   </div>
@@ -762,49 +941,108 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
                 </div>
 
-                {/* BILLING RECIPIENT INFORMATION */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4">
+                {/* BILLING & SELLER SPECIFICATIONS - SIDE-BY-SIDE SPLIT LAYOUT */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4">
                   
-                  {/* Left segment - Recipient information card */}
-                  <div className="md:col-span-2 border border-slate-200/80 rounded-2xl bg-slate-50/50 p-5 space-y-2">
-                    <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block pb-1 border-b border-slate-200/40">
-                      BILL TO RECIPIENT
+                  {/* Left Column - Seller detail card */}
+                  <div className="border border-slate-200/80 rounded-2xl bg-slate-50/50 p-5 space-y-2">
+                    <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block pb-1 border-b border-slate-200/40 flex items-center gap-1">
+                      <Building2 className="nav-icon h-3 w-3 text-indigo-600 shrink-0" />
+                      <span>SELLER (ISSUER)</span>
                     </span>
                     
-                    <div className="space-y-1">
+                    <div className="space-y-1.5 text-xs text-slate-500 leading-relaxed">
+                      {company.logo && (
+                        <div className="mb-2 max-h-10 flex items-center">
+                          <img src={company.logo} alt="Company Logo" referrerPolicy="no-referrer" className="max-h-10 max-w-[120px] object-contain" />
+                        </div>
+                      )}
+                      
+                      <p className="text-sm font-bold text-slate-900 capitalize leading-none">{company.name}</p>
+                      
+                      {company.tradeName && (
+                        <p className="text-slate-600">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Trade Name:</span>
+                          <span className="font-semibold text-slate-700">{company.tradeName}</span>
+                        </p>
+                      )}
+
+                      {company.crNumber && (
+                        <p className="text-slate-605 text-slate-600 font-mono">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">CR Number:</span>
+                          <span className="font-semibold text-slate-700">{company.crNumber}</span>
+                        </p>
+                      )}
+
+                      <p className="text-slate-600">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">VAT Number:</span>
+                        <span className="font-mono font-bold text-slate-800">{company.taxRegistrationId}</span>
+                      </p>
+
+                      <p className="text-xs text-slate-500 leading-relaxed flex items-start gap-1.5 pt-0.5">
+                        <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0 mt-0.5" />
+                        <span>{company.address}</span>
+                      </p>
+
+                      <p className="text-slate-600">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Contact:</span>
+                        <span className="font-medium text-slate-707 text-slate-700">{company.phone}</span>
+                      </p>
+
+                      {company.email && (
+                        <p className="text-slate-600">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Email:</span>
+                          <span className="font-medium text-indigo-600 hover:text-indigo-700 shrink-0">{company.email}</span>
+                        </p>
+                      )}
+
+                      {company.website && (
+                        <p className="text-slate-600">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Website:</span>
+                          <span className="font-medium text-slate-700">{company.website}</span>
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Right segment - Customer detail card */}
+                  <div className="border border-slate-200/80 rounded-2xl bg-indigo-50/10 p-5 space-y-2">
+                    <span className="text-[10px] font-extrabold text-indigo-400 uppercase tracking-widest block pb-1 border-b border-indigo-100/30 flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0"></span>
+                      <span>CUSTOMER (BILL TO)</span>
+                    </span>
+                    
+                    <div className="space-y-1.5 text-xs">
                       <p className="text-sm font-bold text-slate-900 capitalize">{sale.customerName}</p>
                       
-                      <p className="text-xs text-slate-500 leading-relaxed flex items-start gap-1.5 pt-1">
+                      {matchedCustomer?.vatNumber && (
+                        <p className="text-slate-600">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">VAT Number:</span>
+                          <span className="font-mono font-bold text-slate-800">{matchedCustomer.vatNumber}</span>
+                        </p>
+                      )}
+
+                      <p className="text-xs text-slate-500 leading-relaxed flex items-start gap-1.5 pt-0.5">
                         <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0 mt-0.5" />
                         <span>{customerAddress}</span>
                       </p>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1.5 text-xs text-slate-500">
-                        <div className="flex items-center gap-1">
-                          <span className="font-semibold text-slate-400 uppercase text-[9px]">Contact:</span>
-                          <span className="text-slate-700">{customerPhone}</span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <span className="font-semibold text-slate-400 uppercase text-[9px]">Reg ID:</span>
-                          <span className="font-mono text-slate-700">{sale.customerId}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Right segment - Helper terms reference */}
-                  <div className="border border-slate-200/80 rounded-2xl p-5 space-y-3 flex flex-col justify-between">
-                    <div>
-                      <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block pb-1">
-                        INVOICE TERMS
-                      </span>
-                      <p className="text-[11px] text-slate-500 leading-normal">
-                        This is a formal tax invoice. Taxes are calculated in accordance with our regional billing policies based on live stock distribution.
+                      <p className="text-slate-600">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Contact:</span>
+                        <span className="font-medium text-slate-700">{customerPhone}</span>
                       </p>
-                    </div>
-                    <div className="text-[11px] text-slate-400 flex items-center gap-1">
-                      <Info className="h-3 w-3 text-indigo-505 text-indigo-500 shrink-0" />
-                      <span>Rate applied: {taxRatePercent}%</span>
+
+                      {matchedCustomer?.email && (
+                        <p className="text-slate-600">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Email:</span>
+                          <span className="font-medium text-slate-700">{matchedCustomer.email}</span>
+                        </p>
+                      )}
+
+                      <p className="text-slate-600">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Customer ID:</span>
+                        <span className="font-mono text-indigo-800 font-semibold">{sale.customerId}</span>
+                      </p>
                     </div>
                   </div>
 

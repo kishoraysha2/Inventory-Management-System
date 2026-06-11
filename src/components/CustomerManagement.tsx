@@ -43,7 +43,9 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
     address: '',
     customerType: 'Cash' as 'Cash' | 'Credit',
     dueBalance: '',
-    status: 'active' as 'active' | 'inactive'
+    status: 'active' as 'active' | 'inactive',
+    vatNumber: '',
+    email: ''
   });
   
   // --- Validation Errors State ---
@@ -163,7 +165,9 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
         address: customer.address,
         customerType: customer.customerType,
         dueBalance: customer.dueBalance.toString(),
-        status: customer.status || 'active'
+        status: customer.status || 'active',
+        vatNumber: customer.vatNumber || '',
+        email: customer.email || ''
       });
     } else {
       setEditingCustomer(null);
@@ -173,7 +177,9 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
         address: '',
         customerType: 'Cash',
         dueBalance: '0',
-        status: 'active'
+        status: 'active',
+        vatNumber: '',
+        email: ''
       });
     }
     setErrors({});
@@ -225,7 +231,9 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
       customerType: formData.customerType,
       dueBalance: dueBalanceValue,
       createdDate: editingCustomer ? editingCustomer.createdDate : timestamp,
-      status: formData.status
+      status: formData.status,
+      vatNumber: formData.vatNumber.trim() ? formData.vatNumber.trim() : undefined,
+      email: formData.email.trim() ? formData.email.trim() : undefined
     };
 
     try {
@@ -953,6 +961,39 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                       <span>{errors.address}</span>
                     </div>
                   )}
+                </div>
+
+                {/* Optional Customer info VAT and Email */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                  <div className="relative w-full animate-fade-in">
+                    <input
+                      type="text"
+                      id="form-customer-vat-field"
+                      disabled={isSaving}
+                      value={formData.vatNumber}
+                      onChange={(e) => setFormData({ ...formData, vatNumber: e.target.value })}
+                      placeholder=" "
+                      className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 focus:border-indigo-650 h-[52px]"
+                    />
+                    <label htmlFor="form-customer-vat-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      VAT Registration No. (Optional)
+                    </label>
+                  </div>
+
+                  <div className="relative w-full animate-fade-in">
+                    <input
+                      type="email"
+                      id="form-customer-email-field"
+                      disabled={isSaving}
+                      value={formData.email}
+                      onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                      placeholder=" "
+                      className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 focus:border-indigo-650 h-[52px]"
+                    />
+                    <label htmlFor="form-customer-email-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Email Address (Optional)
+                    </label>
+                  </div>
                 </div>
 
                 {/* Due Balance */}

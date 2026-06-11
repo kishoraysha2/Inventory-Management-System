@@ -79,9 +79,30 @@
         "customerType": { "type": "string", "enum": ["Cash", "Credit"] },
         "dueBalance": { "type": "number" },
         "createdDate": { "type": "string" },
-        "status": { "type": "string", "enum": ["active", "inactive"] }
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "vatNumber": { "type": "string" },
+        "email": { "type": "string" }
       },
       "required": ["id", "name", "phone", "address", "customerType", "dueBalance", "createdDate"]
+    },
+    "BusinessProfile": {
+      "title": "BusinessProfile",
+      "description": "Centralized corporate configurations and issuer tax settings.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "tradeName": { "type": "string" },
+        "ownerName": { "type": "string" },
+        "taxRegistrationId": { "type": "string" },
+        "crNumber": { "type": "string" },
+        "address": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "website": { "type": "string" },
+        "logo": { "type": "string" },
+        "taxRatePercent": { "type": "number" }
+      },
+      "required": ["name", "taxRegistrationId", "address", "phone"]
     },
     "Product": {
       "title": "Product",
@@ -270,6 +291,10 @@
     "capital": {
       "schema": "Capital",
       "description": "Store initial business capital investments."
+    },
+    "businessProfile": {
+      "schema": "BusinessProfile",
+      "description": "Store the centralized company tax and profile settings."
     }
   }
 }

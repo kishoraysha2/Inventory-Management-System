@@ -33,6 +33,8 @@ export interface Customer {
   customerCredit?: number;
   createdDate: string;
   status?: 'active' | 'inactive';
+  vatNumber?: string;
+  email?: string;
 }
 
 export interface Product {
@@ -50,6 +52,7 @@ export interface Product {
   supplierName?: string;
   supplierEmail?: string;
   description?: string;
+  initialStock?: number;
 }
 
 export interface Sale {

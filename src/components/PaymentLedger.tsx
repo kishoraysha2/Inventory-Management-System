@@ -52,6 +52,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
   const [isSaving, setIsSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [voidConfirmationPayment, setVoidConfirmationPayment] = useState<CustomerPayment | SupplierPayment | null>(null);
+  const [overpaymentConfirmData, setOverpaymentConfirmData] = useState<{ outstanding: number; amount: number; excess: number } | null>(null);
 
   // --- Void Payments securely via Transactions (instead of deletions) ---
   const voidTransaction = async (paymentId: string) => {
@@ -346,11 +347,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
       errs.amountPaid = 'Payment amount must be greater than zero';
     } else if (formData.personId) {
       if (activeSegment === 'customers') {
-        const cust = customers.find((c) => c.id === formData.personId);
-        const outstanding = cust?.dueBalance ?? 0;
-        if (payVal > outstanding) {
-          errs.amountPaid = `Cannot record payment of $${payVal.toFixed(2)} that exceeds outstanding customer due balance of $${outstanding.toFixed(2)}`;
-        }
+        // Customer overpayment is allowed, and stored as credit.
       } else {
         const supp = suppliers.find((s) => s.id === formData.personId);
         const outstanding = supp?.dueBalance ?? 0;
@@ -369,10 +366,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
   };
 
   // --- Form Submit Action ---
-  const handleSavePayment = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!validateForm()) return;
-
+  const proceedWithSavingPayment = async () => {
     setIsSaving(true);
     const amountVal = parseFloat(formData.amountPaid);
     const transDate = formData.paymentDate;
@@ -579,7 +573,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
         await logSystemActivity(
           "Supplier payment",
           `Recorded supplier layout of $${amountVal.toFixed(2)} to "${targetSupp.name}". Owed balance updated from $${prevDue.toFixed(2)} to $${remDue.toFixed(2)}.`
-        );
+         );
 
         setFeedback({
           message: `Successfully recorded supplier payment of $${amountVal.toFixed(2)} to "${targetSupp.name}"`,
@@ -598,6 +592,27 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const handleSavePayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validateForm()) return;
+
+    const amountVal = parseFloat(formData.amountPaid);
+    if (activeSegment === 'customers') {
+      const targetCust = customers.find((c) => c.id === formData.personId)!;
+      const outstanding = targetCust.dueBalance;
+      if (amountVal > outstanding) {
+        setOverpaymentConfirmData({
+          outstanding,
+          amount: amountVal,
+          excess: amountVal - outstanding
+        });
+        return;
+      }
+    }
+
+    await proceedWithSavingPayment();
   };
 
   // --- Computed Metrics ---
@@ -1485,6 +1500,69 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                   className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 transition cursor-pointer shadow-xs"
                 >
                   Yes, Void Settlement
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {overpaymentConfirmData && (
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-md rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-xl animate-in duration-200 fade-in zoom-in-95"
+            >
+              <div className="flex items-start gap-4">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
+                  <AlertTriangle className="h-5 w-5" />
+                </div>
+                <div className="space-y-2 w-full">
+                  <h3 className="font-sans text-sm font-bold tracking-tight text-slate-850">
+                    Overpayment Detected
+                  </h3>
+                  <p className="text-xs text-slate-550 leading-relaxed">
+                    The payment amount exceeds the customer's current outstanding due balance.
+                  </p>
+                  <div className="text-[11px] font-mono text-slate-650 bg-slate-50 p-3.5 rounded-xl border border-slate-100 space-y-1.5 w-full">
+                    <div className="flex justify-between">
+                      <span className="font-medium text-slate-400 uppercase tracking-wider text-[9px]">Outstanding Due:</span>
+                      <strong className="text-slate-800">${overpaymentConfirmData.outstanding.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                    </div>
+                    <div className="flex justify-between border-t border-slate-200/50 pt-1.5">
+                      <span className="font-medium text-slate-400 uppercase tracking-wider text-[9px]">Payment Received:</span>
+                      <strong className="text-indigo-600 font-extrabold">${overpaymentConfirmData.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                    </div>
+                    <div className="flex justify-between border-t border-slate-200/50 pt-1.5">
+                      <span className="font-medium text-slate-400 uppercase tracking-wider text-[9px]">Excess Amount:</span>
+                      <strong className="text-emerald-500 font-extrabold">${overpaymentConfirmData.excess.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-slate-500 italic mt-1.5 leading-normal">
+                    The excess amount of <span className="text-emerald-600 font-bold font-mono">${overpaymentConfirmData.excess.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span> will be stored as Customer Credit and automatically applied to future sales.
+                  </p>
+                </div>
+              </div>
+              <div className="mt-6 flex justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setOverpaymentConfirmData(null)}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setOverpaymentConfirmData(null);
+                    await proceedWithSavingPayment();
+                  }}
+                  className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 transition cursor-pointer shadow-xs"
+                >
+                  Confirm Payment
                 </button>
               </div>
             </motion.div>

@@ -280,7 +280,11 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
       currentStock: editingProduct ? editingProduct.currentStock : (parseInt(formData.currentStock) || 0),
       minimumStockAlert: parseInt(formData.minimumStockAlert),
       createdDate: timestamp,
-      status: (formData.status as 'active' | 'inactive') || 'active'
+      status: (formData.status as 'active' | 'inactive') || 'active',
+      ...(editingProduct 
+        ? (editingProduct.initialStock !== undefined ? { initialStock: editingProduct.initialStock } : {}) 
+        : { initialStock: parseInt(formData.currentStock) || 0 }
+      )
     };
 
     try {
@@ -780,7 +784,14 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
                               }`}
                             >
                               <td className="py-4 px-6 whitespace-nowrap">
-                                <div className="font-bold text-slate-900">{product.name}</div>
+                                <div className="flex items-center gap-2">
+                                  <span className="font-bold text-slate-900">{product.name}</span>
+                                  {product.initialStock !== undefined && product.initialStock > 0 && (
+                                    <span className="inline-flex items-center rounded bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[9px] font-extrabold uppercase tracking-wider text-emerald-700 shadow-3xs">
+                                      Opening Stock
+                                    </span>
+                                  )}
+                                </div>
                                 <div className="inline-flex items-center gap-1 text-[10px] text-slate-400 mt-0.5">
                                   <Tag className="h-3 w-3 shrink-0 text-slate-400" />
                                   <span>{product.category}</span>

@@ -87,7 +87,7 @@ service cloud.firestore {
     // Helper to validate complete Customer schema
     function isValidCustomer(data) {
       return data.keys().hasAll(['id', 'name', 'phone', 'address', 'customerType', 'dueBalance', 'createdDate'])
-          && (data.keys().size() == 7 || data.keys().size() == 8)
+          && (data.keys().size() >= 7 && data.keys().size() <= 10)
           && data.id is string && data.id.size() <= 128
           && data.name is string && data.name.size() > 0 && data.name.size() <= 200
           && data.phone is string && data.phone.size() > 0 && data.phone.size() <= 50
@@ -95,7 +95,9 @@ service cloud.firestore {
           && data.customerType is string && (data.customerType == 'Cash' || data.customerType == 'Credit')
           && (data.dueBalance is number || data.dueBalance is int)
           && data.createdDate is string
-          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'inactive')));
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'inactive')))
+          && (!data.keys().hasAny(['vatNumber']) || data.vatNumber is string)
+          && (!data.keys().hasAny(['email']) || data.email is string);
     }
 
     // Helper to validate complete Product schema
@@ -207,6 +209,22 @@ service cloud.firestore {
           && data.date is string
           && data.createdBy is string
           && (!data.keys().hasAny(['note']) || (data.note is string && data.note.size() <= 1000));
+    }
+
+    // Helper to validate complete BusinessProfile schema
+    function isValidBusinessProfile(data) {
+      return data.keys().hasAll(['name', 'taxRegistrationId', 'address', 'phone'])
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 200
+          && data.taxRegistrationId is string && data.taxRegistrationId.size() > 0 && data.taxRegistrationId.size() <= 100
+          && data.address is string && data.address.size() > 0 && data.address.size() <= 500
+          && data.phone is string && data.phone.size() > 0 && data.phone.size() <= 50
+          && (!data.keys().hasAny(['tradeName']) || (data.tradeName is string && data.tradeName.size() <= 200))
+          && (!data.keys().hasAny(['ownerName']) || (data.ownerName is string && data.ownerName.size() <= 200))
+          && (!data.keys().hasAny(['crNumber']) || (data.crNumber is string && data.crNumber.size() <= 100))
+          && (!data.keys().hasAny(['email']) || (data.email is string && data.email.size() <= 200))
+          && (!data.keys().hasAny(['website']) || (data.website is string && data.website.size() <= 200))
+          && (!data.keys().hasAny(['logo']) || (data.logo is string && data.logo.size() <= 1024))
+          && (!data.keys().hasAny(['taxRatePercent']) || (data.taxRatePercent is number || data.taxRatePercent is int));
     }
 
 
@@ -368,6 +386,14 @@ service cloud.firestore {
       allow read: if isSignedIn();
       allow create: if isSignedIn() && !hasRole('viewer') && isValidId(logId);
       allow update, delete: if false;
+    }
+
+    // Business Profile settings config
+    match /businessProfile/{docId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && (hasRole('admin') || hasRole('accountant') || hasRole('cashier'))
+                            && isValidId(docId) && isValidBusinessProfile(request.resource.data);
+      allow delete: if hasRole('admin');
     }
   }
 }

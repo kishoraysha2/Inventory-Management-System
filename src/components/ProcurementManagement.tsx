@@ -20,13 +20,15 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity, logFinancialAudit } from '../lib/firebase';
 import { collection, onSnapshot, doc, runTransaction, setDoc, deleteDoc } from 'firebase/firestore';
-import { Purchase, Supplier, Product } from '../types';
+import { Purchase, Supplier, Product, CashLedgerEntry, Capital } from '../types';
 
 export default function ProcurementManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- States ---
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [cashLedger, setCashLedger] = useState<CashLedgerEntry[]>([]);
+  const [capital, setCapital] = useState<Capital[]>([]);
   const [loading, setLoading] = useState(true);
   
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -62,6 +64,12 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
 
       const savedProducts = localStorage.getItem('inventory_products');
       setProducts(savedProducts ? JSON.parse(savedProducts) : []);
+
+      const savedLedger = localStorage.getItem('inventory_cash_ledger');
+      setCashLedger(savedLedger ? JSON.parse(savedLedger) : []);
+
+      const savedCapital = localStorage.getItem('inventory_capital');
+      setCapital(savedCapital ? JSON.parse(savedCapital) : []);
 
       setLoading(false);
       return;
@@ -109,10 +117,34 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       console.error('Error syncing products:', error);
     });
 
+    // 4. Sync Cash Ledger
+    const unsubCashLedger = onSnapshot(collection(db, 'cashLedger'), (snapshot) => {
+      const ledgerList: CashLedgerEntry[] = [];
+      snapshot.forEach((docSnap) => {
+        ledgerList.push(docSnap.data() as CashLedgerEntry);
+      });
+      setCashLedger(ledgerList);
+    }, (error) => {
+      console.error('Error syncing cash ledger in procurement modal:', error);
+    });
+
+    // 5. Sync Capital
+    const unsubCapital = onSnapshot(collection(db, 'capital'), (snapshot) => {
+      const capitalList: Capital[] = [];
+      snapshot.forEach((docSnap) => {
+        capitalList.push(docSnap.data() as Capital);
+      });
+      setCapital(capitalList);
+    }, (error) => {
+      console.error('Error syncing capital in procurement modal:', error);
+    });
+
     return () => {
       unsubPurchases();
       unsubSuppliers();
       unsubProducts();
+      unsubCashLedger();
+      unsubCapital();
     };
   }, []);
 
@@ -200,6 +232,33 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
     const numQty = parseInt(formData.quantity);
     const numPrice = parseFloat(formData.purchasePrice);
     const totalCalc = numQty * numPrice;
+
+    // --- Cash balance validation to prevent negative cash in hand ---
+    if (formData.paymentType === 'Cash') {
+      const startingCapital = capital.reduce((sum, entry) => sum + entry.amount, 0);
+      const totalInflow = cashLedger
+        .filter(entry => entry.type === 'inflow' && entry.status !== 'voided' && entry.status !== 'VOID')
+        .reduce((sum, entry) => sum + entry.amount, 0);
+      const totalOutflow = cashLedger
+        .filter(entry => entry.type === 'outflow' && entry.status !== 'voided' && entry.status !== 'VOID')
+        .reduce((sum, entry) => sum + entry.amount, 0);
+      const currentCashInHand = startingCapital + totalInflow - totalOutflow;
+
+      const rollbackAmount = (editingPurchase && editingPurchase.paymentType === 'Cash') ? editingPurchase.totalAmount : 0;
+      const effectiveCash = currentCashInHand + rollbackAmount;
+
+      if (totalCalc > effectiveCash) {
+        setFeedback({
+          message: `Insufficient Cash Balance (Available Cash: $${effectiveCash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}, Required Payment: $${totalCalc.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}). Available Cash is lower than the payment amount. Please add business capital or use Credit Purchase.`,
+          type: 'error'
+        });
+        setErrors(prev => ({
+          ...prev,
+          paymentType: `Insufficient cash balance. Available: $${effectiveCash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}, Required: $${totalCalc.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
+        }));
+        return;
+      }
+    }
     
     const purchaseId = editingPurchase ? editingPurchase.id : `purchase-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     
@@ -1144,7 +1203,14 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                           <button
                             key={method}
                             type="button"
-                            onClick={() => setFormData({ ...formData, paymentType: method })}
+                            onClick={() => {
+                              setFormData({ ...formData, paymentType: method });
+                              setErrors(prev => {
+                                const copy = { ...prev };
+                                delete copy.paymentType;
+                                return copy;
+                              });
+                            }}
                             className={`flex-1 text-center py-2 text-xs font-extrabold rounded-lg uppercase tracking-wider transition cursor-pointer ${
                               formData.paymentType === method 
                                 ? 'bg-white text-indigo-600 shadow-2xs border border-slate-200/40' 
@@ -1158,6 +1224,12 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                       <span className="absolute -top-2.5 left-3 px-1.5 bg-white text-[10px] font-extrabold text-slate-400 uppercase tracking-widest leading-none">
                         Supplier Terms <span className="text-rose-500 font-extrabold">*</span>
                       </span>
+                      {errors.paymentType && (
+                        <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                          <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                          <span>{errors.paymentType}</span>
+                        </div>
+                      )}
                     </div>
 
                     {/* Purchase date */}

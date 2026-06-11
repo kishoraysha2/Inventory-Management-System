@@ -385,7 +385,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
 
   // 4.1. Opening Stock Value Calculation
   // Calculates the sum of all inventory value created through the "Add Product (Opening Stock)" process.
-  // Using the formula: initialStock = p.currentStock - totalProcured + totalSold
+  // Using the formula: initialStock = p.currentStock - totalProcured + totalSold as fallback or p.initialStock directly.
   const openingStockValueCost = products
     .filter(p => p.status !== 'inactive')
     .reduce((sum, p) => {
@@ -395,7 +395,10 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
       const totalSold = (sales || [])
         .filter(sale => sale.productId === p.id && sale.status !== 'VOID' && sale.status !== 'voided')
         .reduce((s, sale) => s + (sale.quantity || 0), 0);
-      const openingQty = Math.max(0, p.currentStock - totalProcured + totalSold);
+      const openingQty =
+        p.initialStock !== undefined
+          ? p.initialStock
+          : Math.max(0, p.currentStock - totalProcured + totalSold);
       return sum + (openingQty * p.purchasePrice);
     }, 0);
 
@@ -408,7 +411,10 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
       const totalSold = (sales || [])
         .filter(sale => sale.productId === p.id && sale.status !== 'VOID' && sale.status !== 'voided')
         .reduce((s, sale) => s + (sale.quantity || 0), 0);
-      const openingQty = Math.max(0, p.currentStock - totalProcured + totalSold);
+      const openingQty =
+        p.initialStock !== undefined
+          ? p.initialStock
+          : Math.max(0, p.currentStock - totalProcured + totalSold);
       return sum + (openingQty * p.sellingPrice);
     }, 0);
 

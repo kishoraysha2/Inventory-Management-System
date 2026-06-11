@@ -1868,9 +1868,16 @@ export default function App() {
                             {/* Name & SKU & Storage location */}
                             <td className="p-4 max-w-[200px]">
                               <div>
-                                <p className="font-bold text-slate-800 text-xs truncate group-hover:text-slate-900 leading-tight">
-                                  {item.name}
-                                </p>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <p className="font-bold text-slate-800 text-xs truncate group-hover:text-slate-900 leading-tight">
+                                    {item.name}
+                                  </p>
+                                  {item.initialStock !== undefined && item.initialStock > 0 && (
+                                    <span className="inline-flex items-center rounded bg-emerald-50 border border-emerald-200 px-1 py-0.25 text-[8px] font-extrabold uppercase tracking-wider text-emerald-700 shadow-3xs">
+                                      Opening Stock
+                                    </span>
+                                  )}
+                                </div>
                                 <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
                                   <span className="font-mono text-[9px] text-slate-400 font-bold bg-slate-50 border border-slate-100 rounded px-1 tracking-wider uppercase">
                                     {item.sku}
@@ -2187,7 +2194,7 @@ export default function App() {
                   >
                     <option value="Physical Count Correction">üìã Physical Count Correction</option>
                     <option value="Damaged Stock">üí• Damaged Stock</option>
-                    <option value="Lost Stock">üîç Lost Stock</option>
+                    <option value="Lost Stock">Ì†ΩÌ¥ç Lost Stock</option>
                     <option value="Found Stock">üéÅ Found Stock</option>
                     <option value="Other">‚ùì Other</option>
                   </select>
