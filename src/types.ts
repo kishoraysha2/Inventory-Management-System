@@ -55,6 +55,17 @@ export interface Product {
   initialStock?: number;
 }
 
+export interface LineItem {
+  productId: string;
+  productName: string;
+  quantity: number;
+  unitPrice: number;
+  subtotal: number;
+  taxRatePercent?: number;
+  taxAmount?: number;
+  totalAmount: number;
+}
+
 export interface Sale {
   id: string;
   customerId: string;
@@ -75,6 +86,7 @@ export interface Sale {
   productSellingPriceAtSale?: number;
   costOfGoodsSold?: number;
   grossProfit?: number;
+  items?: LineItem[];
 }
 
 export interface Purchase {
@@ -88,6 +100,90 @@ export interface Purchase {
   totalAmount: number;
   paymentType: 'Cash' | 'Credit';
   purchaseDate: string;
+  items?: LineItem[];
+}
+
+export function calculateLineTotals(
+  quantity: number,
+  unitPrice: number,
+  taxRatePercent: number = 0
+): { subtotal: number; taxAmount: number; totalAmount: number } {
+  const subtotal = quantity * unitPrice;
+  const taxAmount = (subtotal * taxRatePercent) / 100;
+  const totalAmount = subtotal + taxAmount;
+  return { subtotal, taxAmount, totalAmount };
+}
+
+export function calculateTransactionTotals(items: LineItem[]): {
+  subtotal: number;
+  taxAmount: number;
+  totalAmount: number;
+} {
+  return items.reduce(
+    (acc, item) => {
+      acc.subtotal += item.subtotal;
+      acc.taxAmount += item.taxAmount ?? 0;
+      acc.totalAmount += item.totalAmount;
+      return acc;
+    },
+    { subtotal: 0, taxAmount: 0, totalAmount: 0 }
+  );
+}
+
+export function getNormalizedItems(transaction: any): LineItem[] {
+  if (transaction && Array.isArray(transaction.items) && transaction.items.length > 0) {
+    return transaction.items;
+  }
+  
+  if (!transaction) {
+    return [];
+  }
+
+  let unitPrice = 0;
+  if (transaction.unitPrice !== undefined) {
+    unitPrice = transaction.unitPrice;
+  } else if (transaction.sellingPrice !== undefined) {
+    unitPrice = transaction.sellingPrice;
+  } else if (transaction.purchasePrice !== undefined) {
+    unitPrice = transaction.purchasePrice;
+  }
+
+  let subtotal = 0;
+  if (transaction.subtotal !== undefined) {
+    subtotal = transaction.subtotal;
+  } else {
+    subtotal = (transaction.quantity || 0) * unitPrice;
+  }
+
+  const taxRatePercent = transaction.taxRatePercent ?? 0;
+  let taxAmount = 0;
+  if (transaction.taxAmount !== undefined) {
+    taxAmount = transaction.taxAmount;
+  } else {
+    taxAmount = (subtotal * taxRatePercent) / 100;
+  }
+
+  let totalAmount = 0;
+  if (transaction.totalAmount !== undefined) {
+    totalAmount = transaction.totalAmount;
+  } else {
+    totalAmount = subtotal + taxAmount;
+  }
+
+  const productId = transaction.productId || '';
+  const productName = transaction.productName || '';
+  const quantity = transaction.quantity !== undefined ? transaction.quantity : 0;
+
+  return [{
+    productId,
+    productName,
+    quantity,
+    unitPrice,
+    subtotal,
+    taxRatePercent,
+    taxAmount,
+    totalAmount
+  }];
 }
 
 export interface CustomerPayment {

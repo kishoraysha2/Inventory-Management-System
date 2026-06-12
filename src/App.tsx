@@ -36,7 +36,8 @@ import {
   Loader2,
   Eye,
   EyeOff,
-  UserPlus
+  UserPlus,
+  Settings
 } from 'lucide-react';
 
 import { Product, ActivityLog, Supplier, CashLedgerEntry, Capital } from './types';
@@ -54,6 +55,7 @@ import ProcurementManagement from './components/ProcurementManagement';
 import Dashboard from './components/Dashboard';
 import ReportsPage from './components/ReportsPage';
 import BalanceSheet from './components/BalanceSheet';
+import CompanySettings from './components/CompanySettings';
 import { usePermission } from './hooks/usePermission';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from './lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, getDoc, updateDoc } from 'firebase/firestore';
@@ -99,7 +101,7 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports' | 'balancesheet' | 'users'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports' | 'balancesheet' | 'users' | 'company_settings'>('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   // --- Inventory Adjustment Modal State ---
@@ -144,6 +146,18 @@ export default function App() {
       await logSystemActivity("User Login", details);
     }
   };
+
+  // --- Listen to Programmatic Tab Switching Events ---
+  useEffect(() => {
+    const handleTabChange = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail) {
+        setActiveTab(customEvent.detail);
+      }
+    };
+    window.addEventListener('nexus-change-tab', handleTabChange);
+    return () => window.removeEventListener('nexus-change-tab', handleTabChange);
+  }, []);
 
   // --- Observe Authentication State ---
   useEffect(() => {
@@ -1596,6 +1610,21 @@ export default function App() {
             <span>User Access</span>
           </button>
         )}
+        {(userRole === 'admin' || userRole === 'accountant') && (
+          <button
+            id="open-company-settings-tab"
+            type="button"
+            onClick={() => setActiveTab('company_settings')}
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition min-w-[130px] ${
+              activeTab === 'company_settings'
+                ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
+                : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Settings className="h-4 w-4" />
+            <span>Company Settings</span>
+          </button>
+        )}
       </div>
 
       {/* FEEDBACK STATUS BANNER */}
@@ -2098,9 +2127,13 @@ export default function App() {
             </div>
           </div>
         </SafeTabWrapper>
-      ) : (
+      ) : activeTab === 'reports' ? (
         <SafeTabWrapper tab="reports" userRole={userRole}>
           <ReportsPage userRole={userRole} />
+        </SafeTabWrapper>
+      ) : (
+        <SafeTabWrapper tab="company_settings" userRole={userRole}>
+          <CompanySettings userRole={userRole} />
         </SafeTabWrapper>
       )}
 
@@ -2194,7 +2227,7 @@ export default function App() {
                   >
                     <option value="Physical Count Correction">üìã Physical Count Correction</option>
                     <option value="Damaged Stock">üí• Damaged Stock</option>
-                    <option value="Lost Stock">Ì†ΩÌ¥ç Lost Stock</option>
+                    <option value="Lost Stock">üîç Lost Stock</option>
                     <option value="Found Stock">üéÅ Found Stock</option>
                     <option value="Other">‚ùì Other</option>
                   </select>
@@ -2457,6 +2490,24 @@ export default function App() {
                     <span>User Access</span>
                   </button>
                 )}
+                {(userRole === 'admin' || userRole === 'accountant') && (
+                  <button
+                    id="open-mobile-company-settings-tab"
+                    type="button"
+                    onClick={() => {
+                      setActiveTab('company_settings');
+                      setIsMobileMenuOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                      activeTab === 'company_settings'
+                        ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                        : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                    }`}
+                  >
+                    <Settings className="h-4.5 w-4.5" />
+                    <span>Company Settings</span>
+                  </button>
+                )}
               </div>
 
               {/* Drawer Footer info summary */}
@@ -2552,7 +2603,7 @@ function SafeTabWrapper({ children, tab, userRole }: SafeTabWrapperProps) {
   let isAccessible = true;
 
   if (userRole === 'viewer') {
-    isAccessible = tab !== 'users';
+    isAccessible = tab !== 'users' && tab !== 'company_settings';
   } else if (userRole === 'cashier') {
     isAccessible = tab === 'dashboard' || tab === 'sales' || tab === 'customers';
   } else if (userRole === 'accountant') {

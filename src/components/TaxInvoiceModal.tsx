@@ -16,6 +16,7 @@ import {
   DollarSign
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
+import QRCode from 'qrcode';
 import { Sale, Customer, Product } from '../types';
 import { db, auth } from '../lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
@@ -56,6 +57,59 @@ const DEFAULT_COMPANY_PROFILE: CompanyProfile = {
   crNumber: "CR-1010349283",
   logo: ""
 };
+
+// --- ZATCA Phase 1 TLV QR Code Generator ---
+function getZatcaTimestamp(dateStr: string): string {
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) {
+      return new Date().toISOString().split('.')[0] + 'Z';
+    }
+    return d.toISOString().split('.')[0] + 'Z';
+  } catch (e) {
+    return new Date().toISOString().split('.')[0] + 'Z';
+  }
+}
+
+function generateZatcaTlvBase64(
+  sellerName: string,
+  sellerVat: string,
+  timestamp: string,
+  totalAmount: string,
+  vatAmount: string
+): string {
+  const getTlvBuffer = (tag: number, value: string): Uint8Array => {
+    const encoder = new TextEncoder();
+    const valueBytes = encoder.encode(value);
+    const buffer = new Uint8Array(2 + valueBytes.length);
+    buffer[0] = tag;
+    buffer[1] = valueBytes.length;
+    buffer.set(valueBytes, 2);
+    return buffer;
+  };
+
+  const tag1 = getTlvBuffer(1, sellerName);
+  const tag2 = getTlvBuffer(2, sellerVat);
+  const tag3 = getTlvBuffer(3, timestamp);
+  const tag4 = getTlvBuffer(4, totalAmount);
+  const tag5 = getTlvBuffer(5, vatAmount);
+
+  const totalLength = tag1.length + tag2.length + tag3.length + tag4.length + tag5.length;
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+  
+  combined.set(tag1, offset); offset += tag1.length;
+  combined.set(tag2, offset); offset += tag2.length;
+  combined.set(tag3, offset); offset += tag3.length;
+  combined.set(tag4, offset); offset += tag4.length;
+  combined.set(tag5, offset); offset += tag5.length;
+
+  let binary = "";
+  for (let i = 0; i < combined.byteLength; i++) {
+    binary += String.fromCharCode(combined[i]);
+  }
+  return btoa(binary);
+}
 
 export default function TaxInvoiceModal({ sale, customers, products, sales, customerPayments, onClose }: TaxInvoiceModalProps) {
   // --- State Configuration with LocalStorage Fallback and Firestore Sync ---
@@ -265,9 +319,14 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
     const indexPart = sale.id.replace('sale-', '');
     return `INV-2026-${indexPart.length > 5 ? indexPart.substring(indexPart.length - 5) : indexPart}`;
   });
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string>('');
 
-  const [isNoteSuccess, setIsNoteSuccess] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+
+  const handleOpenCompanySettings = () => {
+    window.dispatchEvent(new CustomEvent('nexus-change-tab', { detail: 'company_settings' }));
+    onClose();
+  };
 
   // Sync profile edits to persistence
   useEffect(() => {
@@ -294,7 +353,208 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
     window.print();
   };
 
-  // --- Action 2: Custom Vector PDF Builder ---
+  // --- Toggle to simulate multi-page ERP invoice structure inside the preview ---
+  const [simulateMultiPage, setSimulateMultiPage] = useState<boolean>(false);
+
+  // --- Derive Invoice Items ---
+  const invoiceItems = React.useMemo(() => {
+    const baseItem = {
+      sl: 1,
+      id: sale.id,
+      productName: sale.productName,
+      sku: matchedProduct?.sku || `SKU-${sale.productId.substring(0,6).toUpperCase()}`,
+      quantity: sale.quantity,
+      unit: 'Pcs',
+      unitPrice: sale.sellingPrice,
+      taxRatePercent: taxRatePercent,
+      vatAmount: taxAmount,
+      totalAmount: grandTotal,
+    };
+
+    const items = [baseItem];
+
+    if (simulateMultiPage) {
+      const mockNames = [
+        "Heavy Duty Galvanized Steel Truss, 4m",
+        "Industrial Conduit Cable, 100m Roll",
+        "High-Tensile Structural Fastener Kit",
+        "Multi-Stage Silent Hydraulic Liquid Pump",
+        "Solid Brass Coupling Gasket Class A",
+        "Double-Insulated Copper Grounding Wire",
+        "Premium Epoxy Core Resin Sealer",
+        "Pneumatic Air Pressure Regulator Valve",
+        "Anodized Aluminum Framing Anchor",
+        "Stainless Steel Grade-316 Washers x500",
+        "Premium Polyurethane Expansion Joint",
+        "Carbon Steel Corrugated Floor Decking",
+        "Heavy-Duty Waterproof Wire Junction Box",
+        "Tungsten Carbide Tipped Cutting Wheel",
+        "Fiberglass Reinforced Piping Joint Sleeve"
+      ];
+
+      mockNames.forEach((name, i) => {
+        const qty = 2 + (i % 4);
+        const unitPrice = 45.00 + (i * 15.50);
+        const itemSubtotal = qty * unitPrice;
+        const itemVatPercent = taxRatePercent;
+        const itemVatAmount = (itemSubtotal * itemVatPercent) / 100;
+        const itemTotal = itemSubtotal + itemVatAmount;
+
+        items.push({
+          sl: i + 2,
+          id: `mock-item-${i}`,
+          productName: name,
+          sku: `SKU-MOCK-${1000 + i}`,
+          quantity: qty,
+          unit: 'Pcs',
+          unitPrice: unitPrice,
+          taxRatePercent: itemVatPercent,
+          vatAmount: itemVatAmount,
+          totalAmount: itemTotal,
+        });
+      });
+    }
+
+    return items;
+  }, [sale, matchedProduct, taxRatePercent, taxAmount, grandTotal, simulateMultiPage]);
+
+  // --- Helper to convert numbers to words ---
+  const numberToWords = (num: number): string => {
+    if (num === 0) return 'Zero Dollars Only';
+    
+    const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+    const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+    
+    const convertLessThanOneThousand = (n: number): string => {
+      if (n === 0) return '';
+      if (n < 20) return ones[n] + ' ';
+      if (n < 100) return tens[Math.floor(n / 10)] + ' ' + ones[n % 10] + ' ';
+      return ones[Math.floor(n / 100)] + ' Hundred ' + convertLessThanOneThousand(n % 100);
+    };
+    
+    const convert = (n: number): string => {
+      if (n < 1000) return convertLessThanOneThousand(n);
+      if (n < 1000000) return convert(Math.floor(n / 1000)) + 'Thousand ' + convertLessThanOneThousand(n % 1000);
+      return convert(Math.floor(n / 1000000)) + 'Million ' + convert(n % 1000000);
+    };
+    
+    const cleanNum = Math.floor(num);
+    const cents = Math.round((num - cleanNum) * 100);
+    
+    let result = convert(cleanNum).trim();
+    if (result) result += ' Dollars';
+    
+    if (cents > 0) {
+      if (result) result += ' and ';
+      result += `${cents}/100 Cents`;
+    } else {
+      result += ' Only';
+    }
+    
+    return result;
+  };
+
+  // --- Divide elements into clean pages ---
+  // Page 1 contains full business profile + customer + notes. Let's make Page 1 fit up to 5 items cleanly.
+  // Subsequent pages fit up to 9 items cleanly.
+  const pageItemsList = React.useMemo(() => {
+    const total = invoiceItems.length;
+    // Single page case (fits table + summaries + header + footer)
+    if (total <= 8) {
+      return [invoiceItems];
+    }
+    
+    const pages: typeof invoiceItems[] = [];
+    
+    // Page 1 is non-final. Header is compact, notes are compact. Can fit up to 14 items.
+    // Leave at least 1 item for final page.
+    const page1Size = Math.min(14, total - 1);
+    pages.push(invoiceItems.slice(0, page1Size));
+    
+    let currentIndex = page1Size;
+    while (currentIndex < total) {
+      const remaining = total - currentIndex;
+      // Can the rest fit on a final page (max 14 items with summaries)?
+      if (remaining <= 14) {
+        pages.push(invoiceItems.slice(currentIndex, total));
+        break;
+      } else {
+        // This continuation page is non-final, can fit up to 18 items.
+        // Leave at least 1 item for final page.
+        const pageSize = Math.min(18, remaining - 1);
+        pages.push(invoiceItems.slice(currentIndex, currentIndex + pageSize));
+        currentIndex += pageSize;
+      }
+    }
+    
+    return pages;
+  }, [invoiceItems]);
+
+  // --- Calculate page subtotals and overall totals ---
+  const calculatedPageTotals = React.useMemo(() => {
+    return pageItemsList.map((pItems) => {
+      const subtotalExVat = pItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
+      const vatAmount = pItems.reduce((sum, item) => sum + item.vatAmount, 0);
+      const totalWithVat = pItems.reduce((sum, item) => sum + item.totalAmount, 0);
+      return {
+        subtotalExVat,
+        vatAmount,
+        totalWithVat
+      };
+    });
+  }, [pageItemsList]);
+
+  const overallTotals = React.useMemo(() => {
+    const totalAmountExVat = invoiceItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
+    const totalVat = invoiceItems.reduce((sum, item) => sum + item.vatAmount, 0);
+    const grandTotalAll = invoiceItems.reduce((sum, item) => sum + item.totalAmount, 0);
+    return {
+      totalAmountExVat,
+      totalVat,
+      grandTotalAll
+    };
+  }, [invoiceItems]);
+
+  useEffect(() => {
+    const generateQr = async () => {
+      try {
+        const timestamp = getZatcaTimestamp(sale.saleDate);
+        const totalStr = overallTotals.grandTotalAll.toFixed(2);
+        const vatStr = overallTotals.totalVat.toFixed(2);
+        
+        const tlvPayload = generateZatcaTlvBase64(
+          company.name,
+          company.taxRegistrationId,
+          timestamp,
+          totalStr,
+          vatStr
+        );
+        
+        const dataUrl = await QRCode.toDataURL(tlvPayload, {
+          margin: 1,
+          width: 200,
+          color: {
+            dark: '#0f172a',
+            light: '#ffffff'
+          }
+        });
+        
+        setQrCodeDataUrl(dataUrl);
+      } catch (err) {
+        console.error("Failed to generate offline ZATCA QR Code:", err);
+      }
+    };
+    generateQr();
+  }, [
+    company.name,
+    company.taxRegistrationId,
+    sale.saleDate,
+    overallTotals.grandTotalAll,
+    overallTotals.totalVat,
+    invoiceNumber
+  ]);
+
+  // --- Action 2: Multi-Page Vector PDF Builder ---
   const handleDownloadPDF = () => {
     const doc = new jsPDF({
       orientation: 'portrait',
@@ -302,251 +562,497 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
       format: 'a4'
     });
 
-    // 1. Decorative Grid Accents (Subtle high-end design styling)
-    doc.setFillColor(30, 41, 59); // Primary dark slate block
-    doc.rect(0, 0, 210, 8, 'F'); // Top colored ribbon tag
-    
-    // 2. Company Info Header (Left aligned)
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(20);
-    doc.setTextColor(15, 23, 42); // slate-900
-    doc.text(company.name.toUpperCase(), 15, 25);
-    
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9);
-    doc.setTextColor(100, 116, 139); // slate-500
-    doc.text(company.address, 15, 31);
-    doc.text(`Phone: ${company.phone}  |  Email: ${company.email}`, 15, 36);
-    doc.text(`Web: ${company.website}  |  Tax ID: ${company.taxRegistrationId}`, 15, 41);
+    const pageCount = pageItemsList.length;
 
-    // 3. Document Identifier Titles (Right aligned)
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(22);
-    doc.setTextColor(79, 70, 229); // indigo-600
-    doc.text('TAX INVOICE', 145, 25);
-    
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9);
-    doc.setTextColor(15, 23, 42);
-    doc.text(`Invoice No: ${invoiceNumber}`, 145, 31);
-    doc.text(`Date Issued: ${new Date(sale.saleDate).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })}`, 145, 36);
-    doc.text(`Payment Term: ${sale.paymentType === 'Credit' ? 'Credit Account (Net 30)' : 'Cash / Instant settled'}`, 145, 41);
+    pageItemsList.forEach((pItems, pageIdx) => {
+      if (pageIdx > 0) {
+        doc.addPage();
+      }
 
-    // 4. Clean separating divider line
-    doc.setDrawColor(226, 232, 240); // slate-200
-    doc.setLineWidth(0.5);
-    doc.line(15, 47, 195, 47);
+      let tableY = 20;
 
-    // 5. Customer billing info card block
-    doc.setFillColor(248, 250, 252); // slate-50 grid panel
-    doc.rect(15, 52, 180, 25, 'F');
-    doc.setDrawColor(241, 245, 249);
-    doc.rect(15, 52, 180, 25, 'S');
+      // --- RENDER HEADER ---
+      if (pageIdx === 0) {
+        // --- PAGE 1: COMPACT UNIQUE HEADER (X, Y) ---
+        // Top colored ribbon
+        doc.setFillColor(30, 41, 59); // slate-800
+        doc.rect(0, 0, 210, 5, 'F');
+        
+        // LEFT: Business Information (compact layout) - 40% Width (72mm max width, starts at 15, ends on or before 87)
+        let leftY = 12;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        doc.setTextColor(15, 23, 42); // slate-900
+        const bizNameLines = doc.splitTextToSize(company.name.toUpperCase(), 72);
+        bizNameLines.forEach((line: string) => {
+          doc.text(line, 15, leftY);
+          leftY += 4.5;
+        });
+        
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(71, 85, 105);
+        
+        if (company.tradeName) {
+          const tradeLines = doc.splitTextToSize(`Trade Name: ${company.tradeName}`, 72);
+          tradeLines.forEach((line: string) => {
+            doc.text(line, 15, leftY);
+            leftY += 3.5;
+          });
+        }
+        
+        // Emphasized VAT
+        doc.setFont('helvetica', 'bold');
+        const vatLineInput = `VAT Number: ${company.taxRegistrationId}`;
+        const vatLines = doc.splitTextToSize(vatLineInput, 72);
+        vatLines.forEach((line: string) => {
+          doc.text(line, 15, leftY);
+          leftY += 3.5;
+        });
+        doc.setFont('helvetica', 'normal');
 
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
-    doc.setTextColor(71, 85, 105); // slate-600 outline
-    doc.text('BILL TO (CUSTOMER INFORMATION):', 20, 58);
-    
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
-    doc.setTextColor(15, 23, 42);
-    doc.text(sale.customerName, 20, 64);
-    
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9);
-    doc.setTextColor(100, 116, 139);
-    doc.text(`Physical Address: ${customerAddress}`, 20, 69);
-    doc.text(`Contact Phone: ${customerPhone}  |  Account ID: ${sale.customerId}`, 20, 73);
+        if (company.crNumber) {
+          const crLines = doc.splitTextToSize(`CR Number: ${company.crNumber}`, 72);
+          crLines.forEach((line: string) => {
+            doc.text(line, 15, leftY);
+            leftY += 3.5;
+          });
+        }
+        
+        const addressLines = doc.splitTextToSize(company.address, 72);
+        addressLines.forEach((line: string) => {
+          doc.text(line, 15, leftY);
+          leftY += 3.5;
+        });
+        
+        const phoneLine = `Phone: ${company.phone}`;
+        const phoneLines = doc.splitTextToSize(phoneLine, 72);
+        phoneLines.forEach((line: string) => {
+          doc.text(line, 15, leftY);
+          leftY += 3.5;
+        });
 
-    // 6. Items Data Grid Table Header
-    doc.setFillColor(30, 41, 59); // slate-800 backdrop table header
-    doc.rect(15, 87, 180, 10, 'F');
-    
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9.5);
-    doc.setTextColor(255, 255, 255);
-    doc.text('LINE ITEM DETAILS', 18, 93.5);
-    doc.text('SKU / SERIAL', 95, 93.5);
-    doc.text('QTY', 135, 93.5);
-    doc.text('UNIT PRICE', 152.5, 93.5);
-    doc.text('TOTAL', 180, 93.5);
+        const emailLine = `Email: ${company.email}`;
+        const emailLines = doc.splitTextToSize(emailLine, 72);
+        emailLines.forEach((line: string) => {
+          doc.text(line, 15, leftY);
+          leftY += 3.5;
+        });
 
-    // 7. Active Table Row Data
-    doc.setDrawColor(226, 232, 240);
-    doc.setLineWidth(0.3);
-    doc.line(15, 107, 195, 107); // Bottom border line of data row
+        if (company.website) {
+          const webLine = `Website: ${company.website}`;
+          const webLines = doc.splitTextToSize(webLine, 72);
+          webLines.forEach((line: string) => {
+            doc.text(line, 15, leftY);
+            leftY += 3.5;
+          });
+        }
 
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
-    doc.setTextColor(15, 23, 42);
-    doc.text(sale.productName, 18, 103);
-    
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9);
-    doc.setTextColor(100, 116, 139);
-    doc.text(matchedProduct?.sku || `SKU-${sale.productId.substring(0,6).toUpperCase()}`, 95, 103);
-    doc.text(sale.quantity.toString(), 135, 103);
-    doc.text(`$${sale.sellingPrice.toFixed(2)}`, 152.5, 103);
-    doc.text(`$${subtotal.toFixed(2)}`, 180, 103);
+        // CENTER: QR Code (Framed) - 20% Width (36mm, starts at 87, ends at 123)
+        // Highly visible, center aligned at X = 105
+        doc.setFillColor(248, 250, 252);
+        doc.rect(96, 9, 18, 18, 'F');
+        doc.setDrawColor(226, 232, 240);
+        doc.rect(96, 9, 18, 18, 'S');
 
-    // 8. Calculations breakdown box on bottom-right
-    let boxY = 117;
-    doc.setFillColor(250, 250, 250);
-    doc.rect(120, boxY, 75, 28, 'F');
-    doc.rect(120, boxY, 75, 28, 'S');
+        if (qrCodeDataUrl) {
+          try {
+            doc.addImage(qrCodeDataUrl, 'PNG', 97, 10, 16, 16);
+          } catch (e) {
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(5);
+            doc.setTextColor(148, 163, 184);
+            doc.text("[QR CODE]", 100, 18);
+          }
+        } else {
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(5);
+          doc.setTextColor(148, 163, 184);
+          doc.text("[QR CODE]", 100, 18);
+        }
 
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9.5);
-    doc.setTextColor(100, 116, 139);
-    doc.text('Net Taxable Subtotal:', 124, boxY + 6);
-    doc.setTextColor(15, 23, 42);
-    doc.text(`$${subtotal.toFixed(2)}`, 172, boxY + 6);
-
-    doc.setTextColor(100, 116, 139);
-    doc.text(`Sales Tax / VAT (${taxRatePercent}%):`, 124, boxY + 12);
-    doc.setTextColor(15, 23, 42);
-    doc.text(`$${taxAmount.toFixed(2)}`, 172, boxY + 12);
-
-    doc.setDrawColor(226, 232, 240);
-    doc.line(120, boxY + 17, 195, boxY + 17);
-
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
-    doc.setTextColor(79, 70, 229); // Purple bold Total
-    doc.text('INVOICE TOTAL DUE:', 124, boxY + 23);
-    doc.text(`$${grandTotal.toFixed(2)}`, 172, boxY + 23);
-
-    // 9. Payment Status & Summary in PDF
-    let payY = 150;
-    doc.setFillColor(248, 250, 252); // slate-50
-    doc.rect(15, payY, 85, 45, 'F');
-    doc.setDrawColor(226, 232, 240);
-    doc.rect(15, payY, 85, 45, 'S');
-
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9.5);
-    doc.setTextColor(30, 41, 59);
-    doc.text('PAYMENT SUMMARY', 20, payY + 6);
-
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8.5);
-    doc.setTextColor(100, 116, 139);
-    doc.text('Total Paid to Date:', 20, payY + 15);
-    doc.setTextColor(16, 185, 129); // emerald-500 equivalent style color
-    doc.setFont('helvetica', 'bold');
-    doc.text(`$${paymentInfo.amountPaid.toFixed(2)}`, 65, payY + 15);
-
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(100, 116, 139);
-    doc.text('Remaining Owed:', 20, payY + 23);
-    doc.setTextColor(239, 68, 68); // rose-500
-    doc.setFont('helvetica', 'bold');
-    doc.text(`$${paymentInfo.remainingBalance.toFixed(2)}`, 65, payY + 23);
-
-    doc.setDrawColor(226, 232, 240);
-    doc.line(15, payY + 29, 100, payY + 29);
-
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(71, 85, 105);
-    doc.text('PAYMENT STATUS:', 20, payY + 36);
-    
-    // Status text color depending on state
-    if (paymentInfo.status === 'Fully Paid') {
-      doc.setTextColor(16, 185, 129);
-    } else if (paymentInfo.status === 'Partially Paid') {
-      doc.setTextColor(245, 158, 11);
-    } else {
-      doc.setTextColor(239, 68, 68);
-    }
-    doc.text(paymentInfo.status.toUpperCase(), 58, payY + 36);
-
-    // 10. Payment History in PDF (beside summary box, width 90)
-    doc.setFillColor(255, 255, 255);
-    doc.rect(105, payY, 90, 45, 'F');
-    doc.setDrawColor(226, 232, 240);
-    doc.rect(105, payY, 90, 45, 'S');
-
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9.5);
-    doc.setTextColor(30, 41, 59);
-    doc.text('PAYMENT HISTORY TRACK', 110, payY + 6);
-
-    // List individual payments in history
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8);
-    doc.setTextColor(100, 116, 139);
-    doc.text('Payment Date', 110, payY + 14);
-    doc.text('Amount Paid', 165, payY + 14);
-    doc.line(105, payY + 16, 195, payY + 16);
-
-    doc.setFont('helvetica', 'normal');
-    let historyY = payY + 22;
-    if (paymentInfo.paymentHistory.length === 0) {
-      doc.setTextColor(148, 163, 184);
-      doc.text('No payment history records found.', 110, historyY);
-    } else {
-      paymentInfo.paymentHistory.slice(0, 3).forEach((ph) => {
+        // RIGHT: Customer Information (compact layout) - 40% Width (72mm max width, starts at 123, ends at 195)
+        let rightY = 12;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8);
         doc.setTextColor(100, 116, 139);
-        doc.text(new Date(ph.paymentDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }), 110, historyY);
-        doc.setTextColor(16, 185, 129);
-        doc.text(`$${ph.amountPaid.toFixed(2)}`, 165, historyY);
-        historyY += 7;
+        doc.text("BILL TO (CUSTOMER):", 123, rightY);
+        rightY += 4.5;
+        
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9.5);
+        doc.setTextColor(79, 70, 229); // indigo-650
+        const custNameLines = doc.splitTextToSize(sale.customerName.toUpperCase(), 72);
+        custNameLines.forEach((line: string) => {
+          doc.text(line, 123, rightY);
+          rightY += 4.5;
+        });
+        
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(71, 85, 105);
+        
+        const custAddrLines = doc.splitTextToSize(customerAddress, 72);
+        custAddrLines.forEach((line: string) => {
+          doc.text(line, 123, rightY);
+          rightY += 3.5;
+        });
+
+        const custPhoneLine = `Phone: ${customerPhone}`;
+        const custPhoneLines = doc.splitTextToSize(custPhoneLine, 72);
+        custPhoneLines.forEach((line: string) => {
+          doc.text(line, 123, rightY);
+          rightY += 3.5;
+        });
+
+        if (matchedCustomer?.email) {
+          const custEmailLine = `Email: ${matchedCustomer.email}`;
+          const custEmailLines = doc.splitTextToSize(custEmailLine, 72);
+          custEmailLines.forEach((line: string) => {
+            doc.text(line, 123, rightY);
+            rightY += 3.5;
+          });
+        }
+
+        if (matchedCustomer?.vatNumber) {
+          doc.setFont('helvetica', 'bold');
+          const custVatLine = `VAT Number: ${matchedCustomer.vatNumber}`;
+          const custVatLines = doc.splitTextToSize(custVatLine, 72);
+          custVatLines.forEach((line: string) => {
+            doc.text(line, 123, rightY);
+            rightY += 3.5;
+          });
+          doc.setFont('helvetica', 'normal');
+        }
+
+        // --- SECOND SECTION ---
+        let secY = Math.max(leftY, rightY) + 3;
+        if (secY < 32) secY = 32;
+        doc.setDrawColor(241, 245, 249);
+        doc.setFillColor(248, 250, 252);
+        
+        // Left Notes box
+        doc.rect(15, secY, 85, 17, 'F');
+        doc.rect(15, secY, 85, 17, 'S');
+        
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7);
+        doc.setTextColor(100, 116, 139);
+        doc.text("ADDITIONAL NOTES & CONDITIONS", 18, secY + 3.5);
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(7);
+        doc.setTextColor(71, 85, 105);
+        const wrappedNotes = doc.splitTextToSize(invoiceNotes, 79);
+        doc.text(wrappedNotes, 18, secY + 8);
+
+        // Right Invoice Details box
+        doc.setFillColor(253, 253, 254);
+        doc.rect(105, secY, 90, 17, 'F');
+        doc.rect(105, secY, 90, 17, 'S');
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7);
+        doc.setTextColor(15, 23, 42);
+        doc.text("TAX INVOICE DETAILS", 108, secY + 3.5);
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(6.5);
+        doc.setTextColor(115, 115, 115);
+        
+        // Column 1
+        doc.text(`Invoice No: ${invoiceNumber}`, 108, secY + 8);
+        doc.text(`Invoice Date: ${new Date(sale.saleDate).toLocaleDateString()}`, 108, secY + 12);
+        
+        // Column 2
+        doc.text(`Settlement: ${new Date(sale.saleDate).toLocaleDateString()}`, 154, secY + 8);
+        doc.text(`Terms/Method: ${sale.paymentType === 'Credit' ? 'Credit' : 'Cash'}`, 154, secY + 12);
+
+        tableY = secY + 17 + 5;
+
+      } else {
+        // --- PAGE 2+: COMPACT CONTINUATION HEADER ---
+        doc.setFillColor(30, 41, 59); // slate-800
+        doc.rect(0, 0, 210, 4, 'F');
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(15, 23, 42);
+        const compLines = doc.splitTextToSize(company.name.toUpperCase(), 72);
+        let leftCY = 9;
+        compLines.forEach((line: string) => {
+          doc.text(line, 15, leftCY);
+          leftCY += 3.5;
+        });
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(100, 116, 139);
+        doc.text(`Invoice No: ${invoiceNumber}`, 15, leftCY);
+
+        // Center QR Code in PDF continuation - 20% width (36mm, X:87 to 123)
+        if (qrCodeDataUrl) {
+          try {
+            doc.addImage(qrCodeDataUrl, 'PNG', 99, 5, 12, 12);
+          } catch (e) {
+            // fallback
+          }
+        }
+
+        // Right Customer Name - 40% width (72mm, X:123 to 195)
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(79, 70, 229);
+        const custContLines = doc.splitTextToSize(sale.customerName.toUpperCase(), 72);
+        let rightCY = 9;
+        custContLines.forEach((line: string) => {
+          doc.text(line, 195, rightCY, { align: 'right' });
+          rightCY += 3.5;
+        });
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(100, 116, 139);
+        doc.text(`Page ${pageIdx + 1} of ${pageCount}`, 195, rightCY, { align: 'right' });
+
+        doc.setDrawColor(226, 232, 240);
+        doc.line(15, 17, 195, 17);
+        
+        tableY = 20;
+      }
+
+      // --- PRODUCT TABLE LAYOUT ---
+      
+      // Draw Table Header
+      doc.setFillColor(15, 23, 42); // deep slate
+      doc.rect(15, tableY, 180, 7, 'F');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7);
+      doc.setTextColor(255, 255, 255);
+      doc.text("SL", 18, tableY + 4.5);
+      doc.text("PRODUCT DESCRIPTION", 25, tableY + 4.5);
+      doc.text("QTY", 110, tableY + 4.5, { align: 'right' });
+      doc.text("UNIT", 122, tableY + 4.5, { align: 'right' });
+      doc.text("UNIT PRICE", 142, tableY + 4.5, { align: 'right' });
+      doc.text("VAT %", 156, tableY + 4.5, { align: 'right' });
+      doc.text("VAT", 173, tableY + 4.5, { align: 'right' });
+      doc.text("TOTAL ($)", 191, tableY + 4.5, { align: 'right' });
+
+      // Draw rows
+      let rowY = tableY + 7;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7);
+      doc.setTextColor(15, 23, 42);
+
+      pItems.forEach((item) => {
+        doc.setDrawColor(241, 245, 249);
+        doc.line(15, rowY + 6, 195, rowY + 6);
+
+        doc.setFont('helvetica', 'bold');
+        doc.text(item.sl.toString(), 18, rowY + 4);
+        doc.setFont('helvetica', 'normal');
+
+        const desc = item.productName;
+        const shortDesc = desc.length > 52 ? desc.substring(0, 50) + "..." : desc;
+        doc.text(shortDesc, 25, rowY + 4);
+
+        doc.text(item.quantity.toString(), 110, rowY + 4, { align: 'right' });
+        doc.text(item.unit, 122, rowY + 4, { align: 'right' });
+        doc.text(`$${item.unitPrice.toFixed(2)}`, 142, rowY + 4, { align: 'right' });
+        doc.text(`${item.taxRatePercent}%`, 156, rowY + 4, { align: 'right' });
+        doc.text(`$${item.vatAmount.toFixed(2)}`, 173, rowY + 4, { align: 'right' });
+
+        doc.setFont('helvetica', 'bold');
+        doc.text(`$${item.totalAmount.toFixed(2)}`, 191, rowY + 4, { align: 'right' });
+        doc.setFont('helvetica', 'normal');
+
+        rowY += 6;
       });
-    }
 
-    // 11. Custom Notes Box - let's move it down or fit it perfectly
-    let notesY = 205;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(71, 85, 105);
-    doc.text('ADDITIONAL TERM DETAILS & INSTRUCTIONS:', 15, notesY);
+      // Draw Cumulative Subtotal row inside table bottom
+      doc.setFillColor(248, 250, 252);
+      doc.rect(15, rowY, 180, 6, 'F');
+      doc.setDrawColor(226, 232, 240);
+      doc.rect(15, rowY, 180, 6, 'S');
 
-    doc.setFont('helvetica', 'italic');
-    doc.setFontSize(8.5);
-    doc.setTextColor(100, 116, 139);
-    
-    // Auto-wrapping of the customized invoice message notes
-    const wrappedNotes = doc.splitTextToSize(invoiceNotes, 180);
-    doc.text(wrappedNotes, 15, notesY + 6);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7);
+      doc.setTextColor(71, 85, 105);
+      doc.text(`SUBTOTAL (PAGE ${pageIdx + 1})`, 25, rowY + 4);
+      doc.setTextColor(15, 23, 42);
+      
+      const pageSub = calculatedPageTotals[pageIdx];
+      doc.text(`$${pageSub.subtotalExVat.toFixed(2)}`, 142, rowY + 4, { align: 'right' });
+      doc.text(`$${pageSub.vatAmount.toFixed(2)}`, 173, rowY + 4, { align: 'right' });
+      doc.text(`$${pageSub.totalWithVat.toFixed(2)}`, 191, rowY + 4, { align: 'right' });
 
-    // 10. Beautiful footer signature block
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
-    doc.setTextColor(148, 163, 184); // grey border
-    doc.line(15, 270, 195, 270);
-    doc.text(`${company.name}  |  ${company.website}  |  Invoice ID: ${sale.id}`, 15, 275);
-    doc.text('Certified Official Transaction Ledger Document', 140, 275);
+      // --- PERSISTENT FOOTER ON EVERY PAGE ---
+      doc.setDrawColor(226, 232, 240);
+      doc.line(15, 280, 195, 280);
+      
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7);
+      doc.setTextColor(79, 70, 229); 
+      doc.text("SYSTEM CERTIFIED INVOICE", 15, 284);
+      
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6.5);
+      doc.setTextColor(148, 163, 184);
+      doc.text("This is a system generated invoice and does not require signature.", 15, 287);
+      doc.text(`Document Reference: ${sale.id}  |  Page ${pageIdx + 1} of ${pageCount}`, 195, 285, { align: 'right' });
 
-    // Save output securely
+      // --- FINAL PAGE TOTALS ---
+      if (pageIdx === pageCount - 1) {
+        let finalY = rowY + 8;
+
+        // Payment Summary / Audit Trail (LEFT)
+        doc.setFillColor(248, 250, 252); // slate-50
+        doc.rect(15, finalY, 85, 18, 'F');
+        doc.setDrawColor(226, 232, 240);
+        doc.rect(15, finalY, 85, 18, 'S');
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(15, 23, 42);
+        doc.text("PAYMENT SUMMARY", 18, finalY + 4.5);
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(100, 116, 139);
+        doc.text("Paid Amount:", 18, finalY + 9);
+        doc.setTextColor(16, 185, 129); // emerald-550
+        doc.setFont('helvetica', 'bold');
+        doc.text(`$${paymentInfo.amountPaid.toFixed(2)}`, 65, finalY + 9);
+
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(100, 116, 139);
+        doc.text("Outstanding Balance:", 18, finalY + 13.5);
+        doc.setTextColor(paymentInfo.remainingBalance > 0 ? 220 : 100, paymentInfo.remainingBalance > 0 ? 38 : 116, paymentInfo.remainingBalance > 0 ? 38 : 139);
+        doc.setFont('helvetica', 'bold');
+        doc.text(`$${paymentInfo.remainingBalance.toFixed(2)}`, 65, finalY + 13.5);
+
+        // Total Summary (RIGHT)
+        doc.setFillColor(254, 254, 255);
+        const rectHeight = 30 + (pageCount * 3.5);
+        doc.rect(105, finalY, 90, rectHeight, 'F');
+        doc.rect(105, finalY, 90, rectHeight, 'S');
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(15, 23, 42);
+        doc.text("TOTAL SUMMARY", 108, finalY + 4.5);
+
+        let sumY = finalY + 9;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(6.5);
+        doc.setTextColor(115, 115, 115);
+        
+        calculatedPageTotals.forEach((pageTotal, sIdx) => {
+          doc.text(`Subtotal Page ${sIdx + 1}:`, 108, sumY);
+          doc.text(`$${pageTotal.totalWithVat.toFixed(2)}`, 191, sumY, { align: 'right' });
+          sumY += 3.5;
+        });
+
+        doc.setDrawColor(241, 145, 149); // light divider accent
+        doc.setDrawColor(241, 245, 249);
+        doc.line(105, sumY - 1, 195, sumY - 1);
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(115, 115, 115);
+        doc.text("Subtotal (Ex VAT):", 108, sumY + 3);
+        doc.text(`$${overallTotals.totalAmountExVat.toFixed(2)}`, 191, sumY + 3, { align: 'right' });
+
+        doc.text("Total VAT Amount:", 108, sumY + 7);
+        doc.text(`$${overallTotals.totalVat.toFixed(2)}`, 191, sumY + 7, { align: 'right' });
+
+        doc.setDrawColor(226, 232, 240);
+        doc.line(105, sumY + 9.5, 195, sumY + 9.5);
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7);
+        doc.setTextColor(100, 116, 139);
+        doc.text("GRAND TOTAL", 108, sumY + 13.5);
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9.5);
+        doc.setTextColor(79, 70, 229);
+        doc.text(`$${overallTotals.grandTotalAll.toLocaleString(undefined, { minimumFractionDigits: 2 })}`, 108, sumY + 18);
+
+        // Amount in Words below blocks
+        let wordY = finalY + Math.max(18, rectHeight) + 4;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7);
+        doc.setTextColor(100, 116, 139);
+        doc.text("AMOUNT IN WORDS:", 15, wordY);
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(7.5);
+        doc.setTextColor(15, 23, 42);
+        
+        const words = numberToWords(overallTotals.grandTotalAll);
+        const wrappedWords = doc.splitTextToSize(words, 180);
+        doc.text(wrappedWords, 15, wordY + 4);
+      }
+    });
+
     doc.save(`tax_invoice_${invoiceNumber}.pdf`);
   };
 
   return (
     <div id="invoice-modal-global-container" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm overflow-y-auto print:bg-white print:p-0">
       
-      {/* 
-        Tailwind Custom styles for professional A4 web layout rendering 
-        And dynamic hide on printing to trigger optimal results
-      */}
+      {/* Tailwind & CSS printing rules for clean ERP outputs */}
       <style>{`
+        #printable-invoice-sheet {
+          background-color: transparent !important;
+        }
+
+        .invoice-page-sheet {
+          width: 210mm;
+          min-height: 297mm;
+          padding: 15mm;
+          margin: 0 auto 10mm auto;
+          background: #ffffff;
+          box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+          border: 1px solid #e2e8f0;
+          border-radius: 1.5rem;
+          position: relative;
+          box-sizing: border-box;
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+        }
+
         @media print {
           body * {
             visibility: hidden !important;
           }
-          #printable-invoice-sheet, #printable-invoice-sheet * {
+          #invoice-preview-viewport, #invoice-preview-viewport * {
             visibility: visible !important;
           }
-          #printable-invoice-sheet {
+          #invoice-preview-viewport {
             position: absolute !important;
             left: 0 !important;
             top: 0 !important;
             width: 100% !important;
-            height: auto !important;
-            box-shadow: none !important;
-            border: none !important;
             margin: 0 !important;
-            padding: 1.5rem !important;
+            padding: 0 !important;
+            background: #fff !important;
+            overflow: visible !important;
+          }
+          .invoice-page-sheet {
+            margin: 0 !important;
+            border: none !important;
+            box-shadow: none !important;
+            padding: 10mm 15mm 15mm 15mm !important;
+            page-break-after: always !important;
+            break-after: page !important;
+            width: 100% !important;
+            min-height: 100vh !important;
+          }
+          .invoice-page-sheet:last-child {
+            page-break-after: avoid !important;
+            break-after: avoid !important;
           }
           #invoice-modal-global-container {
             position: absolute !important;
@@ -566,21 +1072,19 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         className="bg-slate-50 rounded-[2.5rem] border border-slate-200/80 shadow-2xl max-w-6xl w-full h-[90vh] flex flex-col overflow-hidden print:bg-white print:border-none print:shadow-none print:max-w-none print:h-auto"
       >
         
-        {/* UPPER DIALOG CONTROLS HEADER BAR */}
+        {/* UPPER CONTROLS BAR */}
         <div id="invoice-controls-header" className="flex items-center justify-between border-b border-slate-200/80 bg-white px-6 sm:px-8 py-4 shrink-0 print:hidden">
           <div className="flex items-center gap-3">
             <span className="w-10 h-10 rounded-full bg-indigo-50 flex items-center justify-center">
-              <FileText className="h-5 w-5 text-indigo-650 text-indigo-650 text-indigo-600" />
+              <FileText className="h-5 w-5 text-indigo-600" />
             </span>
             <div>
               <h3 className="text-sm font-bold text-slate-900 tracking-tight">Tax Invoice Desk</h3>
-              <p className="text-[11px] text-slate-400 mt-0.5">Generate, print, personalize, and download formal invoice blocks for tracking</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">Redesigned professional multi-page ERP tax billing & compliance workspace</p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
-            
-            {/* Direct configurations slider toggle */}
             <button
               type="button"
               onClick={() => setShowSettings(!showSettings)}
@@ -594,7 +1098,6 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
               <span>{showSettings ? 'Hide Options' : 'Company/Tax Config'}</span>
             </button>
 
-            {/* Direct actions */}
             <button
               onClick={handlePrint}
               type="button"
@@ -627,12 +1130,12 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
           </div>
         </div>
 
-        {/* WORKSPACE DIVIDORS: EDIT FIELDS LEFT PANEL & A4 PREVIEW WINDOW RIGHT PANEL */}
+        {/* WORKSPACE AREA */}
         <div id="invoice-workspace-inner" className="flex-1 overflow-hidden flex flex-col lg:flex-row print:block">
           
-          {/* OPTIONS SIDE-PANEL (LEFT) */}
+          {/* OPTIONS PANEL (LEFT) */}
           {showSettings && (
-            <div id="invoice-settings-sidebar" className="lg:w-80 bg-white border-b lg:border-b-0 lg:border-r border-slate-200/80 p-6 overflow-y-auto shrink-0 print:hidden space-y-6">
+            <div id="invoice-settings-sidebar" className="lg:w-80 bg-white border-b lg:border-b-0 lg:border-r border-slate-200/80 p-6 overflow-y-auto shrink-0 print:hidden space-y-5">
               
               <div>
                 <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1">
@@ -640,610 +1143,342 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                   Issuer Business Profile
                 </h4>
                 <p className="text-[10px] text-slate-400 leading-normal">
-                  Configure corporate parameters, VAT registration numbers, trade certificates, and logos. Saves directly to Cloud Firestore.
+                  Configure corporate parameters, VAT registration numbers, trade certificates, and logos. Managed under Settings.
                 </p>
               </div>
 
-              {/* Company Inputs Form */}
-              <div className="space-y-4">
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Business Name *</label>
-                  <input
-                    type="text"
-                    required
-                    value={company.name}
-                    onChange={(e) => setCompany({ ...company, name: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
-                    placeholder="Legal Entity Name"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Trade Name</label>
-                    <input
-                      type="text"
-                      value={company.tradeName || ''}
-                      onChange={(e) => setCompany({ ...company, tradeName: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
-                      placeholder="e.g. Apex Trade"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Owner Name</label>
-                    <input
-                      type="text"
-                      value={company.ownerName || ''}
-                      onChange={(e) => setCompany({ ...company, ownerName: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
-                      placeholder="e.g. John Doe"
-                    />
+              {/* Company settings routing option */}
+              <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4 shrink-0 space-y-3.5">
+                <div className="flex items-start gap-2.5">
+                  <span className="w-8 h-8 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center shrink-0">
+                    <Building2 className="h-4 w-4 text-indigo-600" />
+                  </span>
+                  <div>
+                    <h5 className="text-xs font-bold text-slate-900 leading-normal">System Profile</h5>
+                    <p className="text-[11px] text-slate-500 mt-1 leading-normal">
+                      Profile details are persistent and managed directly.
+                    </p>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">VAT Number *</label>
-                    <input
-                      type="text"
-                      required
-                      value={company.taxRegistrationId}
-                      onChange={(e) => setCompany({ ...company, taxRegistrationId: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
-                      placeholder="Tax Registration ID"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">CR Number</label>
-                    <input
-                      type="text"
-                      value={company.crNumber || ''}
-                      onChange={(e) => setCompany({ ...company, crNumber: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
-                      placeholder="Commercial Registration"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Corporate Address *</label>
-                  <textarea
-                    rows={2}
-                    required
-                    value={company.address}
-                    onChange={(e) => setCompany({ ...company, address: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-medium focus:border-indigo-500 focus:outline-none"
-                    placeholder="Physical HQ Address"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block block font-bold">Logo URL (Optional)</label>
-                  <input
-                    type="text"
-                    value={company.logo || ''}
-                    onChange={(e) => setCompany({ ...company, logo: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-medium focus:border-indigo-500 focus:outline-none"
-                    placeholder="https://example.com/logo.png"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Phone No *</label>
-                    <input
-                      type="text"
-                      required
-                      value={company.phone}
-                      onChange={(e) => setCompany({ ...company, phone: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 py-2 px-2 text-xs font-medium focus:border-indigo-500 focus:outline-none"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Email Address</label>
-                    <input
-                      type="text"
-                      value={company.email || ''}
-                      onChange={(e) => setCompany({ ...company, email: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 py-2 px-2 text-xs font-medium focus:border-indigo-500 focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-bold">Website URL</label>
-                    <input
-                      type="text"
-                      value={company.website || ''}
-                      onChange={(e) => setCompany({ ...company, website: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 py-2 px-2 text-xs font-medium focus:border-indigo-500 focus:outline-none"
-                    />
-                  </div>
-
-                  {/* Customizable VAT Tax rate percentage */}
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block block mb-0.5 font-bold">
-                      Tax / VAT Rate (%)
-                    </label>
-                    <div className="relative">
-                      <span className="absolute right-2.5 top-2.5 text-slate-400 text-xs font-bold">%</span>
-                      <input
-                        type="number"
-                        min="0"
-                        max="100"
-                        value={company.taxRatePercent}
-                        onChange={(e) => setCompany({ ...company, taxRatePercent: parseFloat(e.target.value) || 0 })}
-                        className="w-full rounded-lg border border-slate-200 py-2 pl-3 pr-7 text-xs font-bold focus:border-indigo-500 focus:outline-none"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Cloud Saving Action Trigger */}
-                <div className="pt-2">
-                  {saveStatus === 'success' && (
-                    <div className="rounded-lg bg-emerald-50 border border-emerald-250/50 p-2 text-[10px] font-bold text-emerald-700 animate-slide-up flex items-center gap-1.5 mb-2">
-                      <Check className="h-3.5 w-3.5 shrink-0 text-emerald-650" />
-                      <span>Saved permanently to Firestore</span>
-                    </div>
-                  )}
-                  {saveStatus === 'error' && (
-                    <div className="rounded-lg bg-rose-50 border border-rose-150 p-2 text-[10px] font-bold text-rose-700 animate-slide-up mb-2">
-                      Error saving profile to Cloud DB.
-                    </div>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={handleSaveCompanyProfile}
-                    disabled={isSavingCompany}
-                    className="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-xs font-bold text-white py-2.5 transition shadow-2xs hover:shadow-md cursor-pointer disabled:opacity-60"
-                  >
-                    {isSavingCompany ? 'Saving Cloud...' : 'Save Company Profile'}
-                  </button>
-                </div>
-
-                <div className="w-full h-[1px] bg-slate-200 my-2"></div>
-
-                {/* Adjust Invoice Custom Notes */}
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Custom Invoice Notes</label>
-                  <textarea
-                    rows={3}
-                    value={invoiceNotes}
-                    onChange={(e) => setInvoiceNotes(e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs text-slate-500 focus:border-indigo-500 focus:outline-none leading-relaxed"
-                    placeholder="Enter customized footer terms..."
-                  />
-                </div>
-
-                {/* Adjust Invoice tracker code manually if required */}
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Manual Invoice ID Prefix</label>
-                  <input
-                    type="text"
-                    value={invoiceNumber}
-                    onChange={(e) => setInvoiceNumber(e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-bold focus:border-indigo-500 focus:outline-none"
-                  />
-                </div>
-
+                <button
+                  type="button"
+                  onClick={handleOpenCompanySettings}
+                  className="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-xs font-bold text-white py-2.5 transition shadow-2xs hover:shadow-md cursor-pointer"
+                >
+                  <Settings className="h-3.5 w-3.5" />
+                  <span>Open Company Settings</span>
+                </button>
               </div>
+
+              {/* Simulation Box for Multi-Page verification */}
+              <div className="space-y-2 bg-indigo-50/20 rounded-2xl p-4 border border-indigo-100/50">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-extrabold text-indigo-700 uppercase tracking-wider block">Test Multi-Page Layout</span>
+                  <label className="relative inline-flex items-center cursor-pointer select-none">
+                    <input 
+                      type="checkbox" 
+                      checked={simulateMultiPage} 
+                      onChange={(e) => setSimulateMultiPage(e.target.checked)}
+                      className="sr-only peer" 
+                    />
+                    <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                  </label>
+                </div>
+                <p className="text-[10px] text-slate-400 leading-normal">
+                  Saves time verifying page-breaking and totals overflow behavior. Appends 15 high-fidelity mock items to this invoice.
+                </p>
+              </div>
+
+              <div className="w-full h-[1px] bg-slate-200 my-1"></div>
+
+              {/* Additional Invoice Notes customization */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-mono">Invoice Notes & Conditions</label>
+                <textarea
+                  rows={3}
+                  value={invoiceNotes}
+                  onChange={(e) => setInvoiceNotes(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs text-slate-500 focus:border-indigo-500 focus:outline-none leading-relaxed"
+                  placeholder="Enter custom Terms/Warranty details..."
+                />
+              </div>
+
+              {/* Manual Prefix ID customization */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block font-mono">Invoice Code Prefix</label>
+                <input
+                  type="text"
+                  value={invoiceNumber}
+                  onChange={(e) => setInvoiceNumber(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 py-2 px-3 text-xs font-bold focus:border-indigo-500 focus:outline-none"
+                />
+              </div>
+
             </div>
           )}
 
-          {/* MAIN GRID VIEWPORT AND PRINT BLOCKS (RIGHT) */}
-          <div id="invoice-preview-viewport" className="flex-1 overflow-y-auto p-4 sm:p-8 flex justify-center bg-slate-100 print:bg-white print:p-0 print:overflow-visible">
+          {/* MAIN PREVIEW LISTING (RIGHT) */}
+          <div id="invoice-preview-viewport" className="flex-1 overflow-y-auto p-4 sm:p-8 flex flex-col items-center bg-slate-100 print:bg-white print:p-0 print:overflow-visible animate-fade-in-up">
             
-            {/* INVOICE PAPER SHEET MODULE - LOOKS AND FEELS LIKE HIGH-FIDELITY LUXURY STATIONERY */}
-            <div 
-              id="printable-invoice-sheet" 
-              className="w-full max-w-[210mm] min-h-[297mm] bg-white border border-slate-200 rounded-[2rem] p-8 sm:p-12 shadow-md hover:shadow-lg transition-shadow duration-300 flex flex-col justify-between print:border-none print:shadow-none print:rounded-none print:p-0 print:m-0"
-            >
-              
-              {/* TOP HEADER SECTION WITH ACCENTS */}
-              <div className="space-y-6">
-                
-                {/* Visual design element top block */}
-                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-6 pb-6 border-b border-slate-100 sm:border-slate-200">
-                  
-                  {/* Company metadata profile block (left side) */}
-                  <div className="space-y-2.5 max-w-lg text-xs">
-                    {company.logo && (
-                      <div className="mb-2 max-h-12 flex items-center">
-                        <img src={company.logo} alt="Company Logo" referrerPolicy="no-referrer" className="max-h-12 max-w-[150px] object-contain" />
-                      </div>
-                    )}
-                    
-                    <div className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-indigo-600 animate-pulse"></span>
-                      <h1 className="text-lg font-extrabold text-slate-900 uppercase tracking-tight">{company.name}</h1>
-                    </div>
+            <div id="printable-invoice-sheet" className="w-full max-w-[210mm] print:w-full">
+              {pageItemsList.map((pItems, pageIdx) => {
+                const isFirstPage = pageIdx === 0;
+                const isLastPage = pageIdx === pageItemsList.length - 1;
+                const pageCount = pageItemsList.length;
+                const pageSubtotalBlock = calculatedPageTotals[pageIdx];
 
-                    {company.tradeName && (
-                      <p className="text-slate-700 font-semibold text-xs leading-none">
-                        Trade: <span className="font-bold">{company.tradeName}</span>
-                      </p>
-                    )}
+                return (
+                  <div key={pageIdx} className="invoice-page-sheet">
+                    {/* TOP HEADER SECTION */}
+                    <div className="flex flex-col">
+                      {isFirstPage ? (
+                        /* PAGE 1: 3-COLUMN COMPACT HEADER */
+                        <div className="flex flex-row items-center justify-between border-b border-slate-100 pb-2 mb-2 w-full">
+                          {/* LEFT: Business Information (40% width, never overflows) */}
+                          <div className="w-2/5 space-y-0.5 text-left text-slate-500 pr-4 break-words whitespace-normal">
+                            <h1 className="text-xs font-black text-slate-900 tracking-tight leading-tight uppercase font-sans mb-1">{company.name}</h1>
+                            {company.tradeName && <p className="text-[10px] font-medium text-slate-700 leading-tight">Trade Name: {company.tradeName}</p>}
+                            <p className="text-[10px] font-bold text-indigo-600 leading-tight">VAT Number: {company.taxRegistrationId}</p>
+                            {company.crNumber && <p className="text-[10px] font-medium text-slate-500 leading-tight">CR Number: {company.crNumber}</p>}
+                            <p className="text-[10px] text-slate-400 leading-snug mt-1">{company.address}</p>
+                            <p className="text-[10px] text-slate-400 leading-snug">Phone: {company.phone}</p>
+                            <p className="text-[10px] text-slate-400 leading-snug break-all">Email: {company.email}</p>
+                            {company.website && <p className="text-[10px] text-slate-400 leading-snug break-all font-mono">{company.website}</p>}
+                          </div>
 
-                    {company.crNumber && (
-                      <p className="text-slate-505 text-slate-500 text-[11px] leading-none font-mono">
-                        CR Number: <span className="font-bold">{company.crNumber}</span>
-                      </p>
-                    )}
+                          {/* CENTER: QR Code (20% width, centered always) */}
+                          <div className="w-1/5 flex flex-col items-center justify-center shrink-0">
+                            <div className="p-1 bg-white border border-slate-200 rounded-lg inline-block">
+                              {qrCodeDataUrl ? (
+                                <img 
+                                  src={qrCodeDataUrl}
+                                  alt="Invoice QR Code" 
+                                  className="w-10 h-10 object-contain mx-auto"
+                                />
+                              ) : (
+                                <div className="w-10 h-10 flex items-center justify-center text-[7px] text-slate-300 font-mono">ZATCA QR</div>
+                              )}
+                            </div>
+                          </div>
 
-                    <div className="space-y-1 text-slate-500 leading-relaxed pt-0.5">
-                      <p className="font-medium text-slate-600 flex items-center gap-1.5">
-                        <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                        <span>{company.address}</span>
-                      </p>
-                      
-                      <div className="flex items-center gap-4 flex-wrap text-slate-400 pt-0.5">
-                        <span className="flex items-center gap-1">
-                          <Phone className="h-3 w-3" />
-                          <span className="text-slate-500">{company.phone}</span>
-                        </span>
-                        {company.email && (
-                          <>
-                            <span>•</span>
-                            <span className="flex items-center gap-1">
-                              <Mail className="h-3 w-3" />
-                              <span className="text-slate-500">{company.email}</span>
-                            </span>
-                          </>
-                        )}
-                        {company.website && (
-                          <>
-                            <span>•</span>
-                            <span className="text-slate-500 font-mono tracking-tight">{company.website}</span>
-                          </>
-                        )}
-                      </div>
-                      
-                      <p className="text-[11px] font-bold text-indigo-600 pt-0.5 mt-0.5">
-                        VAT Number: <span className="font-mono text-slate-700 bg-slate-50 border border-slate-100 px-1.5 py-0.5 rounded">{company.taxRegistrationId}</span>
-                      </p>
-                    </div>
-                  </div>
+                          {/* RIGHT: Customer Information (40% width, never overflows) */}
+                          <div className="w-2/5 space-y-0.5 text-right text-slate-500 pl-4 break-words whitespace-normal font-sans">
+                            <span className="text-[9px] font-mono font-black uppercase tracking-wider text-slate-400 block leading-none mb-1">BILL TO</span>
+                            <h2 className="text-xs font-black text-indigo-650 block leading-tight mb-1 break-words">{sale.customerName.toUpperCase()}</h2>
+                            <p className="text-[10px] text-slate-400 block leading-snug">{customerAddress}</p>
+                            <p className="text-[10px] text-slate-400 leading-snug">Phone: {customerPhone}</p>
+                            {matchedCustomer?.email && <p className="text-[10px] text-slate-400 leading-snug break-all">Email: {matchedCustomer.email}</p>}
+                            {matchedCustomer?.vatNumber && <p className="text-[10px] font-bold text-slate-650 leading-snug">VAT Number: {matchedCustomer.vatNumber}</p>}
+                          </div>
+                        </div>
+                      ) : (
+                        /* PAGE 2+: COMPACT CONTINUATION HEADER */
+                        <div className="flex flex-row items-center justify-between pb-2 border-b border-slate-200 mb-2 w-full">
+                          {/* LEFT: Business Name (40% width, never overflows) */}
+                          <div className="w-2/5 text-left pr-4 break-words whitespace-normal">
+                            <span className="text-xs font-black text-slate-900 tracking-tight uppercase leading-tight block">{company.name}</span>
+                            <p className="text-[9px] text-slate-400 font-mono mt-0.5 leading-none">Invoice No: {invoiceNumber}</p>
+                          </div>
+                          
+                          {/* CENTER: QR Code (20% width, centered always) */}
+                          <div className="w-1/5 flex flex-col items-center justify-center shrink-0">
+                            <div className="p-0.5 bg-white border border-slate-200 rounded-lg inline-block">
+                              {qrCodeDataUrl ? (
+                                <img 
+                                  src={qrCodeDataUrl}
+                                  alt="Invoice QR Code" 
+                                  className="w-9 h-9 object-contain mx-auto"
+                                />
+                              ) : (
+                                <div className="w-9 h-9 flex items-center justify-center text-[6px] text-slate-300 font-mono">ZATCA QR</div>
+                              )}
+                            </div>
+                          </div>
 
-                  {/* Document general code metadata indices (right side) */}
-                  <div className="space-y-2 text-left sm:text-right shrink-0">
-                    <div className="text-2xl font-black text-indigo-600 tracking-wider">TAX INVOICE</div>
-                    
-                    <div className="grid grid-cols-2 sm:grid-cols-1 gap-4 sm:gap-1.5 text-xs">
-                      <div>
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block sm:mb-0.5">Invoice Tracking Number</span>
-                        <span className="font-mono font-bold text-slate-900 bg-slate-50 border border-slate-100 px-2 py-0.5 rounded text-[11px]">
-                          {invoiceNumber}
-                        </span>
-                      </div>
-
-                      <div>
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block sm:mb-0.5 mt-2.5">Date of Settlement</span>
-                        <span className="font-semibold text-slate-800">
-                          {new Date(sale.saleDate).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })}
-                        </span>
-                      </div>
-
-                      <div>
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block sm:mb-0.5 mt-2.5">Payment Terms Method</span>
-                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold border uppercase tracking-wider ${
-                          sale.paymentType === 'Cash' 
-                            ? 'bg-emerald-50 border-emerald-250/60 text-emerald-700 shadow-3xs' 
-                            : 'bg-blue-50 border-blue-200 text-blue-700 shadow-3xs'
-                        }`}>
-                          {sale.paymentType === 'Credit' ? 'Credit Account (Net 30)' : 'Immediate Settled Trade'}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                </div>
-
-                {/* BILLING & SELLER SPECIFICATIONS - SIDE-BY-SIDE SPLIT LAYOUT */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4">
-                  
-                  {/* Left Column - Seller detail card */}
-                  <div className="border border-slate-200/80 rounded-2xl bg-slate-50/50 p-5 space-y-2">
-                    <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block pb-1 border-b border-slate-200/40 flex items-center gap-1">
-                      <Building2 className="nav-icon h-3 w-3 text-indigo-600 shrink-0" />
-                      <span>SELLER (ISSUER)</span>
-                    </span>
-                    
-                    <div className="space-y-1.5 text-xs text-slate-500 leading-relaxed">
-                      {company.logo && (
-                        <div className="mb-2 max-h-10 flex items-center">
-                          <img src={company.logo} alt="Company Logo" referrerPolicy="no-referrer" className="max-h-10 max-w-[120px] object-contain" />
+                          {/* RIGHT: Customer Name (40% width, never overflows) */}
+                          <div className="w-2/5 text-right pl-4 break-words whitespace-normal">
+                            <span className="text-xs font-black text-indigo-650 block uppercase leading-tight">{sale.customerName.toUpperCase()}</span>
+                            <p className="text-[9px] text-slate-400 mt-0.5 leading-none">Page {pageIdx + 1} of {pageCount}</p>
+                          </div>
                         </div>
                       )}
-                      
-                      <p className="text-sm font-bold text-slate-900 capitalize leading-none">{company.name}</p>
-                      
-                      {company.tradeName && (
-                        <p className="text-slate-600">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Trade Name:</span>
-                          <span className="font-semibold text-slate-700">{company.tradeName}</span>
-                        </p>
-                      )}
 
-                      {company.crNumber && (
-                        <p className="text-slate-605 text-slate-600 font-mono">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">CR Number:</span>
-                          <span className="font-semibold text-slate-700">{company.crNumber}</span>
-                        </p>
-                      )}
+                      {/* SECOND SECTION (PAGE 1 ONLY) */}
+                      {isFirstPage && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-1 pb-2.5 border-b border-slate-100">
+                          {/* BRIEF NOTES */}
+                          <div className="bg-slate-50 border border-slate-200/40 rounded-xl p-2.5 flex flex-col justify-center">
+                            <span className="text-[8px] font-mono font-black tracking-wider text-slate-400 block mb-0.5 leading-none">ADDITIONAL NOTES & CONDITIONS</span>
+                            <p className="text-[10px] italic leading-tight text-slate-600 font-medium">{invoiceNotes}</p>
+                          </div>
 
-                      <p className="text-slate-600">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">VAT Number:</span>
-                        <span className="font-mono font-bold text-slate-800">{company.taxRegistrationId}</span>
-                      </p>
-
-                      <p className="text-xs text-slate-500 leading-relaxed flex items-start gap-1.5 pt-0.5">
-                        <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0 mt-0.5" />
-                        <span>{company.address}</span>
-                      </p>
-
-                      <p className="text-slate-600">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Contact:</span>
-                        <span className="font-medium text-slate-707 text-slate-700">{company.phone}</span>
-                      </p>
-
-                      {company.email && (
-                        <p className="text-slate-600">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Email:</span>
-                          <span className="font-medium text-indigo-600 hover:text-indigo-700 shrink-0">{company.email}</span>
-                        </p>
-                      )}
-
-                      {company.website && (
-                        <p className="text-slate-600">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Website:</span>
-                          <span className="font-medium text-slate-700">{company.website}</span>
-                        </p>
+                          {/* INVOICE ATTRIBUTES */}
+                          <div className="bg-slate-50 border border-slate-200/40 rounded-xl p-2.5">
+                            <span className="text-[8px] font-mono font-black tracking-wider text-slate-400 block mb-0.5 leading-none">TAX INVOICE DETAILS</span>
+                            <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 text-[10px]">
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">Invoice Number:</span>
+                                <span className="font-bold text-slate-800 font-mono">{invoiceNumber}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">Invoice Date:</span>
+                                <span className="font-semibold text-slate-800">{new Date(sale.saleDate).toLocaleDateString()}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">Settlement Date:</span>
+                                <span className="font-semibold text-slate-800">{new Date(sale.saleDate).toLocaleDateString()}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">Payment Method:</span>
+                                <span className="font-semibold text-slate-800">{sale.paymentType || 'Cash'}</span>
+                              </div>
+                              <div className="flex justify-between col-span-2">
+                                <span className="text-slate-400">Payment Terms:</span>
+                                <span className="font-semibold text-indigo-600">{sale.paymentType === 'Credit' ? 'Net 30 Days' : 'Due Upon Receipt'}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
                       )}
                     </div>
-                  </div>
 
-                  {/* Right segment - Customer detail card */}
-                  <div className="border border-slate-200/80 rounded-2xl bg-indigo-50/10 p-5 space-y-2">
-                    <span className="text-[10px] font-extrabold text-indigo-400 uppercase tracking-widest block pb-1 border-b border-indigo-100/30 flex items-center gap-1.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0"></span>
-                      <span>CUSTOMER (BILL TO)</span>
-                    </span>
-                    
-                    <div className="space-y-1.5 text-xs">
-                      <p className="text-sm font-bold text-slate-900 capitalize">{sale.customerName}</p>
-                      
-                      {matchedCustomer?.vatNumber && (
-                        <p className="text-slate-600">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">VAT Number:</span>
-                          <span className="font-mono font-bold text-slate-800">{matchedCustomer.vatNumber}</span>
-                        </p>
-                      )}
-
-                      <p className="text-xs text-slate-500 leading-relaxed flex items-start gap-1.5 pt-0.5">
-                        <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0 mt-0.5" />
-                        <span>{customerAddress}</span>
-                      </p>
-
-                      <p className="text-slate-600">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Contact:</span>
-                        <span className="font-medium text-slate-700">{customerPhone}</span>
-                      </p>
-
-                      {matchedCustomer?.email && (
-                        <p className="text-slate-600">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Email:</span>
-                          <span className="font-medium text-slate-700">{matchedCustomer.email}</span>
-                        </p>
-                      )}
-
-                      <p className="text-slate-600">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Customer ID:</span>
-                        <span className="font-mono text-indigo-800 font-semibold">{sale.customerId}</span>
-                      </p>
-                    </div>
-                  </div>
-
-                </div>
-
-                {/* LINE ITEMS DATA GRID LISTING */}
-                <div className="pt-6">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className="bg-slate-900 text-white rounded-lg">
-                          <th className="py-3 px-4 text-xs font-bold uppercase tracking-wider rounded-l-xl">Line Item & Description</th>
-                          <th className="py-3 px-4 text-xs font-bold uppercase tracking-wider hidden sm:table-cell">Product SKU</th>
-                          <th className="py-3 px-4 text-xs font-bold uppercase tracking-wider text-center">Qty</th>
-                          <th className="py-3 px-4 text-xs font-bold uppercase tracking-wider text-right">Unit Price</th>
-                          <th className="py-3 px-4 text-xs font-bold uppercase tracking-wider text-right rounded-r-xl">Total Amount ($)</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        <tr className="hover:bg-slate-50/50 transition">
-                          <td className="py-4 px-4 text-sm">
-                            <span className="font-bold text-slate-900 block">{sale.productName}</span>
-                            <span className="text-[10px] font-medium text-slate-405 text-slate-500 bg-slate-50 px-2 py-0.5 rounded border border-slate-100 mt-1 inline-block">
-                              Category: {matchedProduct?.category || "Standard merchandise"}
-                            </span>
-                          </td>
-                          <td className="py-4 px-4 text-xs font-mono text-slate-500 hidden sm:table-cell">
-                            {matchedProduct?.sku || `SKU-${sale.productId.substring(0,8).toUpperCase()}`}
-                          </td>
-                          <td className="py-4 px-4 text-xs font-bold text-center text-slate-800">
-                            x{sale.quantity}
-                          </td>
-                          <td className="py-4 px-4 text-xs font-medium text-right text-slate-650 text-slate-700">
-                            ${sale.sellingPrice.toFixed(2)}
-                          </td>
-                          <td className="py-4 px-4 text-sm font-bold text-right text-slate-900">
-                            ${subtotal.toFixed(2)}
-                          </td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                {/* PRICING BALANCES BREAKDOWN BLOCKS */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6 border-t border-slate-150 border-slate-200">
-                  
-                  {/* Note info column */}
-                  <div className="text-xs text-slate-400 space-y-1 md:pr-10 leading-relaxed">
-                    <p className="font-bold text-slate-600 uppercase tracking-widest text-[9px]">Additional Notes & Conditions</p>
-                    <p className="text-slate-500 italic mt-1 font-medium">{invoiceNotes}</p>
-                  </div>
-
-                  {/* Absolute math column summary */}
-                  <div className="bg-slate-50 rounded-2xl border border-slate-200 p-6 space-y-3.5 h-fit">
-                    
-                    <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
-                      <span>Subtotal Trade Net:</span>
-                      <span className="font-mono font-bold text-slate-800">${subtotal.toFixed(2)}</span>
+                    {/* PRODUCT TABLE SECTION */}
+                    <div className={`flex-1 mt-3 ${isLastPage ? 'min-h-[350px]' : 'min-h-[520px]'}`}>
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="bg-slate-900 text-white text-[9px] font-extrabold uppercase tracking-wider">
+                            <th className="py-2 px-2.5 rounded-l-lg text-center w-10">SL</th>
+                            <th className="py-2 px-2.5">Product Description</th>
+                            <th className="py-2 px-2.5 text-right w-12 font-bold">Qty</th>
+                            <th className="py-2 px-2.5 text-right w-14 font-bold">Unit</th>
+                            <th className="py-2 px-2.5 text-right w-24 font-bold">Unit Price</th>
+                            <th className="py-2 px-2.5 text-right w-16 font-bold">VAT %</th>
+                            <th className="py-2 px-2.5 text-right w-20 font-bold">VAT</th>
+                            <th className="py-2 px-2.5 rounded-r-lg text-right w-28 font-bold">Total</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 text-[10px] text-slate-755">
+                          {pItems.map((item) => (
+                            <tr key={item.id} className="hover:bg-slate-50/50 transition">
+                              <td className="py-2 px-2.5 text-center font-bold text-slate-400">{item.sl}</td>
+                              <td className="py-2 px-2.5 font-bold text-slate-900">
+                                {item.productName}
+                                {item.sku && <span className="block text-[8.5px] text-slate-400 font-mono mt-0.5 leading-none">SKU: {item.sku}</span>}
+                              </td>
+                              <td className="py-2 px-2.5 text-right font-semibold">{item.quantity}</td>
+                              <td className="py-2 px-2.5 text-right text-slate-500">{item.unit}</td>
+                              <td className="py-2 px-2.5 text-right font-mono">${item.unitPrice.toFixed(2)}</td>
+                              <td className="py-2 px-2.5 text-right font-semibold text-slate-500">{item.taxRatePercent}%</td>
+                              <td className="py-2 px-2.5 text-right font-mono">${item.vatAmount.toFixed(2)}</td>
+                              <td className="py-2 px-2.5 text-right font-bold text-slate-950 font-mono">${item.totalAmount.toFixed(2)}</td>
+                            </tr>
+                          ))}
+                          
+                          {/* PAGE SUBTOTAL ROW */}
+                          <tr className="bg-slate-50 font-extrabold border-t border-slate-200">
+                            <td colSpan={2} className="py-2 px-2.5 text-slate-500 uppercase tracking-widest text-[9px]">Subtotal Page {pageIdx + 1}</td>
+                            <td colSpan={3} className="py-2 px-2.5"></td>
+                            <td className="py-2 px-2.5"></td>
+                            <td className="py-2 px-2.5 text-right font-mono text-[9px]">${pageSubtotalBlock.vatAmount.toFixed(2)}</td>
+                            <td className="py-2 px-2.5 text-right font-mono text-slate-900 text-[10px]">${pageSubtotalBlock.totalWithVat.toFixed(2)}</td>
+                          </tr>
+                        </tbody>
+                      </table>
                     </div>
 
-                    <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
-                      <span>Sales Tax / VAT ({taxRatePercent}%):</span>
-                      <span className="font-mono font-bold text-slate-800">${taxAmount.toFixed(2)}</span>
-                    </div>
+                    {/* LAST PAGE SUMMARY SECTION */}
+                    {isLastPage && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3 pt-3 border-t border-slate-200">
+                        {/* PAYMENT SUMMARY & AUDIT TRAIL */}
+                        <div className="bg-slate-50 border border-slate-200/40 rounded-xl p-2.5 space-y-1.5 flex flex-col justify-center">
+                          <span className="text-[8px] font-mono font-black tracking-wider text-slate-400 block leading-none">PAYMENT SUMMARY</span>
+                          <div className="space-y-1 text-[10px]">
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Paid Amount:</span>
+                              <span className="font-extrabold text-emerald-600">${paymentInfo.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Outstanding Balance:</span>
+                              <span className={`font-extrabold ${paymentInfo.remainingBalance > 0 ? "text-rose-600" : "text-slate-650"}`}>
+                                ${paymentInfo.remainingBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                              </span>
+                            </div>
+                            <div className="flex justify-between items-center pt-0.5 mt-0.5 border-t border-slate-200/40">
+                              <span className="text-slate-400 font-mono text-[9.5px]">Settlement Status:</span>
+                              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[8px] font-extrabold border uppercase tracking-wider ${
+                                paymentInfo.status === 'Fully Paid'
+                                  ? 'bg-emerald-50 border-emerald-250 text-emerald-700'
+                                  : 'bg-orange-50 text-orange-700 border-orange-200'
+                              }`}>
+                                {paymentInfo.status === 'Fully Paid' ? 'Fully Paid' : 'Unpaid/Partial'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
 
-                    <div className="w-full h-[1px] bg-slate-200 my-2"></div>
+                        {/* FINAL SUMMARY CALCULATOR */}
+                        <div className="bg-slate-50 border border-slate-200/40 rounded-xl p-3 space-y-3 flex flex-col justify-between">
+                          <div>
+                            <span className="text-[8px] font-mono font-black tracking-wider text-slate-400 block leading-none">TOTAL SUMMARY</span>
+                            <div className="space-y-0.5 text-[10px] mt-1.5">
+                              {calculatedPageTotals.map((pageTotal, sIdx) => (
+                                <div key={sIdx} className="flex justify-between text-slate-500 text-[9px]">
+                                  <span>Subtotal Page {sIdx + 1}:</span>
+                                  <span className="font-bold font-mono">${pageTotal.totalWithVat.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                                </div>
+                              ))}
+                              <div className="h-[1px] bg-slate-200/80 my-1"></div>
+                              <div className="flex justify-between text-slate-500 text-[9.5px]">
+                                <span>Subtotal (Ex VAT):</span>
+                                <span className="font-semibold font-mono">${overallTotals.totalAmountExVat.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                              </div>
+                              <div className="flex justify-between text-slate-500 text-[9.5px]">
+                                <span>Total VAT:</span>
+                                <span className="font-semibold font-mono">${overallTotals.totalVat.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                              </div>
+                              <div className="h-[1px] bg-slate-200/80 my-1"></div>
+                              
+                              {/* STACKED GRAND TOTAL BLOCK */}
+                              <div className="flex flex-col pt-1.5 space-y-0.5">
+                                <span className="text-indigo-600 font-extrabold font-mono uppercase text-[9px] tracking-wider leading-none">GRAND TOTAL</span>
+                                <span className="font-mono text-indigo-650 text-base font-black leading-tight">${overallTotals.grandTotalAll.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                              </div>
+                            </div>
+                          </div>
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold uppercase tracking-wider text-slate-700">GRAND TOTAL INVOICED:</span>
-                      <span className="font-sans text-lg font-black text-indigo-600">
-                        ${grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                    </div>
-
-                  </div>
-
-                </div>
-
-                {/* PAYMENT SUMMARY & HISTORY SECTION */}
-                <div className="mt-8 pt-6 border-t border-slate-200">
-                  <div className="flex items-center gap-2 mb-4">
-                    <DollarSign className="h-4 w-4 text-indigo-600" />
-                    <h4 className="text-xs font-bold uppercase tracking-widest text-slate-800">
-                      Payment Summary & Audit Track
-                    </h4>
-                  </div>
-                  
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-2">
-                    
-                    {/* Payment Summary Metrics Card */}
-                    <div className="bg-slate-50 rounded-2xl border border-slate-251 border-slate-200 p-5 space-y-3.5">
-                      <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block pb-1 border-b border-slate-200/40">
-                        Payment Status Breakdown
-                      </span>
-                      
-                      <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
-                        <span>Invoice Total Amount:</span>
-                        <span className="font-mono font-bold text-slate-900">
-                          ${grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        </span>
+                          {/* STACKED AMOUNT IN WORDS BLOCK */}
+                          <div className="pt-2 border-t border-slate-200/80 space-y-1">
+                            <span className="text-[8px] font-mono font-black text-slate-400 tracking-wider block leading-none">AMOUNT IN WORDS</span>
+                            <p className="text-[9px] font-bold text-slate-700 italic leading-normal whitespace-normal break-words">
+                              {numberToWords(overallTotals.grandTotalAll)}
+                            </p>
+                          </div>
+                        </div>
                       </div>
+                    )}
 
-                      <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
-                        <span>Total Paid to Date:</span>
-                        <span className="font-mono font-black text-emerald-600">
-                          ${paymentInfo.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
-                        <span>Remaining Outstanding Balance:</span>
-                        <span className={`font-mono font-black ${paymentInfo.remainingBalance > 0 ? 'text-rose-600' : 'text-slate-500'}`}>
-                          ${paymentInfo.remainingBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        </span>
-                      </div>
-
-                      <div className="w-full h-[1px] bg-slate-200 my-2"></div>
-
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold uppercase tracking-wider text-slate-700">Settlement Status:</span>
-                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-extrabold border uppercase tracking-wider ${
-                          paymentInfo.status === 'Fully Paid'
-                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200 shadow-3xs'
-                            : 'bg-orange-50 text-orange-700 border-orange-200 shadow-3xs'
-                        }`}>
-                          <span className={`h-1.5 w-1.5 rounded-full ${
-                            paymentInfo.status === 'Fully Paid' ? 'bg-emerald-500' : 'bg-orange-500'
-                          }`}></span>
-                          {paymentInfo.status === 'Fully Paid' ? 'Paid' : paymentInfo.status === 'Partially Paid' ? 'Pending' : 'Pending'}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Payment History Audit Section */}
-                    <div className="border border-slate-200 rounded-2xl bg-white p-5 flex flex-col justify-between">
+                    {/* PERSISTENT FOOTER FOR EVERY SINGLE PAGE */}
+                    <div className="pt-3 mt-auto border-t border-slate-100 flex flex-row items-center justify-between text-[9px] text-slate-400 tracking-wide font-semibold mt-4">
                       <div>
-                        <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest block pb-1 border-b border-slate-200/40 mb-3">
-                          Payment History Details
-                        </span>
-                        
-                        {paymentInfo.paymentHistory.length === 0 ? (
-                          <div className="p-4 rounded-xl bg-slate-50 border border-slate-100 text-center text-xs text-slate-400 font-medium italic">
-                            No payment history has been posted to this invoice yet.
-                          </div>
-                        ) : (
-                          <div className="space-y-2 max-h-40 overflow-y-auto">
-                            <table className="w-full text-left border-collapse">
-                              <thead>
-                                <tr className="border-b border-slate-100 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                                  <th className="pb-1.5 font-bold">Payment Date</th>
-                                  <th className="pb-1.5 text-right font-bold">Amount Paid</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-slate-50">
-                                {paymentInfo.paymentHistory.map((ph, idx) => (
-                                  <tr key={idx} className="text-xs text-slate-600 hover:bg-slate-50/50">
-                                    <td className="py-2 text-slate-500 font-medium">
-                                      {new Date(ph.paymentDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
-                                    </td>
-                                    <td className="py-2 text-right font-mono font-bold text-emerald-600">
-                                      ${ph.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
+                        <p className="font-black uppercase text-[8px] text-indigo-600">SYSTEM CERTIFIED INVOICE</p>
+                        <p className="mt-0.5 text-slate-400 font-normal">This is a system generated invoice and does not require signature.</p>
                       </div>
-                      
-                      <div className="mt-4 text-[10px] text-slate-400 flex items-center gap-1.5 pt-3 border-t border-slate-50">
-                        <Check className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
-                        <span>Receipt history is dynamically synchronized matching current customer payments list.</span>
+                      <div className="text-right">
+                        <p className="font-mono text-slate-400 tracking-tight font-normal">Invoice Code: {invoiceNumber} | Page {pageIdx + 1} of {pageCount}</p>
                       </div>
                     </div>
 
                   </div>
-                </div>
-
-              </div>
-
-              {/* OUTWARD FOOTER BAR AT ROOT */}
-              <div className="pt-12 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-4 text-[10px] text-slate-400 tracking-wide font-medium">
-                <div>
-                  <p className="font-bold uppercase text-[9px] text-slate-550 text-slate-500">{company.name}</p>
-                  <p className="mt-0.5">{company.website}  |  Contact: {company.phone}</p>
-                </div>
-                <div className="text-left sm:text-right">
-                  <p className="font-bold uppercase text-[9px] text-indigo-500">System Certified Invoice</p>
-                  <p className="mt-0.5 font-mono text-slate-400 tracking-normal">Sale Reference: {sale.id}</p>
-                </div>
-              </div>
-
+                );
+              })}
             </div>
 
           </div>
 
-        </div>
+         </div>
 
-      </motion.div>
+       </motion.div>
     </div>
   );
 }
