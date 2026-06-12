@@ -17,7 +17,7 @@ import {
   Activity
 } from 'lucide-react';
 import { motion } from 'motion/react';
-import { Sale, Customer, Product, Supplier, Capital, CashLedgerEntry, Purchase, CustomerPayment, SupplierPayment } from '../types';
+import { Sale, Customer, Product, Supplier, Capital, CashLedgerEntry, Purchase, CustomerPayment, SupplierPayment, getNormalizedItems, getSaleSummary } from '../types';
 
 export default function BalanceSheet() {
   const [loading, setLoading] = useState(true);
@@ -182,16 +182,9 @@ export default function BalanceSheet() {
   const totalCashOutflows = cashPurchasesTotal + supplierPaymentsTotal;
 
   // --- B. PROFIT SUMMARY (Strict execution from sales snapshot metadata only) ---
-  const totalRevenue = activeSales.reduce((sum, s) => sum + (s.subtotal ?? (s.totalAmount - (s.taxAmount ?? 0))), 0);
+  const totalRevenue = activeSales.reduce((sum, s) => sum + getSaleSummary(s, products).subtotal, 0);
   
-  const totalCOGS = activeSales.reduce((sum, s) => {
-    const saleCOGS = s.costOfGoodsSold !== undefined 
-      ? s.costOfGoodsSold 
-      : (s.productPurchasePriceAtSale !== undefined 
-          ? s.productPurchasePriceAtSale 
-          : s.sellingPrice * 0.6) * s.quantity;
-    return sum + saleCOGS;
-  }, 0);
+  const totalCOGS = activeSales.reduce((sum, s) => sum + getSaleSummary(s, products).costOfGoodsSold, 0);
 
   const grossProfit = totalRevenue - totalCOGS;
   // Net Profit in this system equals Gross Profit as there are no distinct operations collections

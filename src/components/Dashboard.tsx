@@ -31,7 +31,7 @@ import {
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
-import { Sale, Customer, Product, Supplier, Capital, CashLedgerEntry } from '../types';
+import { Sale, Customer, Product, Supplier, Capital, CashLedgerEntry, getNormalizedItems, getSaleSummary } from '../types';
 
 export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
   // --- States ---
@@ -363,15 +363,13 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
 
   // 3. Profit calculations (based strictly on subtotal minus costOfGoodsSold, excluding tax) (excluding VOID/voided)
   const cashProfitValue = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided' && (s.paymentType || '').toString().toUpperCase().trim() !== 'CREDIT').reduce((sum, s) => {
-    const saleSubtotal = s.subtotal ?? (s.quantity * (s.unitPrice ?? s.sellingPrice));
-    const saleCOGS = s.costOfGoodsSold !== undefined ? s.costOfGoodsSold : (s.productPurchasePriceAtSale !== undefined ? s.productPurchasePriceAtSale : s.sellingPrice * 0.6) * s.quantity;
-    return sum + (saleSubtotal - saleCOGS);
+    const summary = getSaleSummary(s, products);
+    return sum + (summary.subtotal - summary.costOfGoodsSold);
   }, 0);
 
   const creditProfitValue = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided' && (s.paymentType || '').toString().toUpperCase().trim() === 'CREDIT').reduce((sum, s) => {
-    const saleSubtotal = s.subtotal ?? (s.quantity * (s.unitPrice ?? s.sellingPrice));
-    const saleCOGS = s.costOfGoodsSold !== undefined ? s.costOfGoodsSold : (s.productPurchasePriceAtSale !== undefined ? s.productPurchasePriceAtSale : s.sellingPrice * 0.6) * s.quantity;
-    return sum + (saleSubtotal - saleCOGS);
+    const summary = getSaleSummary(s, products);
+    return sum + (summary.subtotal - summary.costOfGoodsSold);
   }, 0);
 
   const salesProfitValue = cashProfitValue + creditProfitValue;
@@ -390,11 +388,19 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
     .filter(p => p.status !== 'inactive')
     .reduce((sum, p) => {
       const totalProcured = (purchases || [])
-        .filter(pur => pur.productId === p.id && pur.status !== 'VOID' && pur.status !== 'voided')
-        .reduce((s, pur) => s + (pur.quantity || 0), 0);
+        .filter(pur => pur.status !== 'VOID' && pur.status !== 'voided')
+        .reduce((s, pur) => {
+          const items = getNormalizedItems(pur);
+          const matchedItem = items.find(item => item.productId === p.id);
+          return s + (matchedItem ? matchedItem.quantity : 0);
+        }, 0);
       const totalSold = (sales || [])
-        .filter(sale => sale.productId === p.id && sale.status !== 'VOID' && sale.status !== 'voided')
-        .reduce((s, sale) => s + (sale.quantity || 0), 0);
+        .filter(sale => sale.status !== 'VOID' && sale.status !== 'voided')
+        .reduce((s, sale) => {
+          const items = getNormalizedItems(sale);
+          const matchedItem = items.find(item => item.productId === p.id);
+          return s + (matchedItem ? matchedItem.quantity : 0);
+        }, 0);
       const openingQty =
         p.initialStock !== undefined
           ? p.initialStock
@@ -406,11 +412,19 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
     .filter(p => p.status !== 'inactive')
     .reduce((sum, p) => {
       const totalProcured = (purchases || [])
-        .filter(pur => pur.productId === p.id && pur.status !== 'VOID' && pur.status !== 'voided')
-        .reduce((s, pur) => s + (pur.quantity || 0), 0);
+        .filter(pur => pur.status !== 'VOID' && pur.status !== 'voided')
+        .reduce((s, pur) => {
+          const items = getNormalizedItems(pur);
+          const matchedItem = items.find(item => item.productId === p.id);
+          return s + (matchedItem ? matchedItem.quantity : 0);
+        }, 0);
       const totalSold = (sales || [])
-        .filter(sale => sale.productId === p.id && sale.status !== 'VOID' && sale.status !== 'voided')
-        .reduce((s, sale) => s + (sale.quantity || 0), 0);
+        .filter(sale => sale.status !== 'VOID' && sale.status !== 'voided')
+        .reduce((s, sale) => {
+          const items = getNormalizedItems(sale);
+          const matchedItem = items.find(item => item.productId === p.id);
+          return s + (matchedItem ? matchedItem.quantity : 0);
+        }, 0);
       const openingQty =
         p.initialStock !== undefined
           ? p.initialStock
@@ -458,7 +472,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
   const lowStockCount = lowStockProductsList.length;
 
   // Additional stats: Overall profit margin percentage (excluding tax) (excluding VOID/voided)
-  const overallSalesSubtotal = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided').reduce((sum, s) => sum + (s.subtotal ?? (s.quantity * (s.unitPrice ?? s.sellingPrice))), 0);
+  const overallSalesSubtotal = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided').reduce((sum, s) => sum + getSaleSummary(s, products).subtotal, 0);
   const averageProfitMargin = overallSalesSubtotal > 0 ? (salesProfitValue / overallSalesSubtotal) * 100 : 0;
 
   // --- Dynamic Graph Coordinates Processing (Pure Vector Line Graphs) ---
@@ -1194,9 +1208,12 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
                 // Group sales volumes by category
                 const catSalesMap: Record<string, number> = {};
                 sales.forEach(s => {
-                  const mProd = products.find(p => p.id === s.productId);
-                  const cat = mProd ? mProd.category : 'General';
-                  catSalesMap[cat] = (catSalesMap[cat] || 0) + s.totalAmount;
+                  const items = getNormalizedItems(s);
+                  items.forEach(item => {
+                    const mProd = products.find(p => p.id === item.productId);
+                    const cat = mProd ? mProd.category : 'General';
+                    catSalesMap[cat] = (catSalesMap[cat] || 0) + item.totalAmount;
+                  });
                 });
 
                 const sortedCats = Object.entries(catSalesMap)

@@ -186,6 +186,48 @@ export function getNormalizedItems(transaction: any): LineItem[] {
   }];
 }
 
+export function getSaleSummary(sale: Sale, products: Product[]): {
+  subtotal: number;
+  totalAmount: number;
+  taxAmount: number;
+  costOfGoodsSold: number;
+  grossProfit: number;
+} {
+  const isLegacy = !sale.items || sale.items.length === 0;
+  if (isLegacy) {
+    const subtotal = sale.subtotal !== undefined ? sale.subtotal : ((sale.quantity || 0) * (sale.unitPrice ?? sale.sellingPrice ?? 0));
+    const totalAmount = sale.totalAmount !== undefined ? sale.totalAmount : subtotal;
+    const taxAmount = sale.taxAmount !== undefined ? sale.taxAmount : (totalAmount - subtotal);
+    const costOfGoodsSold = sale.costOfGoodsSold !== undefined 
+      ? sale.costOfGoodsSold 
+      : (sale.productPurchasePriceAtSale !== undefined ? sale.productPurchasePriceAtSale : (sale.sellingPrice ?? 0) * 0.6) * (sale.quantity || 0);
+    const grossProfit = sale.grossProfit !== undefined ? sale.grossProfit : (subtotal - costOfGoodsSold);
+    return { subtotal, totalAmount, taxAmount, costOfGoodsSold, grossProfit };
+  } else {
+    const items = sale.items || [];
+    let subtotal = 0;
+    let taxAmount = 0;
+    let totalAmount = 0;
+    let costOfGoodsSold = 0;
+
+    items.forEach(item => {
+      subtotal += item.subtotal;
+      taxAmount += item.taxAmount ?? 0;
+      totalAmount += item.totalAmount;
+      
+      const itemCOGS = (item as any).costOfGoodsSold !== undefined
+        ? (item as any).costOfGoodsSold
+        : ((item as any).purchasePriceAtSale !== undefined
+            ? (item as any).purchasePriceAtSale
+            : (products.find(p => p.id === item.productId)?.purchasePrice ?? item.unitPrice * 0.6)) * item.quantity;
+      costOfGoodsSold += itemCOGS;
+    });
+
+    const grossProfit = subtotal - costOfGoodsSold;
+    return { subtotal, totalAmount, taxAmount, costOfGoodsSold, grossProfit };
+  }
+}
+
 export interface CustomerPayment {
   id: string;
   customerId: string;

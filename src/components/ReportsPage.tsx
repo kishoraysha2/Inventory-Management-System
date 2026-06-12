@@ -25,7 +25,7 @@ import {
 import { jsPDF } from 'jspdf';
 import { db, auth } from '../lib/firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
-import { Sale, Customer, Product, Supplier } from '../types';
+import { Sale, Customer, Product, Supplier, getNormalizedItems, getSaleSummary } from '../types';
 
 type ReportType = 'sales' | 'purchases' | 'profit_loss' | 'customer_due' | 'supplier_due' | 'tax_vat' | 'activity_logs';
 
@@ -194,20 +194,16 @@ export default function ReportsPage() {
   };
 
   const filteredSales = sales.filter(s => isDateInRange(s.saleDate) && s.status !== 'voided' && s.status !== 'VOID').map(s => {
-    const subtotal = s.subtotal !== undefined ? s.subtotal : (s.totalAmount - (s.taxAmount ?? 0));
-    const totalAmount = s.totalAmount !== undefined ? s.totalAmount : subtotal;
-    const taxAmount = s.taxAmount !== undefined ? s.taxAmount : (totalAmount - subtotal);
-    const costOfGoodsSold = s.costOfGoodsSold !== undefined ? s.costOfGoodsSold : (s.productPurchasePriceAtSale !== undefined ? s.productPurchasePriceAtSale : s.sellingPrice * 0.6) * s.quantity;
-    const grossProfit = s.grossProfit !== undefined ? s.grossProfit : (subtotal - costOfGoodsSold);
+    const summary = getSaleSummary(s, products);
     const saleDate = s.saleDate;
     
     return {
       ...s,
-      subtotal,
-      totalAmount,
-      costOfGoodsSold,
-      grossProfit,
-      taxAmount,
+      subtotal: summary.subtotal,
+      totalAmount: summary.totalAmount,
+      costOfGoodsSold: summary.costOfGoodsSold,
+      grossProfit: summary.grossProfit,
+      taxAmount: summary.taxAmount,
       saleDate
     };
   });
@@ -233,7 +229,11 @@ export default function ReportsPage() {
   // --- Active Calculations Data Models ---
 
   // 1. Sales Report Math
-  const totalItemsSold = filteredSales.reduce((sum, s) => sum + (s.quantity ?? 0), 0);
+  const totalItemsSold = filteredSales.reduce((sum, s) => {
+    const items = getNormalizedItems(s);
+    const qty = items.reduce((acc, item) => acc + (item.quantity ?? 0), 0);
+    return sum + qty;
+  }, 0);
   const totalRevenue = filteredSales.reduce((sum, s) => sum + s.totalAmount, 0);
   const avgOrderValue = filteredSales.length > 0 ? totalRevenue / filteredSales.length : 0;
   const cashSalesTotal = filteredSales.filter(s => s.paymentType === 'Cash').reduce((sum, s) => sum + s.totalAmount, 0);
@@ -277,9 +277,12 @@ export default function ReportsPage() {
     if (activeReport === 'sales') {
       csvContent = "Invoice ID,Customer ID,Customer Name,Product SKU,Product Name,Quantity,Selling Price ($),Total Revenue ($),Payment Type,Sale Date\n";
       filteredSales.forEach(s => {
-        const prodMatch = products.find(p => p.id === s.productId);
-        const sku = prodMatch?.sku || "N/A";
-        csvContent += `"${s.id}","${s.customerId}","${s.customerName.replace(/"/g, '""')}","${sku}","${s.productName.replace(/"/g, '""')}",${s.quantity},${s.sellingPrice},${s.totalAmount},"${s.paymentType}","${s.saleDate}"\n`;
+        const items = getNormalizedItems(s);
+        items.forEach(item => {
+          const prodMatch = products.find(p => p.id === item.productId);
+          const sku = prodMatch?.sku || "N/A";
+          csvContent += `"${s.id}","${s.customerId}","${s.customerName.replace(/"/g, '""')}","${sku}","${item.productName.replace(/"/g, '""')}",${item.quantity},${item.unitPrice},${item.totalAmount},"${s.paymentType}","${s.saleDate}"\n`;
+        });
       });
       csvContent += `\nSUMMARY,Total Transactions,${filteredSales.length},Total Revenue,${totalRevenue},Items Sold,${totalItemsSold},Cash Amount,${cashSalesTotal},Credit Amount,${creditSalesTotal}\n`;
     } 
@@ -411,10 +414,20 @@ export default function ReportsPage() {
 
       filteredSales.slice(0, 18).forEach(s => {
         if (rowY > 260) return; // safeguard page overflow
+        const items = getNormalizedItems(s);
+        let displayProdName = "";
+        let displayQty = 0;
+        if (items.length === 1) {
+          displayProdName = items[0].productName;
+          displayQty = items[0].quantity;
+        } else if (items.length > 1) {
+          displayProdName = `${items[0].productName} + ${items.length - 1} items`;
+          displayQty = items.reduce((acc, item) => acc + item.quantity, 0);
+        }
         doc.text(s.saleDate.split('T')[0], 18, rowY);
         doc.text(s.customerName.length > 20 ? s.customerName.substring(0, 20) + '...' : s.customerName, 42, rowY);
-        doc.text(s.productName.length > 24 ? s.productName.substring(0, 24) + '...' : s.productName, 90, rowY);
-        doc.text(s.quantity.toString(), 145, rowY);
+        doc.text(displayProdName.length > 24 ? displayProdName.substring(0, 24) + '...' : displayProdName, 90, rowY);
+        doc.text(displayQty.toString(), 145, rowY);
         doc.text(s.paymentType, 160, rowY);
         doc.text(`$${s.totalAmount.toFixed(2)}`, 180, rowY);
         rowY += 6;
@@ -700,8 +713,10 @@ export default function ReportsPage() {
 
   // Filter lists inside display screens based on search query
   const searchableSales = filteredSales.filter(s => {
+    const items = getNormalizedItems(s);
+    const hasMatchingProduct = items.some(item => item.productName.toLowerCase().includes(searchQuery.toLowerCase()));
     return s.customerName.toLowerCase().includes(searchQuery.toLowerCase()) || 
-           s.productName.toLowerCase().includes(searchQuery.toLowerCase()) || 
+           hasMatchingProduct || 
            s.id.toLowerCase().includes(searchQuery.toLowerCase());
   });
 
@@ -1338,9 +1353,21 @@ export default function ReportsPage() {
                           </td>
                           <td className="py-4 px-5 text-xs font-bold text-slate-800 capitalize whitespace-nowrap">{item.customerName}</td>
                           <td className="py-4 px-5 whitespace-nowrap">
-                            <span className="text-xs font-bold text-slate-800 block">{item.productName}</span>
+                            {(() => {
+                              const normItems = getNormalizedItems(item);
+                              return normItems.map((n, idx) => (
+                                <span key={idx} className="text-xs font-bold text-slate-800 block">{n.productName}</span>
+                              ));
+                            })()}
                           </td>
-                          <td className="py-4 px-5 text-xs font-bold text-center text-slate-700 whitespace-nowrap">x{item.quantity}</td>
+                          <td className="py-4 px-5 text-xs font-bold text-center text-slate-700 whitespace-nowrap">
+                            {(() => {
+                              const normItems = getNormalizedItems(item);
+                              return normItems.map((n, idx) => (
+                                <span key={idx} className="text-xs font-semibold text-slate-500 block">x{n.quantity}</span>
+                              ));
+                            })()}
+                          </td>
                           <td className="py-4 px-5 text-xs whitespace-nowrap">
                             <span className={`inline-flex items-center px-2 py-0.5 rounded-full border font-bold text-[9px] ${
                               item.paymentType === 'Cash' 
