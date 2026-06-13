@@ -26,8 +26,9 @@ import {
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity, logFinancialAudit } from '../lib/firebase';
 import { collection, onSnapshot, doc, runTransaction, setDoc } from 'firebase/firestore';
-import { Sale, Customer, Product } from '../types';
+import { Sale, Customer, Product, LineItem, getNormalizedItems, calculateTransactionTotals, calculateLineTotals } from '../types';
 import TaxInvoiceModal from './TaxInvoiceModal';
+import LineItemTable from './LineItemTable';
 
 export const INITIAL_SALES: Sale[] = [
   {
@@ -192,6 +193,8 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
     console.log("handleVoidSale direct invocation for:", sale.id);
     setFeedback(null);
     try {
+      const normalizedItems = getNormalizedItems(sale);
+
       if (!auth.currentUser) {
         // Local Void Fallback
         const savedSales = localStorage.getItem('inventory_sales') || '[]';
@@ -203,12 +206,14 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
         const savedCustomers = localStorage.getItem('inventory_customers') || '[]';
         let customersList: Customer[] = JSON.parse(savedCustomers);
 
-        // Restore product stock
-        productsList = productsList.map(p => {
-          if (p.id === sale.productId) {
-            return { ...p, currentStock: (p.currentStock ?? 0) + sale.quantity };
-          }
-          return p;
+        // Restore product stock for all normalized items
+        normalizedItems.forEach(item => {
+          productsList = productsList.map(p => {
+            if (p.id === item.productId) {
+              return { ...p, currentStock: (p.currentStock ?? 0) + item.quantity };
+            }
+            return p;
+          });
         });
 
         // If credit, rollback customer due balance
@@ -249,23 +254,26 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
       }
 
       await runTransaction(db, async (transaction) => {
-        const productRef = doc(db, 'products', sale.productId);
-        const customerRef = doc(db, 'customers', sale.customerId);
+        // Gather all reads first
+        const productRefs = normalizedItems.map(item => doc(db, 'products', item.productId));
+        const productSnaps = await Promise.all(productRefs.map(ref => transaction.get(ref)));
 
-        // -- 1. Gather all READS first --
-        const productSnap = await transaction.get(productRef);
         let customerSnap = null;
+        const customerRef = doc(db, 'customers', sale.customerId);
         if (sale.paymentType === 'Credit') {
           customerSnap = await transaction.get(customerRef);
         }
 
-        // -- 2. Perform WRITES --
-        if (productSnap.exists()) {
-          const productData = productSnap.data() as Product;
-          transaction.update(productRef, {
-            currentStock: (productData.currentStock ?? 0) + sale.quantity
-          });
-        }
+        // Perform writes - update all items
+        normalizedItems.forEach((item, idx) => {
+          const productSnap = productSnaps[idx];
+          if (productSnap.exists()) {
+            const productData = productSnap.data() as Product;
+            transaction.update(productRefs[idx], {
+              currentStock: (productData.currentStock ?? 0) + item.quantity
+            });
+          }
+        });
 
         if (sale.paymentType === 'Credit' && customerSnap && customerSnap.exists()) {
           const customerData = customerSnap.data() as Customer;
@@ -326,6 +334,8 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
     paymentType: 'Cash' as 'Cash' | 'Credit',
     saleDate: new Date().toISOString().split('T')[0]
   });
+
+  const [lineItems, setLineItems] = useState<LineItem[]>([]);
 
   // --- Validation Errors ---
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -472,25 +482,53 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
     }));
   };
 
+  const handleTaxRateChange = (taxRateStr: string) => {
+    const rate = parseFloat(taxRateStr) || 0;
+    setFormData(prev => ({ ...prev, taxRatePercent: taxRateStr }));
+    
+    // Recalculate all line items with new tax rate
+    const updated = lineItems.map(item => {
+      const totals = calculateLineTotals(item.quantity, item.unitPrice, rate);
+      return {
+        ...item,
+        taxRatePercent: rate,
+        taxAmount: totals.taxAmount,
+        totalAmount: totals.totalAmount,
+      };
+    });
+    setLineItems(updated);
+  };
+
   // --- Form Validation ---
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
-    if (!formData.customerId) newErrors.customerId = 'Choosing a customer is required';
-    if (!formData.productId) newErrors.productId = 'Choosing a product is required';
-    
-    const qty = parseInt(formData.quantity);
-    if (isNaN(qty) || qty <= 0) {
-      newErrors.quantity = 'Quantity must be at least 1';
-    } else {
-      const selectedProd = products.find(p => p.id === formData.productId);
-      if (selectedProd && qty > selectedProd.currentStock) {
-        newErrors.quantity = `Insufficent warehouse stock. Only ${selectedProd.currentStock} units left for "${selectedProd.name}"`;
-      }
+    if (!formData.customerId) {
+      newErrors.customerId = 'Choosing a customer is required';
     }
 
-    const price = parseFloat(formData.sellingPrice);
-    if (isNaN(price) || price < 0) {
-      newErrors.sellingPrice = 'Enter a valid positive unit selling price';
+    if (lineItems.length === 0) {
+      newErrors.lineItems = 'At least one product line item is required';
+    } else {
+      // Check each line item has selected product
+      const emptyProductIdx = lineItems.findIndex(item => !item.productId);
+      if (emptyProductIdx !== -1) {
+        newErrors.lineItems = 'All rows must have a selected product';
+      } else {
+        // Aggregate requested quantities by productId
+        const requestedQuantities: Record<string, number> = {};
+        lineItems.forEach(item => {
+          requestedQuantities[item.productId] = (requestedQuantities[item.productId] || 0) + item.quantity;
+        });
+
+        // Validate stock levels
+        for (const [prodId, reqQty] of Object.entries(requestedQuantities)) {
+          const product = products.find(p => p.id === prodId);
+          if (product && reqQty > product.currentStock) {
+            newErrors.lineItems = `Insufficient warehouse stock for "${product.name}". Requested total: ${reqQty} units, but only ${product.currentStock} units are available.`;
+            break;
+          }
+        }
+      }
     }
 
     const taxRate = parseFloat(formData.taxRatePercent);
@@ -517,6 +555,18 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
       paymentType: 'Cash',
       saleDate: new Date().toISOString().split('T')[0]
     });
+    setLineItems([
+      {
+        productId: '',
+        productName: '',
+        quantity: 1,
+        unitPrice: 0,
+        subtotal: 0,
+        taxRatePercent: 15,
+        taxAmount: 0,
+        totalAmount: 0,
+      }
+    ]);
     setErrors({});
     setIsFormOpen(true);
   };
@@ -527,43 +577,17 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
     if (!validateForm()) return;
 
     const chosenCust = customers.find(c => c.id === formData.customerId);
-    const chosenProd = products.find(p => p.id === formData.productId);
-
-    if (!chosenCust || !chosenProd) {
-      setFeedback({ message: 'Selected customer or product configuration mismatch.', type: 'error' });
+    if (!chosenCust) {
+      setFeedback({ message: 'Selected customer not found.', type: 'error' });
       return;
     }
 
-    if (chosenProd.status === 'inactive') {
-      setFeedback({ message: 'Selected product is inactive and cannot be sold.', type: 'error' });
-      return;
-    }
-
-    const numQty = parseInt(formData.quantity);
-    const numPrice = parseFloat(formData.sellingPrice);
-    const subtotal = numQty * numPrice;
     const taxRatePercent = parseFloat(formData.taxRatePercent) || 0;
-    const taxAmount = (subtotal * taxRatePercent) / 100;
-    const totalAmount = subtotal + taxAmount;
+    const totalsSummary = calculateTransactionTotals(lineItems);
+    const subtotal = totalsSummary.subtotal;
+    const taxAmount = totalsSummary.taxAmount;
+    const totalAmount = totalsSummary.totalAmount;
     const saleId = `sale-${Date.now()}`;
-
-    const finalizedSaleData: Sale = {
-      id: saleId,
-      customerId: chosenCust.id,
-      customerName: chosenCust.name,
-      productId: chosenProd.id,
-      productName: chosenProd.name,
-      quantity: numQty,
-      sellingPrice: numPrice,
-      unitPrice: numPrice,
-      subtotal: subtotal,
-      taxRatePercent: taxRatePercent,
-      taxAmount: taxAmount,
-      totalAmount: totalAmount,
-      paymentType: formData.paymentType,
-      saleDate: new Date(formData.saleDate).toISOString(),
-      timestamp: new Date(formData.saleDate).toISOString()
-    };
 
     setIsSaving(true);
     try {
@@ -578,35 +602,61 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
         const savedCustomers = localStorage.getItem('inventory_customers') || '[]';
         let customersList: Customer[] = JSON.parse(savedCustomers);
 
-        const testProductIndex = productsList.findIndex(p => p.id === chosenProd.id);
-        if (testProductIndex === -1) {
-          throw new Error(`Product "${chosenProd.name}" no longer exists locally.`);
-        }
-        const prodData = productsList[testProductIndex];
-        const liveStock = prodData.currentStock ?? 0;
+        // First deduct stock for all items
+        lineItems.forEach(item => {
+          const testProductIndex = productsList.findIndex(p => p.id === item.productId);
+          if (testProductIndex === -1) {
+            throw new Error(`Product "${item.productName}" no longer exists locally.`);
+          }
+          const prodData = productsList[testProductIndex];
+          if (prodData.currentStock < item.quantity) {
+            throw new Error(`Insufficient stock level for "${item.productName}". Available: ${prodData.currentStock}, Requested: ${item.quantity}`);
+          }
+          // Update product stock
+          productsList[testProductIndex] = {
+            ...prodData,
+            currentStock: prodData.currentStock - item.quantity
+          };
+        });
 
-        if (liveStock < numQty) {
-          throw new Error(`Insufficient stock level. Current limit: ${liveStock}, Requested Quantity: ${numQty}`);
-        }
+        // Create items array with snap values
+        const itemsWithSnap = lineItems.map(item => {
+          const prod = productsList.find(p => p.id === item.productId);
+          const purchasePriceAtSale = prod?.purchasePrice ?? 0;
+          const costOfGoodsSold = purchasePriceAtSale * item.quantity;
+          const grossProfit = item.subtotal - costOfGoodsSold;
+          return {
+            ...item,
+            purchasePriceAtSale,
+            costOfGoodsSold,
+            grossProfit
+          };
+        });
 
-        // Calculations
-        const purchasePriceAtSale = prodData.purchasePrice ?? 0;
-        const sellingPriceAtSale = prodData.sellingPrice ?? 0;
-        const costOfGoodsSold = purchasePriceAtSale * numQty;
-        const grossProfit = subtotal - costOfGoodsSold;
+        const totalCOGS = itemsWithSnap.reduce((sum, item) => sum + item.costOfGoodsSold, 0);
+        const totalGrossProfit = subtotal - totalCOGS;
 
         const finalizedSaleWithSnapshot: Sale = {
-          ...finalizedSaleData,
-          productPurchasePriceAtSale: purchasePriceAtSale,
-          productSellingPriceAtSale: sellingPriceAtSale,
-          costOfGoodsSold: costOfGoodsSold,
-          grossProfit: grossProfit
-        };
-
-        // Update product stock
-        productsList[testProductIndex] = {
-          ...prodData,
-          currentStock: liveStock - numQty
+          id: saleId,
+          customerId: chosenCust.id,
+          customerName: chosenCust.name,
+          productId: lineItems[0].productId,
+          productName: lineItems.length > 1 ? `${lineItems[0].productName} + ${lineItems.length - 1} items` : lineItems[0].productName,
+          quantity: lineItems.reduce((sum, item) => sum + item.quantity, 0),
+          sellingPrice: lineItems[0].unitPrice,
+          unitPrice: lineItems[0].unitPrice,
+          subtotal: subtotal,
+          taxRatePercent: taxRatePercent,
+          taxAmount: taxAmount,
+          totalAmount: totalAmount,
+          paymentType: formData.paymentType,
+          saleDate: new Date(formData.saleDate).toISOString(),
+          timestamp: new Date(formData.saleDate).toISOString(),
+          productPurchasePriceAtSale: itemsWithSnap[0]?.purchasePriceAtSale ?? 0,
+          productSellingPriceAtSale: lineItems[0].unitPrice,
+          costOfGoodsSold: totalCOGS,
+          grossProfit: totalGrossProfit,
+          items: itemsWithSnap
         };
 
         // If Credit, update customer due balance
@@ -630,7 +680,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
             source: 'sale',
             amount: totalAmount,
             referenceId: saleId,
-            description: `Sold product "${chosenProd.name}" to customer "${chosenCust.name}"`,
+            description: `Sold ${lineItems.length} items to Customer "${chosenCust.name}"`,
             timestamp: new Date().toISOString()
           });
           localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
@@ -647,7 +697,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
         setCustomersState(customersList);
 
         setFeedback({
-          message: `Successfully logged offline sale of $${totalAmount.toFixed(2)} to "${chosenCust.name}".`,
+          message: `Successfully logged offline multi-line sale of $${totalAmount.toFixed(2)} to "${chosenCust.name}".`,
           type: 'success'
         });
         setIsFormOpen(false);
@@ -658,19 +708,32 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
       // Execute Atomic Database Updates
       await runTransaction(db, async (transaction) => {
         // A. Verify and read Product stock live in transaction
-        const productRef = doc(db, 'products', chosenProd.id);
-        const productSnap = await transaction.get(productRef);
-        if (!productSnap.exists()) {
-          throw new Error(`Product "${chosenProd.name}" no longer exists.`);
-        }
-        const productData = productSnap.data() as Product;
-        if (productData.status === 'inactive') {
-          throw new Error(`Transactional abort: Product "${chosenProd.name}" has been marked as inactive.`);
-        }
-        const liveProductStock = productData.currentStock ?? 0;
+        const productRefs = lineItems.map(item => doc(db, 'products', item.productId));
+        const productSnaps = await Promise.all(productRefs.map(ref => transaction.get(ref)));
+
+        const productUpdates: Array<{ ref: any; newStock: number; purchasePrice: number }> = [];
         
-        if (liveProductStock < numQty) {
-          throw new Error(`Transactional abort: Insufficient stock. Live: ${liveProductStock}, Requested: ${numQty}`);
+        for (let i = 0; i < lineItems.length; i++) {
+          const item = lineItems[i];
+          const snap = productSnaps[i];
+          if (!snap.exists()) {
+            throw new Error(`Product "${item.productName}" no longer exists.`);
+          }
+          const productData = snap.data() as Product;
+          if (productData.status === 'inactive') {
+            throw new Error(`Transactional abort: Product "${item.productName}" has been marked as inactive.`);
+          }
+          const liveProductStock = productData.currentStock ?? 0;
+          
+          if (liveProductStock < item.quantity) {
+            throw new Error(`Transactional abort: Insufficient stock for "${item.productName}". Live: ${liveProductStock}, Requested: ${item.quantity}`);
+          }
+
+          productUpdates.push({
+            ref: productRefs[i],
+            newStock: liveProductStock - item.quantity,
+            purchasePrice: productData.purchasePrice ?? 0
+          });
         }
 
         // B. Verify and read Customer balance if Credit Payment
@@ -686,30 +749,57 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
           liveCustBalance = (customerData.dueBalance ?? 0) + totalAmount;
         }
 
-        // C. WRITE: Decrement product stock level
-        transaction.update(productRef, {
-          currentStock: liveProductStock - numQty
+        // C. WRITE operations (after all READS)
+        productUpdates.forEach(update => {
+          transaction.update(update.ref, {
+            currentStock: update.newStock
+          });
         });
 
-        // D. WRITE: Add balance to Customer profile if credit
         if (formData.paymentType === 'Credit' && customerRef) {
           transaction.update(customerRef, {
             dueBalance: liveCustBalance
           });
         }
 
-        // E. WRITE: Log sale ledger block
-        const purchasePriceAtSale = productData.purchasePrice ?? 0;
-        const sellingPriceAtSale = productData.sellingPrice ?? 0;
-        const costOfGoodsSold = purchasePriceAtSale * numQty;
-        const grossProfit = subtotal - costOfGoodsSold;
+        // D. Create items snapshot with correct snap prices
+        const itemsWithSnap = lineItems.map((item, idx) => {
+          const pPrice = productUpdates[idx].purchasePrice;
+          const costOfGoodsSold = pPrice * item.quantity;
+          const grossProfit = item.subtotal - costOfGoodsSold;
+          return {
+            ...item,
+            purchasePriceAtSale: pPrice,
+            costOfGoodsSold,
+            grossProfit
+          };
+        });
+
+        // E. Log sale ledger block
+        const totalCOGS = itemsWithSnap.reduce((sum, item) => sum + item.costOfGoodsSold, 0);
+        const totalGrossProfit = subtotal - totalCOGS;
 
         const finalizedSaleWithSnapshot: Sale = {
-          ...finalizedSaleData,
-          productPurchasePriceAtSale: purchasePriceAtSale,
-          productSellingPriceAtSale: sellingPriceAtSale,
-          costOfGoodsSold: costOfGoodsSold,
-          grossProfit: grossProfit
+          id: saleId,
+          customerId: chosenCust.id,
+          customerName: chosenCust.name,
+          productId: lineItems[0].productId,
+          productName: lineItems.length > 1 ? `${lineItems[0].productName} + ${lineItems.length - 1} items` : lineItems[0].productName,
+          quantity: lineItems.reduce((sum, item) => sum + item.quantity, 0),
+          sellingPrice: lineItems[0].unitPrice,
+          unitPrice: lineItems[0].unitPrice,
+          subtotal: subtotal,
+          taxRatePercent: taxRatePercent,
+          taxAmount: taxAmount,
+          totalAmount: totalAmount,
+          paymentType: formData.paymentType,
+          saleDate: new Date(formData.saleDate).toISOString(),
+          timestamp: new Date(formData.saleDate).toISOString(),
+          productPurchasePriceAtSale: productUpdates[0]?.purchasePrice ?? 0,
+          productSellingPriceAtSale: lineItems[0].unitPrice,
+          costOfGoodsSold: totalCOGS,
+          grossProfit: totalGrossProfit,
+          items: itemsWithSnap
         };
 
         const saleRef = doc(db, 'sales', saleId);
@@ -724,7 +814,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
             source: 'sale',
             amount: totalAmount,
             referenceId: saleId,
-            description: `Cash sale of x${numQty} "${chosenProd.name}" to "${chosenCust.name}"`,
+            description: `Cash sale of ${lineItems.length} items to "${chosenCust.name}"`,
             timestamp: new Date(formData.saleDate).toISOString()
           });
         }
@@ -733,16 +823,21 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
       // Log activity to the Logs collection
       await logSystemActivity(
         "Sale completed",
-        `Completed sale of x${numQty} "${chosenProd.name}" to "${chosenCust.name}" (Subtotal: $${subtotal.toFixed(2)}, Tax ID Applied: $${taxAmount.toFixed(2)}, Total: $${totalAmount.toFixed(2)}, Payment: ${formData.paymentType})`
+        `Completed multi-line sale of ${lineItems.length} items to "${chosenCust.name}" (Subtotal: $${subtotal.toFixed(2)}, VAT Applied: $${taxAmount.toFixed(2)}, Total: $${totalAmount.toFixed(2)}, Payment: ${formData.paymentType})`
       );
       
-      await logSystemActivity(
-        "Stock updated",
-        `Decreased stock level for "${chosenProd.name}" (SKU: ${chosenProd.sku}) by -${numQty} units. Remaining stock: ${chosenProd.currentStock - numQty} units.`
-      );
+      for (const item of lineItems) {
+        const product = products.find(p => p.id === item.productId);
+        if (product) {
+          await logSystemActivity(
+            "Stock updated",
+            `Decreased stock level for "${item.productName}" (SKU: ${product.sku}) by -${item.quantity} units.`
+          );
+        }
+      }
 
       setFeedback({
-        message: `Atomically recorded purchase of x${numQty} "${chosenProd.name}" to "${chosenCust.name}". Net amount with VAT: $${totalAmount.toFixed(2)}`,
+        message: `Atomically recorded multi-line sale of ${lineItems.length} items to "${chosenCust.name}". Net amount with VAT: $${totalAmount.toFixed(2)}`,
         type: 'success'
       });
       setIsFormOpen(false);
@@ -1292,107 +1387,21 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
                   )}
                 </div>
 
-                {/* Select Product */}
-                <div className="relative w-full">
-                  {products.filter(p => p.status !== 'inactive').length === 0 ? (
-                    <div className="p-3.5 bg-rose-50 border border-rose-100 rounded-xl text-xs text-rose-800 font-medium animate-fade-in shadow-3xs">
-                      ⚠️ No active products cataloged inside database. Add or reactivate products first.
-                    </div>
-                  ) : (
-                    <div className="relative w-full">
-                      <select
-                        id="form-sales-product-field"
-                        value={formData.productId}
-                        onChange={(e) => handleProductChange(e.target.value)}
-                        required
-                        className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 bg-white appearance-none cursor-pointer disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
-                          errors.productId
-                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
-                            : 'border-slate-200 focus:border-indigo-605'
-                        }`}
-                      >
-                        <option value="">-- Choose Product SKU --</option>
-                        {products.filter(p => p.status !== 'inactive').map((p) => {
-                          const outOfStock = p.currentStock <= 0;
-                          return (
-                            <option key={p.id} value={p.id} disabled={outOfStock}>
-                              {p.name} ({p.currentStock > 0 ? `${p.currentStock} units left` : 'OUT OF STOCK'} • SRP: ${p.sellingPrice.toFixed(2)})
-                            </option>
-                          );
-                        })}
-                      </select>
-                      <label htmlFor="form-sales-product-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
-                        Product Specification <span className="text-rose-500 font-extrabold">*</span>
-                      </label>
-                    </div>
-                  )}
-                  {errors.productId && (
-                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
-                      <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
-                      <span>{errors.productId}</span>
-                    </div>
-                  )}
-                </div>
+                {/* Reusable LineItemTable Component */}
+                <LineItemTable
+                  items={lineItems}
+                  onChange={setLineItems}
+                  products={products}
+                  taxRatePercent={parseFloat(formData.taxRatePercent) || 0}
+                  pricingMode="sellingPrice"
+                />
 
-                              {/* Grid Inputs for Quantity & Pricing */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                  
-                  {/* Quantity input */}
-                  <div className="relative w-full">
-                    <input
-                      type="number"
-                      required
-                      min="1"
-                      id="form-sales-qty-field"
-                      value={formData.quantity}
-                      onChange={(e) => setFormData({ ...formData, quantity: e.target.value })}
-                      placeholder=" "
-                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
-                        errors.quantity
-                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
-                          : 'border-slate-200 focus:border-indigo-605'
-                      }`}
-                    />
-                    <label htmlFor="form-sales-qty-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
-                      Quantity Trade Units <span className="text-rose-500 font-extrabold">*</span>
-                    </label>
-                    {errors.quantity && (
-                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
-                        <AlertTriangle className="h-3.5 w-3.5 text-rose-505 shrink-0" />
-                        <span>{errors.quantity}</span>
-                      </div>
-                    )}
+                {errors.lineItems && (
+                  <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                    <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                    <span>{errors.lineItems}</span>
                   </div>
-
-                  {/* Selling price */}
-                  <div className="relative w-full">
-                    <span className="absolute left-3.5 top-[18px] text-slate-400 text-xs font-semibold leading-none">$</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      required
-                      id="form-sales-price-field"
-                      value={formData.sellingPrice}
-                      onChange={(e) => setFormData({ ...formData, sellingPrice: e.target.value })}
-                      placeholder=" "
-                      className={`peer w-full rounded-xl border pl-[26px] pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
-                        errors.sellingPrice 
-                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
-                          : 'border-slate-200 focus:border-indigo-605'
-                      }`}
-                    />
-                    <label htmlFor="form-sales-price-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-[26px] peer-focus:top-1.5 peer-focus:left-3.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
-                      Selling Price Override ($) <span className="text-rose-500 font-extrabold">*</span>
-                    </label>
-                    {errors.sellingPrice && (
-                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
-                        <AlertTriangle className="h-3.5 w-3.5 text-rose-505 shrink-0" />
-                        <span>{errors.sellingPrice}</span>
-                      </div>
-                    )}
-                  </div>
-
-                </div>
+                )}
 
                 {/* Date and Settlement selection */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
@@ -1453,7 +1462,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
                       required
                       id="form-sales-tax-field"
                       value={formData.taxRatePercent}
-                      onChange={(e) => setFormData({ ...formData, taxRatePercent: e.target.value })}
+                      onChange={(e) => handleTaxRateChange(e.target.value)}
                       placeholder=" "
                       className={`peer w-full rounded-xl border pl-3.5 pr-8 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
                         errors.taxRatePercent 
@@ -1474,32 +1483,29 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
                 </div>
 
                 {/* Dynamic Summary Breakdown Banner */}
-                {formData.productId && formData.customerId && (() => {
-                  const subVal = (parseInt(formData.quantity) || 1) * (parseFloat(formData.sellingPrice) || 0);
-                  const rateVal = parseFloat(formData.taxRatePercent) || 0;
-                  const taxVal = (subVal * rateVal) / 100;
-                  const grandVal = subVal + taxVal;
+                {formData.customerId && lineItems.length > 0 && (() => {
+                  const totalsSummary = calculateTransactionTotals(lineItems);
                   return (
                     <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-2 text-xs">
                       <p className="font-bold text-slate-800 uppercase tracking-wider text-[10px]">Dynamic invoice Summary</p>
                       <div className="flex items-center justify-between font-medium">
                         <span className="text-slate-500">
-                          {currentSelectedProduct?.name || 'Item'} (x{parseInt(formData.quantity) || 1})
+                          Total Line Items ({lineItems.length})
                         </span>
-                        <span className="text-slate-800">
-                          ${subVal.toFixed(2)}
+                        <span className="text-slate-800 font-mono font-bold">
+                          ${totalsSummary.subtotal.toFixed(2)}
                         </span>
                       </div>
                       <div className="flex items-center justify-between font-medium text-[11px] text-slate-500 border-t border-dashed border-slate-200/60 pt-1.5">
-                        <span>Sales Tax / VAT ({rateVal}%)</span>
-                        <span>
-                          ${taxVal.toFixed(2)}
+                        <span>Total Sales Tax / VAT ({parseFloat(formData.taxRatePercent) || 0}%)</span>
+                        <span className="font-mono font-semibold">
+                          ${totalsSummary.taxAmount.toFixed(2)}
                         </span>
                       </div>
                       <div className="flex items-center justify-between font-bold text-indigo-600 pt-1.5 border-t border-slate-200">
                         <span>Total Invoice Due (Locked)</span>
-                        <span>
-                          ${grandVal.toFixed(2)}
+                        <span className="font-mono font-extrabold text-sm">
+                          ${totalsSummary.totalAmount.toFixed(2)}
                         </span>
                       </div>
                     </div>

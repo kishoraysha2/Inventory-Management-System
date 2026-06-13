@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import QRCode from 'qrcode';
-import { Sale, Customer, Product } from '../types';
+import { Sale, Customer, Product, getNormalizedItems } from '../types';
 import { db, auth } from '../lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 
@@ -358,20 +358,25 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
   // --- Derive Invoice Items ---
   const invoiceItems = React.useMemo(() => {
-    const baseItem = {
-      sl: 1,
-      id: sale.id,
-      productName: sale.productName,
-      sku: matchedProduct?.sku || `SKU-${sale.productId.substring(0,6).toUpperCase()}`,
-      quantity: sale.quantity,
-      unit: 'Pcs',
-      unitPrice: sale.sellingPrice,
-      taxRatePercent: taxRatePercent,
-      vatAmount: taxAmount,
-      totalAmount: grandTotal,
-    };
-
-    const items = [baseItem];
+    const normalized = getNormalizedItems(sale);
+    const items = normalized.map((item, idx) => {
+      const prod = products.find(p => p.id === item.productId);
+      const sku = prod?.sku || `SKU-${item.productId ? item.productId.substring(0, 6).toUpperCase() : 'UNKNOWN'}`;
+      const itemTaxRate = item.taxRatePercent !== undefined ? item.taxRatePercent : taxRatePercent;
+      const itemVatAmount = item.taxAmount !== undefined ? item.taxAmount : (item.subtotal * itemTaxRate) / 100;
+      return {
+        sl: idx + 1,
+        id: item.productId || `item-${idx}`,
+        productName: item.productName,
+        sku: sku,
+        quantity: item.quantity,
+        unit: 'Pcs',
+        unitPrice: item.unitPrice,
+        taxRatePercent: itemTaxRate,
+        vatAmount: itemVatAmount,
+        totalAmount: item.totalAmount
+      };
+    });
 
     if (simulateMultiPage) {
       const mockNames = [
@@ -401,7 +406,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         const itemTotal = itemSubtotal + itemVatAmount;
 
         items.push({
-          sl: i + 2,
+          sl: items.length + 1,
           id: `mock-item-${i}`,
           productName: name,
           sku: `SKU-MOCK-${1000 + i}`,
@@ -416,7 +421,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
     }
 
     return items;
-  }, [sale, matchedProduct, taxRatePercent, taxAmount, grandTotal, simulateMultiPage]);
+  }, [sale, products, taxRatePercent, taxAmount, grandTotal, simulateMultiPage]);
 
   // --- Helper to convert numbers to words ---
   const numberToWords = (num: number): string => {
