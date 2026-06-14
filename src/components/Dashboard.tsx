@@ -32,8 +32,9 @@ import {
 import { db, auth, OperationType, handleFirestoreError } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
 import { Sale, Customer, Product, Supplier, Capital, CashLedgerEntry, getNormalizedItems, getSaleSummary } from '../types';
+import { AppPermissions, UserRole } from '../hooks/usePermission';
 
-export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
+export default function Dashboard({ userRole, permissions }: { userRole: UserRole | string; permissions: AppPermissions }) {
   // --- States ---
   const [sales, setSales] = useState<Sale[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -67,7 +68,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
 
   const handleSaveCapital = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (userRole !== 'admin' && userRole !== 'accountant') {
+    if (!permissions.voidPayment) {
       setCapFeedback({ message: 'Access Denied: Only Admin and Accountant users can add or modify business Capital.', type: 'error' });
       return;
     }
@@ -135,7 +136,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
   };
 
   const handleDeleteCapital = async (id: string) => {
-    if (userRole !== 'admin') {
+    if (!permissions.manageSettings) {
       alert('Access Denied: Only administrators can modify or delete seed capital investments.');
       return;
     }
@@ -1389,20 +1390,20 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
               <div className="p-6 overflow-y-auto space-y-6 flex-1">
                 {/* Simulated Identity Control info */}
                 <div className={`p-4 rounded-2xl flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 border ${
-                  userRole === 'admin' 
+                  permissions.manageSettings 
                     ? 'bg-emerald-50/50 border-emerald-100' 
-                    : userRole === 'accountant'
+                    : permissions.voidPayment
                     ? 'bg-indigo-50/50 border-indigo-100'
                     : 'bg-amber-50/50 border-amber-100'
                 }`}>
                   <div className="space-y-1">
                     <p className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                      <AlertTriangle className={`w-4 h-4 ${userRole === 'admin' ? 'text-emerald-600' : userRole === 'accountant' ? 'text-indigo-600' : 'text-amber-600'}`} />
+                      <AlertTriangle className={`w-4 h-4 ${permissions.manageSettings ? 'text-emerald-600' : permissions.voidPayment ? 'text-indigo-600' : 'text-amber-600'}`} />
                       <span>Security Clearance Auditing</span>
                     </p>
                     <p className="text-[11px] text-slate-500 leading-relaxed">
                       Active Signed-In ERP Role: <span className="font-mono font-bold uppercase text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-1.5 py-0.5">{userRole}</span>.
-                      {userRole === 'admin' || userRole === 'accountant'
+                      {permissions.voidPayment
                         ? ' Authorized to log new capital contributions.'
                         : ' Capital write capabilities restricted for your role.'
                       }
@@ -1432,10 +1433,11 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
                         step="0.01"
                         required
                         id="cap-amount-field"
-                        placeholder=" "
+                        placeholder=" shadow-xs"
+                        placeholder-transparent="true"
                         value={newCapAmount}
                         onChange={(e) => setNewCapAmount(e.target.value)}
-                        disabled={userRole !== 'admin'}
+                        disabled={!permissions.manageSettings}
                         className="peer w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed"
                       />
                       <label htmlFor="cap-amount-field" className="absolute left-9 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-9 peer-focus:top-1.5 peer-focus:left-9 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
@@ -1452,7 +1454,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
                         placeholder=" "
                         value={newCapDate}
                         onChange={(e) => setNewCapDate(e.target.value)}
-                        disabled={userRole !== 'admin'}
+                        disabled={!permissions.manageSettings}
                         className="peer w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed cursor-pointer"
                       />
                       <label htmlFor="cap-date-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
@@ -1468,7 +1470,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
                         placeholder=" "
                         value={newCapNote}
                         onChange={(e) => setNewCapNote(e.target.value)}
-                        disabled={userRole !== 'admin'}
+                        disabled={!permissions.manageSettings}
                         className="peer w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed"
                       />
                       <label htmlFor="cap-note-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
@@ -1479,7 +1481,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
                     <div className="md:col-span-3 flex justify-end pt-2">
                       <button 
                         type="submit"
-                        disabled={userRole !== 'admin'}
+                        disabled={!permissions.manageSettings}
                         className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[11px] uppercase tracking-wider px-5 py-2.5 rounded-xl transition shadow-xs hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer inline-flex items-center gap-1.5 h-10"
                       >
                         <Save className="w-3.5 h-3.5" />
@@ -1527,7 +1529,7 @@ export default function Dashboard({ userRole }: { userRole: 'admin' | 'accountan
                               <td className="p-4 text-center">
                                 <button 
                                   onClick={() => handleDeleteCapital(cap.id)}
-                                  disabled={userRole !== 'admin'}
+                                  disabled={!permissions.manageSettings}
                                   className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer inline-block"
                                 >
                                   <Trash2 className="w-4 h-4" />

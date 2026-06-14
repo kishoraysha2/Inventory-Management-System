@@ -237,6 +237,21 @@
         "createdAt": { "type": "string" }
       },
       "required": ["name", "email", "role"]
+    },
+    "RolePermission": {
+      "title": "RolePermission",
+      "description": "Configuration tracking dynamic privilege matrix configurations per role.",
+      "type": "object",
+      "properties": {
+        "role": { "type": "string" },
+        "privileges": {
+          "type": "object",
+          "description": "AppPermissions mapping booleans."
+        },
+        "lastUpdatedBy": { "type": "string" },
+        "lastUpdatedTime": { "type": "string" }
+      },
+      "required": ["role", "privileges", "lastUpdatedBy", "lastUpdatedTime"]
     }
   },
   "firestore": {
@@ -295,6 +310,10 @@
     "businessProfile": {
       "schema": "BusinessProfile",
       "description": "Store the centralized company tax and profile settings."
+    },
+    "rolePermissions": {
+      "schema": "RolePermission",
+      "description": "Dynamic privileges associated with each role."
     }
   }
 }

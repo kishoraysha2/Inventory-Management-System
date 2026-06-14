@@ -15,6 +15,8 @@ import {
 import { db, auth } from '../lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 
+import { AppPermissions, UserRole } from '../hooks/usePermission';
+
 interface CompanyProfile {
   name: string;
   address: string;
@@ -44,10 +46,11 @@ const DEFAULT_COMPANY_PROFILE: CompanyProfile = {
 };
 
 interface CompanySettingsProps {
-  userRole: 'admin' | 'accountant' | 'cashier' | 'viewer';
+  userRole: UserRole | string;
+  permissions: AppPermissions;
 }
 
-export default function CompanySettings({ userRole }: CompanySettingsProps) {
+export default function CompanySettings({ userRole, permissions }: CompanySettingsProps) {
   const [profile, setProfile] = useState<CompanyProfile>(() => {
     const saved = localStorage.getItem('invoice_company_profile');
     if (saved) {
@@ -64,7 +67,7 @@ export default function CompanySettings({ userRole }: CompanySettingsProps) {
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
 
-  const isReadOnly = userRole !== 'admin';
+  const isReadOnly = !permissions.manageSettings;
 
   // Load from Firestore
   useEffect(() => {

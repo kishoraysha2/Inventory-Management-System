@@ -603,21 +603,27 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
         let customersList: Customer[] = JSON.parse(savedCustomers);
 
         // First deduct stock for all items
+        const offlineAggregated: Record<string, number> = {};
         lineItems.forEach(item => {
-          const testProductIndex = productsList.findIndex(p => p.id === item.productId);
+          offlineAggregated[item.productId] = (offlineAggregated[item.productId] || 0) + item.quantity;
+        });
+
+        for (const [prodId, reqQty] of Object.entries(offlineAggregated)) {
+          const testProductIndex = productsList.findIndex(p => p.id === prodId);
           if (testProductIndex === -1) {
-            throw new Error(`Product "${item.productName}" no longer exists locally.`);
+            const firstItem = lineItems.find(item => item.productId === prodId);
+            throw new Error(`Product "${firstItem?.productName || 'Unknown'}" no longer exists locally.`);
           }
           const prodData = productsList[testProductIndex];
-          if (prodData.currentStock < item.quantity) {
-            throw new Error(`Insufficient stock level for "${item.productName}". Available: ${prodData.currentStock}, Requested: ${item.quantity}`);
+          if (prodData.currentStock < reqQty) {
+            throw new Error(`Insufficient stock level for "${prodData.name}". Available: ${prodData.currentStock}, Requested total: ${reqQty}`);
           }
           // Update product stock
           productsList[testProductIndex] = {
             ...prodData,
-            currentStock: prodData.currentStock - item.quantity
+            currentStock: prodData.currentStock - reqQty
           };
-        });
+        }
 
         // Create items array with snap values
         const itemsWithSnap = lineItems.map(item => {
@@ -663,7 +669,21 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
         if (formData.paymentType === 'Credit') {
           customersList = customersList.map(c => {
             if (c.id === chosenCust.id) {
-              return { ...c, dueBalance: (c.dueBalance ?? 0) + totalAmount };
+              const currentCredit = c.customerCredit ?? 0;
+              const currentDue = c.dueBalance ?? 0;
+
+              let liveCustBalance = currentDue;
+              let newCredit = currentCredit;
+
+              if (currentCredit >= totalAmount) {
+                newCredit = currentCredit - totalAmount;
+                liveCustBalance = currentDue;
+              } else {
+                const unpaidAmount = totalAmount - currentCredit;
+                newCredit = 0;
+                liveCustBalance = currentDue + unpaidAmount;
+              }
+              return { ...c, dueBalance: liveCustBalance, customerCredit: newCredit };
             }
             return c;
           });
@@ -708,36 +728,57 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
       // Execute Atomic Database Updates
       await runTransaction(db, async (transaction) => {
         // A. Verify and read Product stock live in transaction
-        const productRefs = lineItems.map(item => doc(db, 'products', item.productId));
-        const productSnaps = await Promise.all(productRefs.map(ref => transaction.get(ref)));
+        // Aggregate all quantities by productId first to enforce a product-level aggregated quantity map
+        const aggregatedQuantities: Record<string, number> = {};
+        lineItems.forEach(item => {
+          aggregatedQuantities[item.productId] = (aggregatedQuantities[item.productId] || 0) + item.quantity;
+        });
 
-        const productUpdates: Array<{ ref: any; newStock: number; purchasePrice: number }> = [];
-        
-        for (let i = 0; i < lineItems.length; i++) {
-          const item = lineItems[i];
-          const snap = productSnaps[i];
+        const uniqueProductIds = Object.keys(aggregatedQuantities);
+        const productRefsMap: Record<string, any> = {};
+        const productSnapsMap: Record<string, any> = {};
+
+        const uniqueRefs = uniqueProductIds.map(prodId => {
+          const ref = doc(db, 'products', prodId);
+          productRefsMap[prodId] = ref;
+          return ref;
+        });
+
+        const uniqueSnaps = await Promise.all(uniqueRefs.map(ref => transaction.get(ref)));
+        uniqueSnaps.forEach((snap, idx) => {
+          productSnapsMap[uniqueProductIds[idx]] = snap;
+        });
+
+        const uniqueProductUpdates: Record<string, { ref: any; newStock: number; purchasePrice: number }> = {};
+
+        for (const prodId of uniqueProductIds) {
+          const snap = productSnapsMap[prodId];
+          const totalReqQty = aggregatedQuantities[prodId];
+
           if (!snap.exists()) {
-            throw new Error(`Product "${item.productName}" no longer exists.`);
+            const firstItem = lineItems.find(item => item.productId === prodId);
+            throw new Error(`Product "${firstItem?.productName || 'Unknown'}" no longer exists.`);
           }
           const productData = snap.data() as Product;
           if (productData.status === 'inactive') {
-            throw new Error(`Transactional abort: Product "${item.productName}" has been marked as inactive.`);
+            throw new Error(`Transactional abort: Product "${productData.name}" has been marked as inactive.`);
           }
           const liveProductStock = productData.currentStock ?? 0;
-          
-          if (liveProductStock < item.quantity) {
-            throw new Error(`Transactional abort: Insufficient stock for "${item.productName}". Live: ${liveProductStock}, Requested: ${item.quantity}`);
+
+          if (liveProductStock < totalReqQty) {
+            throw new Error(`Transactional abort: Insufficient stock for "${productData.name}". Live: ${liveProductStock}, Requested total: ${totalReqQty}`);
           }
 
-          productUpdates.push({
-            ref: productRefs[i],
-            newStock: liveProductStock - item.quantity,
+          uniqueProductUpdates[prodId] = {
+            ref: productRefsMap[prodId],
+            newStock: liveProductStock - totalReqQty,
             purchasePrice: productData.purchasePrice ?? 0
-          });
+          };
         }
 
         // B. Verify and read Customer balance if Credit Payment
         let liveCustBalance = 0;
+        let newCredit = 0;
         let customerRef = null;
         if (formData.paymentType === 'Credit') {
           customerRef = doc(db, 'customers', chosenCust.id);
@@ -746,11 +787,22 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
             throw new Error(`Customer "${chosenCust.name}" profile was purged/not found.`);
           }
           const customerData = customerSnap.data() as Customer;
-          liveCustBalance = (customerData.dueBalance ?? 0) + totalAmount;
+          const currentCredit = customerData.customerCredit ?? 0;
+          const currentDue = customerData.dueBalance ?? 0;
+
+          if (currentCredit >= totalAmount) {
+            newCredit = currentCredit - totalAmount;
+            liveCustBalance = currentDue;
+          } else {
+            const unpaidAmount = totalAmount - currentCredit;
+            newCredit = 0;
+            liveCustBalance = currentDue + unpaidAmount;
+          }
         }
 
         // C. WRITE operations (after all READS)
-        productUpdates.forEach(update => {
+        // Apply one final stock update per unique product to prevent overwrite issues
+        Object.values(uniqueProductUpdates).forEach(update => {
           transaction.update(update.ref, {
             currentStock: update.newStock
           });
@@ -758,13 +810,14 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
 
         if (formData.paymentType === 'Credit' && customerRef) {
           transaction.update(customerRef, {
-            dueBalance: liveCustBalance
+            dueBalance: liveCustBalance,
+            customerCredit: newCredit
           });
         }
 
         // D. Create items snapshot with correct snap prices
-        const itemsWithSnap = lineItems.map((item, idx) => {
-          const pPrice = productUpdates[idx].purchasePrice;
+        const itemsWithSnap = lineItems.map((item) => {
+          const pPrice = uniqueProductUpdates[item.productId].purchasePrice;
           const costOfGoodsSold = pPrice * item.quantity;
           const grossProfit = item.subtotal - costOfGoodsSold;
           return {
@@ -795,7 +848,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
           paymentType: formData.paymentType,
           saleDate: new Date(formData.saleDate).toISOString(),
           timestamp: new Date(formData.saleDate).toISOString(),
-          productPurchasePriceAtSale: productUpdates[0]?.purchasePrice ?? 0,
+          productPurchasePriceAtSale: itemsWithSnap[0]?.purchasePriceAtSale ?? 0,
           productSellingPriceAtSale: lineItems[0].unitPrice,
           costOfGoodsSold: totalCOGS,
           grossProfit: totalGrossProfit,
@@ -1324,10 +1377,10 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white rounded-[2rem] border border-slate-200 shadow-xl max-w-xl w-full overflow-hidden"
+              className="bg-white rounded-[2rem] border border-slate-200 shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden"
             >
               {/* Header */}
-              <div className="flex items-center justify-between border-b border-slate-100 px-6 sm:px-8 py-5">
+              <div className="flex items-center justify-between border-b border-slate-100 px-6 sm:px-8 py-5 shrink-0">
                 <div>
                   <h3 className="text-base font-bold text-slate-900">
                     Record Ledger Sales Line
@@ -1345,8 +1398,10 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
                 </button>
               </div>
 
-              {/* Form body */}
-              <form onSubmit={handleSubmitSymbol} className="p-6 sm:p-8 space-y-6">
+              {/* Form container with flex-1 overflow-hidden layout */}
+              <form onSubmit={handleSubmitSymbol} className="flex flex-col flex-1 overflow-hidden min-h-0">
+                {/* Scrollable Form body content */}
+                <div className="flex-1 overflow-y-auto p-6 sm:p-8 space-y-6 min-h-0">
                 
                 {/* Select Customer */}
                 <div className="relative w-full">
@@ -1512,8 +1567,10 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
                   );
                 })()}
 
-                {/* Submits */}
-                <div className="flex justify-end items-center gap-3 pt-4 border-t border-slate-100">
+                </div> {/* Close of scrollable body div */}
+
+                {/* Submits - Sticky Footer */}
+                <div className="flex justify-end items-center gap-3 px-6 sm:px-8 py-5 border-t border-slate-100 bg-slate-50 shrink-0">
                   <button
                     type="button"
                     disabled={isSaving}

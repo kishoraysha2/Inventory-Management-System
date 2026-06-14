@@ -459,41 +459,139 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
     return result;
   };
 
+  const overallTotals = React.useMemo(() => {
+    const totalAmountExVat = invoiceItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
+    const totalVat = invoiceItems.reduce((sum, item) => sum + item.vatAmount, 0);
+    const grandTotalAll = invoiceItems.reduce((sum, item) => sum + item.totalAmount, 0);
+    return {
+      totalAmountExVat,
+      totalVat,
+      grandTotalAll
+    };
+  }, [invoiceItems]);
+
   // --- Divide elements into clean pages ---
-  // Page 1 contains full business profile + customer + notes. Let's make Page 1 fit up to 5 items cleanly.
-  // Subsequent pages fit up to 9 items cleanly.
   const pageItemsList = React.useMemo(() => {
-    const total = invoiceItems.length;
-    // Single page case (fits table + summaries + header + footer)
-    if (total <= 8) {
-      return [invoiceItems];
+    const totalItems = invoiceItems.length;
+    if (totalItems === 0) {
+      return [[]];
+    }
+
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+
+    // Calculate Page 1 table start Y (tableY for page 1)
+    let p1LeftY = 12;
+    const bizNameLines = doc.splitTextToSize(company.name.toUpperCase(), 72);
+    p1LeftY += bizNameLines.length * 4.5;
+    
+    if (company.tradeName) {
+      const tradeLines = doc.splitTextToSize(`Trade Name: ${company.tradeName}`, 72);
+      p1LeftY += tradeLines.length * 3.5;
     }
     
+    const vatLineInput = `VAT Number: ${company.taxRegistrationId}`;
+    const vatLines = doc.splitTextToSize(vatLineInput, 72);
+    p1LeftY += vatLines.length * 3.5;
+
+    if (company.crNumber) {
+      const crLines = doc.splitTextToSize(`CR Number: ${company.crNumber}`, 72);
+      p1LeftY += crLines.length * 3.5;
+    }
+    
+    const addressLines = doc.splitTextToSize(company.address, 72);
+    p1LeftY += addressLines.length * 3.5;
+    
+    const phoneLine = `Phone: ${company.phone}`;
+    const phoneLines = doc.splitTextToSize(phoneLine, 72);
+    p1LeftY += phoneLines.length * 3.5;
+
+    const emailLine = `Email: ${company.email}`;
+    const emailLines = doc.splitTextToSize(emailLine, 72);
+    p1LeftY += emailLines.length * 3.5;
+
+    if (company.website) {
+      const webLine = `Website: ${company.website}`;
+      const webLines = doc.splitTextToSize(webLine, 72);
+      p1LeftY += webLines.length * 3.5;
+    }
+
+    let p1RightY = 12;
+    p1RightY += 4.5; // for "BILL TO (CUSTOMER):"
+    const custNameLines = doc.splitTextToSize(sale.customerName.toUpperCase(), 72);
+    p1RightY += custNameLines.length * 4.5;
+    
+    const custAddrLines = doc.splitTextToSize(customerAddress, 72);
+    p1RightY += custAddrLines.length * 3.5;
+
+    const custPhoneLine = `Phone: ${customerPhone}`;
+    const custPhoneLines = doc.splitTextToSize(custPhoneLine, 72);
+    p1RightY += custPhoneLines.length * 3.5;
+
+    if (matchedCustomer?.email) {
+      const custEmailLine = `Email: ${matchedCustomer.email}`;
+      const custEmailLines = doc.splitTextToSize(custEmailLine, 72);
+      p1RightY += custEmailLines.length * 3.5;
+    }
+
+    if (matchedCustomer?.vatNumber) {
+      const custVatLine = `VAT Number: ${matchedCustomer.vatNumber}`;
+      const custVatLines = doc.splitTextToSize(custVatLine, 72);
+      p1RightY += custVatLines.length * 3.5;
+    }
+
+    let p1SecY = Math.max(p1LeftY, p1RightY) + 3;
+    if (p1SecY < 32) p1SecY = 32;
+
+    const p1TableY = p1SecY + 17 + 5; // tableY for Page 1
+
+    // Amount in words lines count
+    const words = numberToWords(overallTotals.grandTotalAll);
+    const wordsLines = doc.splitTextToSize(words, 180);
+    const wordsHeight = wordsLines.length * 4;
+
     const pages: typeof invoiceItems[] = [];
-    
-    // Page 1 is non-final. Header is compact, notes are compact. Can fit up to 14 items.
-    // Leave at least 1 item for final page.
-    const page1Size = Math.min(14, total - 1);
-    pages.push(invoiceItems.slice(0, page1Size));
-    
-    let currentIndex = page1Size;
-    while (currentIndex < total) {
-      const remaining = total - currentIndex;
-      // Can the rest fit on a final page (max 14 items with summaries)?
-      if (remaining <= 14) {
-        pages.push(invoiceItems.slice(currentIndex, total));
+    let currentIndex = 0;
+
+    // Distribute all items page-by-page dynamically
+    while (currentIndex < totalItems) {
+      const pageIdx = pages.length;
+      const isPage1 = pageIdx === 0;
+      const currentTableY = isPage1 ? p1TableY : 20;
+
+      // Determine items we can fit on this page.
+      // If ALL remaining items can fit on this page as the final page:
+      const remainingItemsCount = totalItems - currentIndex;
+      const estPageCount = pageIdx + 1;
+      const rectHeight = 30 + (estPageCount * 3.5);
+      const summaryHeight = Math.max(18, rectHeight);
+
+      // finalPageBottomY is content end Y-coord. Safety limit is 278.
+      const finalPageBottomY = currentTableY + 15 + (remainingItemsCount * 6) + summaryHeight + 4 + wordsHeight;
+
+      if (finalPageBottomY <= 278) {
+        // Yes! All remaining items fit perfectly on the page as the final page!
+        pages.push(invoiceItems.slice(currentIndex, totalItems));
         break;
       } else {
-        // This continuation page is non-final, can fit up to 18 items.
-        // Leave at least 1 item for final page.
-        const pageSize = Math.min(18, remaining - 1);
-        pages.push(invoiceItems.slice(currentIndex, currentIndex + pageSize));
-        currentIndex += pageSize;
+        // No, they don't all fit as a final page. This page must be a non-final page.
+        // tableY + 13 + N * 6 <= 278 => N <= (265 - tableY) / 6
+        const maxNonFinalItems = Math.floor((265 - currentTableY) / 6);
+        
+        // We must take as many items as fit.
+        const itemsToTake = Math.min(maxNonFinalItems, remainingItemsCount - 1);
+        const finalItemsToTake = Math.max(1, itemsToTake);
+
+        pages.push(invoiceItems.slice(currentIndex, currentIndex + finalItemsToTake));
+        currentIndex += finalItemsToTake;
       }
     }
-    
+
     return pages;
-  }, [invoiceItems]);
+  }, [invoiceItems, company, sale, customerAddress, customerPhone, matchedCustomer, overallTotals]);
 
   // --- Calculate page subtotals and overall totals ---
   const calculatedPageTotals = React.useMemo(() => {
@@ -508,17 +606,6 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
       };
     });
   }, [pageItemsList]);
-
-  const overallTotals = React.useMemo(() => {
-    const totalAmountExVat = invoiceItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
-    const totalVat = invoiceItems.reduce((sum, item) => sum + item.vatAmount, 0);
-    const grandTotalAll = invoiceItems.reduce((sum, item) => sum + item.totalAmount, 0);
-    return {
-      totalAmountExVat,
-      totalVat,
-      grandTotalAll
-    };
-  }, [invoiceItems]);
 
   useEffect(() => {
     const generateQr = async () => {
@@ -1365,7 +1452,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                         </thead>
                         <tbody className="divide-y divide-slate-100 text-[10px] text-slate-755">
                           {pItems.map((item) => (
-                            <tr key={item.id} className="hover:bg-slate-50/50 transition">
+                            <tr key={`${item.id}-${item.sl}`} className="hover:bg-slate-50/50 transition">
                               <td className="py-2 px-2.5 text-center font-bold text-slate-400">{item.sl}</td>
                               <td className="py-2 px-2.5 font-bold text-slate-900">
                                 {item.productName}

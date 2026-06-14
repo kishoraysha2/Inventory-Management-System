@@ -25,6 +25,7 @@ import {
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { Product } from '../types';
+import { usePermission } from '../hooks/usePermission';
 
 export const INITIAL_PRODUCTS: Product[] = [
   {
@@ -84,7 +85,9 @@ export const INITIAL_PRODUCTS: Product[] = [
   }
 ];
 
-export default function ProductManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
+export default function ProductManagement({ userRole = 'admin' }: { userRole?: string }) {
+  const { permissions } = usePermission({ role: userRole });
+
   // --- States ---
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
@@ -206,7 +209,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
         name: '',
         sku: '',
         category: '',
-        purchasePrice: '',
+        purchasePrice: permissions?.viewProductCost !== false ? '' : '0',
         sellingPrice: '',
         currentStock: '0',
         minimumStockAlert: '',
@@ -235,8 +238,8 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
       newErrors.category = 'Category must be 100 characters or less';
     }
 
-    const costPrice = parseFloat(formData.purchasePrice);
-    if (isNaN(costPrice) || costPrice < 0) {
+    const costPrice = permissions?.viewProductCost !== false ? parseFloat(formData.purchasePrice) : 0;
+    if (permissions?.viewProductCost !== false && (isNaN(costPrice) || costPrice < 0)) {
       newErrors.purchasePrice = 'Enter a valid positive purchase cost';
     }
 
@@ -275,7 +278,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
       name: formData.name.trim(),
       sku: formData.sku.trim().toUpperCase(),
       category: formData.category.trim(),
-      purchasePrice: parseFloat(formData.purchasePrice),
+      purchasePrice: permissions?.viewProductCost !== false ? parseFloat(formData.purchasePrice) : (parseFloat(formData.purchasePrice) || 0),
       sellingPrice: parseFloat(formData.sellingPrice),
       currentStock: editingProduct ? editingProduct.currentStock : (parseInt(formData.currentStock) || 0),
       minimumStockAlert: parseInt(formData.minimumStockAlert),
@@ -294,7 +297,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
 
         const isSkuDuplicate = currentList.some(p => p.id !== productId && p.sku === finalizedData.sku);
         if (isSkuDuplicate) {
-          setErrors(prev => ({ ...prev, sku: 'SKU code already exists for another product. Must be unique.' }));
+          setErrors(prev => ({ ...prev, sku: 'SKU already exists. SKU must be unique.' }));
           setIsSaving(false);
           return;
         }
@@ -332,7 +335,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
       const isSkuDuplicate = querySnapshot.docs.some(docSnap => docSnap.id !== productId);
 
       if (isSkuDuplicate) {
-        setErrors(prev => ({ ...prev, sku: 'SKU code already exists for another product. Must be unique.' }));
+        setErrors(prev => ({ ...prev, sku: 'SKU already exists. SKU must be unique.' }));
         setIsSaving(false);
         return;
       }
@@ -518,7 +521,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
       </AnimatePresence>
 
       {/* THREE BENTO METRIC CARDS */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
+      <div className={`grid grid-cols-1 gap-6 ${permissions?.viewProductCost !== false ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
         {/* Total Registered Products */}
         <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between animate-fade-in">
           <div>
@@ -569,25 +572,27 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
         </div>
 
         {/* Asset Capital Valuation */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between animate-fade-in">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Net Asset Capital value</span>
-              <DollarSign className="h-4 w-4 text-emerald-600" />
+        {permissions?.viewProductCost !== false && (
+          <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between animate-fade-in">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Net Asset Capital value</span>
+                <DollarSign className="h-4 w-4 text-emerald-600" />
+              </div>
+              {loading ? (
+                <div className="h-9 w-28 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
+              ) : (
+                <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
+                  ${totalValuationPurchase.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+              )}
             </div>
-            {loading ? (
-              <div className="h-9 w-28 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
-            ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-                ${totalValuationPurchase.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </p>
-            )}
+            <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex justify-between items-center">
+              <span>Potential retail: ${potentialRevenueValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+              <span className="text-emerald-600 font-bold">Profit Margin: +{totalValuationPurchase > 0 ? Math.round((potentialProfitValue / totalValuationPurchase) * 100) : 0}%</span>
+            </div>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex justify-between items-center">
-            <span>Potential retail: ${potentialRevenueValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
-            <span className="text-emerald-600 font-bold">Profit Margin: +{totalValuationPurchase > 0 ? Math.round((potentialProfitValue / totalValuationPurchase) * 100) : 0}%</span>
-          </div>
-        </div>
+        )}
       </div>
 
       {/* CORE CONTROL AREA */}
@@ -760,7 +765,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
                         <tr className="bg-slate-50 text-[10px] font-black uppercase tracking-wider text-slate-500">
                           <th className="py-4 px-6">Product Item</th>
                           <th className="py-4 px-5">SKU / Code</th>
-                          <th className="py-4 px-5 text-right font-mono">Purchase Cost</th>
+                          {permissions?.viewProductCost !== false && <th className="py-4 px-5 text-right font-mono">Purchase Cost</th>}
                           <th className="py-4 px-5 text-right font-mono">Retail Price</th>
                           <th className="py-4 px-5 text-center">Warehouse Stock</th>
                           <th className="py-4 px-5 text-center">Min Alert</th>
@@ -802,9 +807,11 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
                                   {product.sku}
                                 </span>
                               </td>
-                              <td className="py-4 px-5 text-right font-mono font-bold text-slate-700 whitespace-nowrap">
-                                ${product.purchasePrice.toFixed(2)}
-                              </td>
+                              {permissions?.viewProductCost !== false && (
+                                <td className="py-4 px-5 text-right font-mono font-bold text-slate-700 whitespace-nowrap">
+                                  ${product.purchasePrice.toFixed(2)}
+                                </td>
+                              )}
                               <td className="py-4 px-5 text-right font-mono font-bold text-slate-900 whitespace-nowrap">
                                 ${product.sellingPrice.toFixed(2)}
                               </td>
@@ -1042,35 +1049,37 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: '
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                <div className={`grid grid-cols-1 ${permissions?.viewProductCost !== false ? 'sm:grid-cols-2' : ''} gap-5`}>
                   {/* Purchase Price */}
-                  <div className="relative w-full">
-                    <span className="absolute left-3.5 top-[18px] text-slate-400 text-xs font-bold leading-none">$</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      required
-                      disabled={isSaving}
-                      id="product-form-purchasePrice-field"
-                      value={formData.purchasePrice}
-                      onChange={(e) => setFormData({ ...formData, purchasePrice: e.target.value })}
-                      placeholder=" "
-                      className={`peer w-full rounded-xl border pl-[26px] pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
-                        errors.purchasePrice 
-                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
-                          : 'border-slate-200 focus:border-indigo-605'
-                      }`}
-                    />
-                    <label htmlFor="product-form-purchasePrice-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-[26px] peer-focus:top-1.5 peer-focus:left-3.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
-                      Purchase Unit Cost ($) <span className="text-rose-500 font-extrabold">*</span>
-                    </label>
-                    {errors.purchasePrice && (
-                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
-                        <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
-                        <span>{errors.purchasePrice}</span>
-                      </div>
-                    )}
-                  </div>
+                  {permissions?.viewProductCost !== false && (
+                    <div className="relative w-full">
+                      <span className="absolute left-3.5 top-[18px] text-slate-400 text-xs font-bold leading-none">$</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        required
+                        disabled={isSaving}
+                        id="product-form-purchasePrice-field"
+                        value={formData.purchasePrice}
+                        onChange={(e) => setFormData({ ...formData, purchasePrice: e.target.value })}
+                        placeholder=" "
+                        className={`peer w-full rounded-xl border pl-[26px] pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                          errors.purchasePrice 
+                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                            : 'border-slate-200 focus:border-indigo-605'
+                        }`}
+                      />
+                      <label htmlFor="product-form-purchasePrice-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-[26px] peer-focus:top-1.5 peer-focus:left-3.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                        Purchase Unit Cost ($) <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                      {errors.purchasePrice && (
+                        <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                          <AlertTriangle className="h-3.5 w-3.5 text-rose-505 shrink-0" />
+                          <span>{errors.purchasePrice}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Selling Price */}
                   <div className="relative w-full">

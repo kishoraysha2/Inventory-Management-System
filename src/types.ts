@@ -21,6 +21,7 @@ export interface Supplier {
   dueBalance?: number;
   createdDate?: string;
   status?: 'active' | 'inactive';
+  vatNumber?: string;
 }
 
 export interface Customer {

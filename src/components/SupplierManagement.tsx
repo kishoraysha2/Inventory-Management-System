@@ -40,6 +40,8 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
   const [formData, setFormData] = useState({
     name: '',
     phone: '',
+    email: '',
+    vatNumber: '',
     address: '',
     paymentType: 'Cash' as 'Cash' | 'Credit',
     dueBalance: '',
@@ -49,12 +51,22 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
   // --- Validation Errors State ---
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  const [purchases, setPurchases] = useState<any[]>([]);
+  const [supplierPayments, setSupplierPayments] = useState<any[]>([]);
+
   // --- Real-time Firestore Sync ---
   useEffect(() => {
     if (!auth.currentUser) {
       // Local fallback
       const saved = localStorage.getItem('inventory_suppliers');
       setSuppliers(saved ? JSON.parse(saved) : []);
+
+      const savedPurchases = localStorage.getItem('inventory_purchases') || '[]';
+      setPurchases(JSON.parse(savedPurchases));
+
+      const savedPayments = localStorage.getItem('inventory_supplier_payments') || '[]';
+      setSupplierPayments(JSON.parse(savedPayments));
+
       setLoading(false);
       return;
     }
@@ -90,7 +102,27 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       setLoading(false);
     });
 
-    return () => unsub();
+    const unsubPurchases = onSnapshot(collection(db, 'purchases'), (snapshot) => {
+      const purchasesList: any[] = [];
+      snapshot.forEach((docSnap) => {
+        purchasesList.push({ id: docSnap.id, ...docSnap.data() });
+      });
+      setPurchases(purchasesList);
+    });
+
+    const unsubSupplierPayments = onSnapshot(collection(db, 'supplierPayments'), (snapshot) => {
+      const paymentsList: any[] = [];
+      snapshot.forEach((docSnap) => {
+        paymentsList.push({ id: docSnap.id, ...docSnap.data() });
+      });
+      setSupplierPayments(paymentsList);
+    });
+
+    return () => {
+      unsub();
+      unsubPurchases();
+      unsubSupplierPayments();
+    };
   }, []);
 
   // --- Auto-hide Feedback ---
@@ -121,6 +153,8 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       setFormData({
         name: supplier.name,
         phone: supplier.phone,
+        email: supplier.email || '',
+        vatNumber: supplier.vatNumber || '',
         address: supplier.address || '',
         paymentType: supplier.paymentType || 'Cash',
         dueBalance: (supplier.dueBalance ?? 0).toString(),
@@ -131,6 +165,8 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       setFormData({
         name: '',
         phone: '',
+        email: '',
+        vatNumber: '',
         address: '',
         paymentType: 'Cash',
         dueBalance: '0',
@@ -164,6 +200,37 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       newErrors.dueBalance = 'Due balance cannot be negative';
     }
 
+    // Uniqueness Checks
+    const normName = formData.name.trim().toLowerCase();
+    const normPhone = formData.phone.trim();
+
+    const nameExists = suppliers.some(s => 
+      s.name.trim().toLowerCase() === normName && 
+      (!editingSupplier || s.id !== editingSupplier.id)
+    );
+    if (nameExists) {
+      newErrors.name = 'Supplier name already exists.';
+    }
+
+    const phoneExists = suppliers.some(s => 
+      s.phone.trim() === normPhone && 
+      (!editingSupplier || s.id !== editingSupplier.id)
+    );
+    if (phoneExists) {
+      newErrors.phone = 'Supplier phone already exists.';
+    }
+
+    const formVat = formData.vatNumber.trim().toLowerCase();
+    if (formVat) {
+      const vatExists = suppliers.some(s => 
+        s.vatNumber && s.vatNumber.trim().toLowerCase() === formVat && 
+        (!editingSupplier || s.id !== editingSupplier.id)
+      );
+      if (vatExists) {
+        newErrors.vatNumber = 'Supplier VAT number already exists.';
+      }
+    }
+
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -171,7 +238,66 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
   // --- Submit Create / Edit ---
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!validateForm()) return;
+    
+    // Local duplicate and syntax checks
+    const newErrors: Record<string, string> = {};
+    if (!formData.name.trim()) newErrors.name = 'Supplier name is required';
+    if (formData.name.length > 200) newErrors.name = 'Name must be 200 characters or less';
+    
+    if (!formData.phone.trim()) {
+      newErrors.phone = 'Phone number is required';
+    } else if (formData.phone.length > 50) {
+      newErrors.phone = 'Phone number must be 50 characters or less';
+    }
+
+    if (formData.address.length > 500) {
+      newErrors.address = 'Address must be 500 characters or less';
+    }
+
+    const parsedDue = parseFloat(formData.dueBalance);
+    if (isNaN(parsedDue)) {
+      newErrors.dueBalance = 'Due balance must be a valid number';
+    } else if (parsedDue < 0) {
+      newErrors.dueBalance = 'Due balance cannot be negative';
+    }
+
+    // Uniqueness Checks
+    const normName = formData.name.trim().toLowerCase();
+    const normPhone = formData.phone.trim();
+
+    const nameExists = suppliers.some(s => 
+      s.name.trim().toLowerCase() === normName && 
+      (!editingSupplier || s.id !== editingSupplier.id)
+    );
+    if (nameExists) {
+      newErrors.name = 'Supplier name already exists.';
+    }
+
+    const phoneExists = suppliers.some(s => 
+      s.phone.trim() === normPhone && 
+      (!editingSupplier || s.id !== editingSupplier.id)
+    );
+    if (phoneExists) {
+      newErrors.phone = 'Supplier phone already exists.';
+    }
+
+    const formVat = formData.vatNumber.trim().toLowerCase();
+    if (formVat) {
+      const vatExists = suppliers.some(s => 
+        s.vatNumber && s.vatNumber.trim().toLowerCase() === formVat && 
+        (!editingSupplier || s.id !== editingSupplier.id)
+      );
+      if (vatExists) {
+        newErrors.vatNumber = 'Supplier VAT number already exists.';
+      }
+    }
+
+    setErrors(newErrors);
+    if (Object.keys(newErrors).length > 0) {
+      const firstError = Object.values(newErrors)[0];
+      setFeedback({ message: firstError, type: 'error' });
+      return;
+    }
 
     setIsSaving(true);
     const dueBalanceValue = parseFloat(formData.dueBalance);
@@ -184,6 +310,8 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       id: supplierId,
       name: formData.name.trim(),
       phone: formData.phone.trim(),
+      email: formData.email.trim() ? formData.email.trim() : undefined,
+      vatNumber: formData.vatNumber.trim() ? formData.vatNumber.trim() : undefined,
       address: formData.address.trim(),
       paymentType: formData.paymentType,
       dueBalance: dueBalanceValue,
@@ -258,55 +386,45 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
     setSupplierToDelete(null);
 
     setIsSaving(true);
+    
+    // Relationship protection / transaction block checks
+    const hasPurchases = purchases.some((p: any) => p.supplierId === id);
+    const hasPayments = supplierPayments.some((p: any) => p.supplierId === id);
+    const hasBalance = (supplierToDelete.dueBalance ?? 0) !== 0;
+
+    if (hasPurchases || hasPayments || hasBalance) {
+      const reasons: string[] = [];
+      if (hasPurchases) reasons.push("purchase history");
+      if (hasPayments) reasons.push("payment history");
+      if (hasBalance) reasons.push(`outstanding balance due ($${(supplierToDelete.dueBalance ?? 0).toFixed(2)})`);
+
+      const reasonText = reasons.join(", ");
+      setFeedback({ 
+        message: `Deletion blocked! Supplier "${name}" cannot be deleted because they have associated ${reasonText}.`, 
+        type: 'error' 
+      });
+      setIsSaving(false);
+      return;
+    }
+
     try {
       if (!auth.currentUser) {
         const saved = localStorage.getItem('inventory_suppliers');
         let currentList: Supplier[] = saved ? JSON.parse(saved) : [];
 
-        const savedPurchases = localStorage.getItem('inventory_purchases') || '[]';
-        const purchasesList = JSON.parse(savedPurchases);
-        const hasPurchases = purchasesList.some((p: any) => p.supplierId === id);
-
-        const savedPayments = localStorage.getItem('inventory_supplier_payments') || '[]';
-        const paymentsList = JSON.parse(savedPayments);
-        const hasPayments = paymentsList.some((p: any) => p.supplierId === id);
-
-        const hasBalance = (supplierToDelete.dueBalance ?? 0) > 0;
-
-        if (hasPurchases || hasPayments || hasBalance) {
-          const updatedSupplier: Supplier = {
-            ...supplierToDelete,
-            status: 'inactive'
-          };
-          currentList = currentList.map(s => s.id === id ? updatedSupplier : s);
-          localStorage.setItem('inventory_suppliers', JSON.stringify(currentList));
-          setSuppliers(currentList);
-
-          const reasons: string[] = [];
-          if (hasPurchases) reasons.push("purchase history");
-          if (hasPayments) reasons.push("payment history");
-          if (hasBalance) reasons.push(`outstanding balance due ($${(supplierToDelete.dueBalance ?? 0).toFixed(2)})`);
-
-          const reasonText = reasons.join(", ");
-          setFeedback({ 
-            message: `Supplier "${name}" has associated ${reasonText} and has been safely marked as "inactive" locally.`, 
-            type: 'success' 
-          });
-        } else {
-          const updatedSupplier: Supplier = {
-            ...supplierToDelete,
-            status: 'inactive'
-          };
-          currentList = currentList.map(s => s.id === id ? updatedSupplier : s);
-          localStorage.setItem('inventory_suppliers', JSON.stringify(currentList));
-          setSuppliers(currentList);
-          setFeedback({ message: `Supplier record "${name}" has been safely retired as "inactive" locally.`, type: 'success' });
-        }
+        const updatedSupplier: Supplier = {
+          ...supplierToDelete,
+          status: 'inactive'
+        };
+        currentList = currentList.map(s => s.id === id ? updatedSupplier : s);
+        localStorage.setItem('inventory_suppliers', JSON.stringify(currentList));
+        setSuppliers(currentList);
+        setFeedback({ message: `Supplier record "${name}" has been safely retired as "inactive" locally.`, type: 'success' });
         setIsSaving(false);
         return;
       }
 
-      // Always soft-delete to preserve business integrity and history reports
+      // Soft-delete if no transactions to preserve business integrity and history reports
       const updatedSupplier: Supplier = {
         ...supplierToDelete,
         status: 'inactive'
@@ -902,6 +1020,59 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
                       <span>{errors.address}</span>
                     </div>
                   )}
+                </div>
+
+                {/* Optional Supplier info: VAT and Email */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 animate-fade-in">
+                  <div className="relative w-full">
+                    <input
+                      type="text"
+                      id="form-supplier-vat-field"
+                      disabled={isSaving}
+                      value={formData.vatNumber}
+                      onChange={(e) => setFormData({ ...formData, vatNumber: e.target.value })}
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 h-[52px] ${
+                        errors.vatNumber 
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                          : 'border-slate-200 focus:border-indigo-600 focus:ring-indigo-650'
+                      }`}
+                    />
+                    <label htmlFor="form-supplier-vat-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      VAT Registration No. (Optional)
+                    </label>
+                    {errors.vatNumber && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                        <span>{errors.vatNumber}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="relative w-full">
+                    <input
+                      type="email"
+                      id="form-supplier-email-field"
+                      disabled={isSaving}
+                      value={formData.email}
+                      onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                      placeholder=" "
+                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 h-[52px] ${
+                        errors.email 
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                          : 'border-slate-200 focus:border-indigo-600 focus:ring-indigo-650'
+                      }`}
+                    />
+                    <label htmlFor="form-supplier-email-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      Email Address (Optional)
+                    </label>
+                    {errors.email && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                        <span>{errors.email}</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {/* Due Balance */}

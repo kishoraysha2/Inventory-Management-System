@@ -56,7 +56,8 @@ import Dashboard from './components/Dashboard';
 import ReportsPage from './components/ReportsPage';
 import BalanceSheet from './components/BalanceSheet';
 import CompanySettings from './components/CompanySettings';
-import { usePermission } from './hooks/usePermission';
+import PrivilegeMatrix from './components/PrivilegeMatrix';
+import { usePermission, AppPermissions, seedRolePermissions } from './hooks/usePermission';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from './lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, getDoc, updateDoc } from 'firebase/firestore';
 import { signOut, onAuthStateChanged, User, GoogleAuthProvider, signInWithPopup, signInAnonymously, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
@@ -102,6 +103,7 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports' | 'balancesheet' | 'users' | 'company_settings'>('dashboard');
+  const [userAccessTab, setUserAccessTab] = useState<'users' | 'matrix'>('users');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   // --- Inventory Adjustment Modal State ---
@@ -126,9 +128,13 @@ export default function App() {
   const [isAuthSubmitLoading, setIsAuthSubmitLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
-  const permissions = usePermission(currentUserProfile);
-  const userRole = permissions.role;
-  const canEditInventory = permissions.canEditInventory;
+  const permissionHook = usePermission(currentUserProfile);
+  const userRole = permissionHook.role;
+  const canEditInventory = permissionHook.canEditInventory;
+  const permissions = {
+    ...permissionHook,
+    ...permissionHook.permissions
+  };
 
   const checkAndLogLogin = async (uid: string, email: string, name: string, role: string) => {
     if (sessionStorage.getItem('just_logged_in') === 'true') {
@@ -158,6 +164,13 @@ export default function App() {
     window.addEventListener('nexus-change-tab', handleTabChange);
     return () => window.removeEventListener('nexus-change-tab', handleTabChange);
   }, []);
+
+  // --- Trigger Database Privilege Seeding ---
+  useEffect(() => {
+    if (currentUser) {
+      seedRolePermissions();
+    }
+  }, [currentUser]);
 
   // --- Observe Authentication State ---
   useEffect(() => {
@@ -427,7 +440,7 @@ export default function App() {
   };
 
   const handleUpdateUserRole = async (targetUid: string, targetEmail: string, newRole: 'admin' | 'accountant' | 'cashier' | 'viewer') => {
-    if (userRole !== 'admin') {
+    if (!permissions.manageUsers) {
       setFeedback({ message: 'Access Denied: Only system administrators can adjust security clearance.', type: 'error' });
       return;
     }
@@ -471,8 +484,8 @@ export default function App() {
 
   // --- Admin User Listing Sync ---
   useEffect(() => {
-    if (!currentUser || !auth.currentUser || userRole !== 'admin') {
-      if (currentUser && userRole === 'admin') {
+    if (!currentUser || !auth.currentUser || !permissions.viewUsers) {
+      if (currentUser && permissions.viewUsers) {
         setUsersList([
           { uid: currentUser.uid, name: currentUser.displayName || 'Kishor Aysha (Admin Bypass)', email: currentUser.email, role: 'admin', createdAt: new Date().toISOString() }
         ]);
@@ -717,6 +730,13 @@ export default function App() {
   // --- Create or Update Dispatch ---
   const handleSaveItem = async (formData: Omit<Product, 'id' | 'createdDate'> & { id?: string }) => {
     const timestamp = new Date().toISOString();
+
+    const targetSku = formData.sku.trim().toUpperCase();
+    const isSkuDuplicate = products.some(p => p.id !== formData.id && p.sku.trim().toUpperCase() === targetSku);
+    if (isSkuDuplicate) {
+      setFeedback({ message: 'SKU already exists. SKU must be unique.', type: 'error' });
+      return;
+    }
 
     if (formData.id) {
       // Edit mode
@@ -1425,7 +1445,7 @@ export default function App() {
           )}
 
           {/* Load Demo */}
-          {userRole === 'admin' && (
+          {permissions.manageSettings && (
             <button
               id="reset-demo-data-button"
               type="button"
@@ -1439,7 +1459,7 @@ export default function App() {
           )}
 
           {/* Export Backup */}
-          {userRole === 'admin' && (
+          {permissions.manageSettings && (
             <button
               id="export-backup-json-button"
               type="button"
@@ -1453,7 +1473,7 @@ export default function App() {
           )}
 
           {/* Import JSON */}
-          {permissions.isAdmin && (
+          {permissions.manageSettings && (
             <button
               id="import-backup-toggle-button"
               type="button"
@@ -1595,7 +1615,7 @@ export default function App() {
           <Scale className="h-4 w-4" />
           <span>Balance Sheet</span>
         </button>
-        {userRole === 'admin' && (
+        {permissions.viewUsers && (
           <button
             id="open-user-access-tab"
             type="button"
@@ -1610,7 +1630,7 @@ export default function App() {
             <span>User Access</span>
           </button>
         )}
-        {(userRole === 'admin' || userRole === 'accountant') && (
+        {(permissions.viewSettings || permissions.voidPayment) && (
           <button
             id="open-company-settings-tab"
             type="button"
@@ -1704,7 +1724,7 @@ export default function App() {
       </AnimatePresence>
 
       {activeTab === 'dashboard' ? (
-        <Dashboard userRole={userRole} />
+        <Dashboard userRole={userRole} permissions={permissions} />
       ) : activeTab === 'inventory' ? (
         <>
           {/* METRICS BENTO GRID */}
@@ -2031,109 +2051,145 @@ export default function App() {
           </div>
         </>
       ) : activeTab === 'customers' ? (
-        <SafeTabWrapper tab="customers" userRole={userRole}>
+        <SafeTabWrapper tab="customers" userRole={userRole} permissions={permissions}>
           <CustomerManagement userRole={userRole} />
         </SafeTabWrapper>
       ) : activeTab === 'suppliers' ? (
-        <SafeTabWrapper tab="suppliers" userRole={userRole}>
+        <SafeTabWrapper tab="suppliers" userRole={userRole} permissions={permissions}>
           <SupplierManagement userRole={userRole} />
         </SafeTabWrapper>
       ) : activeTab === 'ledger' ? (
-        <SafeTabWrapper tab="ledger" userRole={userRole}>
+        <SafeTabWrapper tab="ledger" userRole={userRole} permissions={permissions}>
           <PaymentLedger userRole={userRole} />
         </SafeTabWrapper>
       ) : activeTab === 'products' ? (
-        <SafeTabWrapper tab="products" userRole={userRole}>
+        <SafeTabWrapper tab="products" userRole={userRole} permissions={permissions}>
           <ProductManagement userRole={userRole} />
         </SafeTabWrapper>
       ) : activeTab === 'sales' ? (
-        <SafeTabWrapper tab="sales" userRole={userRole}>
+        <SafeTabWrapper tab="sales" userRole={userRole} permissions={permissions}>
           <SalesManagement userRole={userRole} />
         </SafeTabWrapper>
       ) : activeTab === 'procurement' ? (
-        <SafeTabWrapper tab="procurement" userRole={userRole}>
+        <SafeTabWrapper tab="procurement" userRole={userRole} permissions={permissions}>
           <ProcurementManagement userRole={userRole} />
         </SafeTabWrapper>
       ) : activeTab === 'balancesheet' ? (
-        <SafeTabWrapper tab="balancesheet" userRole={userRole}>
+        <SafeTabWrapper tab="balancesheet" userRole={userRole} permissions={permissions}>
           <BalanceSheet />
         </SafeTabWrapper>
       ) : activeTab === 'users' ? (
-        <SafeTabWrapper tab="users" userRole={userRole}>
-          {/* USER MANAGEMENT ADMIN PANEL */}
-          <div className="rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-xs space-y-6">
-            <div>
-              <h3 className="font-sans text-base font-bold tracking-tight text-slate-800 flex items-center gap-2">
-                <Shield className="w-5 h-5 text-indigo-600" />
-                <span>Enterprise User Access Directory</span>
-              </h3>
-              <p className="text-xs text-slate-400">Manage corporate identities, assign roles, and audit security clearance tiers in Firestore</p>
+        <SafeTabWrapper tab="users" userRole={userRole} permissions={permissions}>
+          <div className="space-y-6">
+            
+            {/* Sub-tab selection menu for Users Directory vs Role Matrix */}
+            <div id="user-access-sub-tabs" className="flex border-b border-slate-200 text-xs max-w-sm select-none gap-2">
+              <button
+                id="user-subtab-directory"
+                type="button"
+                onClick={() => setUserAccessTab('users')}
+                className={`py-2.5 px-4 font-bold font-sans text-center border-b-2 transition-all cursor-pointer ${
+                  userAccessTab === 'users'
+                    ? 'border-indigo-600 text-indigo-700 font-black'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                👥 Users Directory
+              </button>
+              <button
+                id="user-subtab-matrix"
+                type="button"
+                onClick={() => setUserAccessTab('matrix')}
+                className={`py-2.5 px-4 font-bold font-sans text-center border-b-2 transition-all cursor-pointer ${
+                  userAccessTab === 'matrix'
+                    ? 'border-indigo-600 text-indigo-700 font-black'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                🔐 Privilege Matrix
+              </button>
             </div>
 
-            <div className="overflow-x-auto border border-slate-100 rounded-xl">
-              <table id="user-directory-grid" className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-slate-100 bg-slate-50/40 text-slate-400 select-none">
-                    <th className="p-4 font-bold tracking-wider uppercase text-[10px]">User Profile</th>
-                    <th className="p-4 font-bold tracking-wider uppercase text-[10px]">Security UID Identifier</th>
-                    <th className="p-4 font-bold tracking-wider uppercase text-[10px]">Created Date</th>
-                    <th className="p-4 font-bold tracking-wider uppercase text-[10px] text-center">Clearance Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-50">
-                  {usersList.length === 0 ? (
-                    <tr>
-                      <td colSpan={4} className="p-10 text-center text-slate-400">
-                        <Loader2 className="w-5 h-5 animate-spin mx-auto text-indigo-600 mb-2" />
-                        <span>Querying Firestore user list...</span>
-                      </td>
-                    </tr>
-                  ) : (
-                    usersList.map((usr) => (
-                      <tr key={usr.uid} className="hover:bg-slate-50/30 transition-colors">
-                        <td className="p-4">
-                          <div>
-                            <p className="font-bold text-slate-800 text-xs">{usr.name || 'Anonymous'}</p>
-                            <p className="text-[10px] text-slate-400 font-mono mt-0.5">{usr.email}</p>
-                          </div>
-                        </td>
-                        <td className="p-4 font-mono text-[10px] text-slate-400 tracking-wider">
-                          {usr.uid}
-                        </td>
-                        <td className="p-4 text-slate-500 font-medium font-mono text-[10px]">
-                          {usr.createdAt ? new Date(usr.createdAt).toLocaleString() : 'Bootstrap/Legacy'}
-                        </td>
-                        <td className="p-4 text-center">
-                          {usr.email === 'kishor.aysha2@gmail.com' ? (
-                            <span className="font-mono text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-2.5 py-1 uppercase">Root Admin</span>
-                          ) : (
-                            <select
-                              value={usr.role || 'viewer'}
-                              onChange={(e) => handleUpdateUserRole(usr.uid, usr.email, e.target.value as any)}
-                              className="bg-slate-50 border border-slate-200 text-slate-700 font-mono font-bold rounded-lg px-2.5 py-1.5 text-xs focus:ring-1 focus:ring-slate-400 cursor-pointer outline-none uppercase"
-                            >
-                              <option value="admin">🔒 Admin</option>
-                              <option value="accountant">💰 Accountant</option>
-                              <option value="cashier">💼 Cashier</option>
-                              <option value="viewer">👁️ Viewer</option>
-                            </select>
-                          )}
-                        </td>
+            {userAccessTab === 'users' ? (
+              /* USER MANAGEMENT ADMIN PANEL */
+              <div className="rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-xs space-y-6">
+                <div>
+                  <h3 className="font-sans text-base font-bold tracking-tight text-slate-800 flex items-center gap-2">
+                    <Shield className="w-5 h-5 text-indigo-600" />
+                    <span>Enterprise User Access Directory</span>
+                  </h3>
+                  <p className="text-xs text-slate-400">Manage corporate identities, assign roles, and audit security clearance tiers in Firestore</p>
+                </div>
+
+                <div className="overflow-x-auto border border-slate-100 rounded-xl">
+                  <table id="user-directory-grid" className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-100 bg-slate-50/40 text-slate-400 select-none">
+                        <th className="p-4 font-bold tracking-wider uppercase text-[10px]">User Profile</th>
+                        <th className="p-4 font-bold tracking-wider uppercase text-[10px]">Security UID Identifier</th>
+                        <th className="p-4 font-bold tracking-wider uppercase text-[10px]">Created Date</th>
+                        <th className="p-4 font-bold tracking-wider uppercase text-[10px] text-center">Clearance Status</th>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {usersList.length === 0 ? (
+                        <tr>
+                          <td colSpan={4} className="p-10 text-center text-slate-400">
+                            <Loader2 className="w-5 h-5 animate-spin mx-auto text-indigo-600 mb-2" />
+                            <span>Querying Firestore user list...</span>
+                          </td>
+                        </tr>
+                      ) : (
+                        usersList.map((usr) => (
+                          <tr key={usr.uid} className="hover:bg-slate-50/30 transition-colors">
+                            <td className="p-4">
+                              <div>
+                                <p className="font-bold text-slate-800 text-xs">{usr.name || 'Anonymous'}</p>
+                                <p className="text-[10px] text-slate-400 font-mono mt-0.5">{usr.email}</p>
+                              </div>
+                            </td>
+                            <td className="p-4 font-mono text-[10px] text-slate-400 tracking-wider">
+                              {usr.uid}
+                            </td>
+                            <td className="p-4 text-slate-500 font-medium font-mono text-[10px]">
+                              {usr.createdAt ? new Date(usr.createdAt).toLocaleString() : 'Bootstrap/Legacy'}
+                            </td>
+                            <td className="p-4 text-center">
+                              {usr.email === 'kishor.aysha2@gmail.com' ? (
+                                <span className="font-mono text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-2.5 py-1 uppercase">Root Admin</span>
+                              ) : (
+                                <select
+                                  value={usr.role || 'viewer'}
+                                  onChange={(e) => handleUpdateUserRole(usr.uid, usr.email, e.target.value as any)}
+                                  className="bg-slate-50 border border-slate-200 text-slate-700 font-mono font-bold rounded-lg px-2.5 py-1.5 text-xs focus:ring-1 focus:ring-slate-400 cursor-pointer outline-none uppercase"
+                                >
+                                  <option value="admin">🔒 Admin</option>
+                                  <option value="accountant">💰 Accountant</option>
+                                  <option value="cashier">💼 Cashier</option>
+                                  <option value="viewer">👁️ Viewer</option>
+                                </select>
+                              )}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <PrivilegeMatrix currentUserRole={userRole} />
+            )}
+
           </div>
         </SafeTabWrapper>
       ) : activeTab === 'reports' ? (
-        <SafeTabWrapper tab="reports" userRole={userRole}>
+        <SafeTabWrapper tab="reports" userRole={userRole} permissions={permissions}>
           <ReportsPage userRole={userRole} />
         </SafeTabWrapper>
       ) : (
-        <SafeTabWrapper tab="company_settings" userRole={userRole}>
-          <CompanySettings userRole={userRole} />
+        <SafeTabWrapper tab="company_settings" userRole={userRole} permissions={permissions}>
+          <CompanySettings userRole={userRole} permissions={permissions} />
         </SafeTabWrapper>
       )}
 
@@ -2144,6 +2200,8 @@ export default function App() {
         onSave={handleSaveItem}
         itemToEdit={productToEdit}
         categories={categories.filter((cat) => cat !== 'All')}
+        products={products}
+        permissions={permissions}
       />
 
       {/* INVENTORY ADJUSTMENT MODAL */}
@@ -2472,7 +2530,7 @@ export default function App() {
                   <span>Balance Sheet</span>
                 </button>
 
-                {userRole === 'admin' && (
+                {permissions.viewUsers && (
                   <button
                     id="open-mobile-user-access-tab"
                     type="button"
@@ -2490,7 +2548,7 @@ export default function App() {
                     <span>User Access</span>
                   </button>
                 )}
-                {(userRole === 'admin' || userRole === 'accountant') && (
+                {(permissions.viewSettings || permissions.voidPayment) && (
                   <button
                     id="open-mobile-company-settings-tab"
                     type="button"
@@ -2528,11 +2586,11 @@ export default function App() {
       {(() => {
         const isMobileFabAllowed = () => {
           if (activeTab === 'inventory') return permissions.canEditProduct;
-          if (activeTab === 'customers') return userRole === 'admin';
-          if (activeTab === 'suppliers') return userRole === 'admin';
-          if (activeTab === 'sales') return userRole !== 'viewer';
-          if (activeTab === 'procurement') return userRole === 'admin' || userRole === 'accountant';
-          if (activeTab === 'ledger') return userRole === 'admin' || userRole === 'accountant';
+          if (activeTab === 'customers') return permissions.createCustomer;
+          if (activeTab === 'suppliers') return permissions.createSupplier;
+          if (activeTab === 'sales') return permissions.createSale;
+          if (activeTab === 'procurement') return permissions.createProcurement;
+          if (activeTab === 'ledger') return permissions.createPayment;
           if (activeTab === 'products') return permissions.canEditProduct;
           return false;
         };
@@ -2596,21 +2654,24 @@ function backupFeedbackMessage(msg: string) {
 interface SafeTabWrapperProps {
   children: React.ReactNode;
   tab: string;
-  userRole: 'admin' | 'accountant' | 'cashier' | 'viewer';
+  userRole: string;
+  permissions: AppPermissions;
 }
 
-function SafeTabWrapper({ children, tab, userRole }: SafeTabWrapperProps) {
+function SafeTabWrapper({ children, tab, userRole, permissions }: SafeTabWrapperProps) {
   let isAccessible = true;
 
-  if (userRole === 'viewer') {
-    isAccessible = tab !== 'users' && tab !== 'company_settings';
-  } else if (userRole === 'cashier') {
-    isAccessible = tab === 'dashboard' || tab === 'sales' || tab === 'customers';
-  } else if (userRole === 'accountant') {
-    isAccessible = tab !== 'procurement' && tab !== 'suppliers' && tab !== 'users';
-  } else if (userRole === 'admin') {
-    isAccessible = true;
-  }
+  if (tab === 'dashboard') isAccessible = permissions.viewDashboard;
+  else if (tab === 'customers') isAccessible = permissions.viewCustomers;
+  else if (tab === 'suppliers') isAccessible = permissions.viewSuppliers;
+  else if (tab === 'ledger') isAccessible = permissions.viewLedger;
+  else if (tab === 'products') isAccessible = permissions.viewProducts;
+  else if (tab === 'sales') isAccessible = permissions.viewSales;
+  else if (tab === 'procurement') isAccessible = permissions.viewProcurement;
+  else if (tab === 'balancesheet') isAccessible = permissions.viewFinancialReports;
+  else if (tab === 'users') isAccessible = permissions.viewUsers;
+  else if (tab === 'reports') isAccessible = permissions.viewReports;
+  else if (tab === 'company_settings') isAccessible = permissions.viewSettings || permissions.voidPayment;
   
   if (!isAccessible) {
     return (

@@ -395,5 +395,18 @@ service cloud.firestore {
                             && isValidId(docId) && isValidBusinessProfile(request.resource.data);
       allow delete: if hasRole('admin');
     }
+
+    // Role Permissions Matrix configuration
+    match /rolePermissions/{roleId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (
+        (roleId == 'owner' && hasRole('owner')) ||
+        (roleId == 'admin' && hasRole('owner')) ||
+        (
+          (roleId == 'manager' || roleId == 'supervisor' || roleId == 'accountant' || roleId == 'cashier' || roleId == 'salesman' || roleId == 'viewer') &&
+          (hasRole('owner') || hasRole('admin'))
+        )
+      );
+    }
   }
 }

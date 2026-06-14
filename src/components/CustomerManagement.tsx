@@ -209,6 +209,37 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
       newErrors.dueBalance = 'Due balance cannot be negative';
     }
 
+    // Uniqueness checks
+    const normName = formData.name.trim().toLowerCase();
+    const normPhone = formData.phone.trim();
+    const normVat = formData.vatNumber.trim().toLowerCase();
+
+    const nameExists = customersState.some(c => 
+      c.name.trim().toLowerCase() === normName && 
+      (!editingCustomer || c.id !== editingCustomer.id)
+    );
+    if (nameExists) {
+      newErrors.name = 'Customer name already exists.';
+    }
+
+    const phoneExists = customersState.some(c => 
+      c.phone.trim() === normPhone && 
+      (!editingCustomer || c.id !== editingCustomer.id)
+    );
+    if (phoneExists) {
+      newErrors.phone = 'Customer phone already exists.';
+    }
+
+    if (normVat) {
+      const vatExists = customersState.some(c => 
+        c.vatNumber && c.vatNumber.trim().toLowerCase() === normVat && 
+        (!editingCustomer || c.id !== editingCustomer.id)
+      );
+      if (vatExists) {
+        newErrors.vatNumber = 'VAT Number already exists.';
+      }
+    }
+
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -216,7 +247,68 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
   // --- Submit Create / Edit ---
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!validateForm()) return;
+    
+    // Perform instant local check for error feedback dispatching
+    const newErrors: Record<string, string> = {};
+    if (!formData.name.trim()) newErrors.name = 'Customer name is required';
+    if (formData.name.length > 200) newErrors.name = 'Name must be 200 characters or less';
+    
+    if (!formData.phone.trim()) {
+      newErrors.phone = 'Phone number is required';
+    } else if (formData.phone.length > 50) {
+      newErrors.phone = 'Phone number must be 50 characters or less';
+    }
+
+    if (formData.address.length > 500) {
+      newErrors.address = 'Address must be 500 characters or less';
+    }
+
+    const parsedDue = parseFloat(formData.dueBalance);
+    if (isNaN(parsedDue)) {
+      newErrors.dueBalance = 'Due balance must be a valid number';
+    } else if (parsedDue < 0) {
+      newErrors.dueBalance = 'Due balance cannot be negative';
+    }
+
+    const normName = formData.name.trim().toLowerCase();
+    const normPhone = formData.phone.trim();
+    const normVat = formData.vatNumber.trim().toLowerCase();
+
+    // Name uniqueness
+    const nameExists = customersState.some(c => 
+      c.name.trim().toLowerCase() === normName && 
+      (!editingCustomer || c.id !== editingCustomer.id)
+    );
+    if (nameExists) {
+      newErrors.name = 'Customer name already exists.';
+    }
+
+    // Phone uniqueness
+    const phoneExists = customersState.some(c => 
+      c.phone.trim() === normPhone && 
+      (!editingCustomer || c.id !== editingCustomer.id)
+    );
+    if (phoneExists) {
+      newErrors.phone = 'Customer phone already exists.';
+    }
+
+    // VAT uniqueness
+    if (normVat) {
+      const vatExists = customersState.some(c => 
+        c.vatNumber && c.vatNumber.trim().toLowerCase() === normVat && 
+        (!editingCustomer || c.id !== editingCustomer.id)
+      );
+      if (vatExists) {
+        newErrors.vatNumber = 'VAT Number already exists.';
+      }
+    }
+
+    setErrors(newErrors);
+    if (Object.keys(newErrors).length > 0) {
+      const firstError = Object.values(newErrors)[0];
+      setFeedback({ message: firstError, type: 'error' });
+      return;
+    }
 
     setIsSaving(true);
     const dueBalanceValue = parseFloat(formData.dueBalance);
@@ -302,55 +394,46 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
     setCustomerToDelete(null);
 
     setIsSaving(true);
+    
+    // Relationship protection / transaction block check
+    const hasSales = sales.some((s: any) => s.customerId === id);
+    const hasPayments = customerPayments.some((p: any) => p.customerId === id);
+    const hasBalance = (customerToDelete.dueBalance ?? 0) !== 0 || (customerToDelete.customerCredit ?? 0) !== 0;
+
+    if (hasSales || hasPayments || hasBalance) {
+      const reasons: string[] = [];
+      if (hasSales) reasons.push("sales history");
+      if (hasPayments) reasons.push("payment history");
+      if (hasBalance) reasons.push(`outstanding ledger balance ($${(customerToDelete.dueBalance ?? 0).toFixed(2)})`);
+
+      const reasonText = reasons.join(", ");
+      setFeedback({
+        message: `Deletion blocked! Customer "${name}" cannot be deleted because they have associated ${reasonText}.`,
+        type: 'error'
+      });
+      setIsSaving(false);
+      return;
+    }
+
     try {
       if (!auth.currentUser) {
         const saved = localStorage.getItem('inventory_customers');
         let currentList: Customer[] = saved ? JSON.parse(saved) : [];
 
-        const savedSales = localStorage.getItem('inventory_sales') || '[]';
-        const salesList = JSON.parse(savedSales);
-        const hasSales = salesList.some((s: any) => s.customerId === id);
-
-        const savedPayments = localStorage.getItem('inventory_customer_payments') || '[]';
-        const paymentsList = JSON.parse(savedPayments);
-        const hasPayments = paymentsList.some((p: any) => p.customerId === id);
-
-        const hasBalance = (customerToDelete.dueBalance ?? 0) > 0;
-
-        if (hasSales || hasPayments || hasBalance) {
-          const updatedCustomer: Customer = {
-            ...customerToDelete,
-            status: 'inactive'
-          };
-          currentList = currentList.map(c => c.id === id ? updatedCustomer : c);
-          localStorage.setItem('inventory_customers', JSON.stringify(currentList));
-          setCustomersState(currentList);
-
-          const reasons: string[] = [];
-          if (hasSales) reasons.push("sales history");
-          if (hasPayments) reasons.push("payment history");
-          if (hasBalance) reasons.push(`outstanding due balance ($${customerToDelete.dueBalance.toFixed(2)})`);
-
-          const reasonText = reasons.join(", ");
-          setFeedback({ 
-            message: `Customer "${name}" has associated ${reasonText} and has been safely marked as "inactive" locally.`, 
-            type: 'success' 
-          });
-        } else {
-          const updatedCustomer: Customer = {
-            ...customerToDelete,
-            status: 'inactive'
-          };
-          currentList = currentList.map(c => c.id === id ? updatedCustomer : c);
-          localStorage.setItem('inventory_customers', JSON.stringify(currentList));
-          setCustomersState(currentList);
-          setFeedback({ message: `Customer record "${name}" has been safely retired as "inactive" locally.`, type: 'success' });
-        }
+        const updatedCustomer: Customer = {
+          ...customerToDelete,
+          status: 'inactive'
+        };
+        currentList = currentList.map(c => c.id === id ? updatedCustomer : c);
+        localStorage.setItem('inventory_customers', JSON.stringify(currentList));
+        setCustomersState(currentList);
+        setFeedback({ message: `Customer record "${name}" has been safely retired as "inactive" locally.`, type: 'success' });
+        
         setIsSaving(false);
         return;
       }
 
-      // Always soft-delete to preserve business ledger and audit histories
+      // Soft-delete if no transactions to preserve business ledger and audit histories
       const updatedCustomer: Customer = {
         ...customerToDelete,
         status: 'inactive'
@@ -973,11 +1056,21 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                       value={formData.vatNumber}
                       onChange={(e) => setFormData({ ...formData, vatNumber: e.target.value })}
                       placeholder=" "
-                      className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 focus:border-indigo-650 h-[52px]"
+                      className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 h-[52px] ${
+                        errors.vatNumber 
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                          : 'border-slate-200 focus:border-indigo-600 focus:ring-indigo-650'
+                      }`}
                     />
                     <label htmlFor="form-customer-vat-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
                       VAT Registration No. (Optional)
                     </label>
+                    {errors.vatNumber && (
+                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                        <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                        <span>{errors.vatNumber}</span>
+                      </div>
+                    )}
                   </div>
 
                   <div className="relative w-full animate-fade-in">

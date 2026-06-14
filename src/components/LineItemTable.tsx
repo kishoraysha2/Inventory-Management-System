@@ -132,23 +132,23 @@ export default function LineItemTable({
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-100 bg-white">
+          <div id="line-item-table-scroll-container" className="overflow-auto max-h-[240px] relative scrollbar-thin">
+            <table className="min-w-full divide-y divide-slate-100 bg-white table-fixed">
               <thead className="bg-slate-50">
                 <tr>
-                  <th scope="col" className="px-4 py-3 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  <th scope="col" className="sticky top-0 z-10 bg-slate-50 px-4 py-3 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-200">
                     Product
                   </th>
-                  <th scope="col" className="px-4 py-3 text-center text-[10px] font-bold text-slate-400 uppercase tracking-wider w-[120px]">
+                  <th scope="col" className="sticky top-0 z-10 bg-slate-50 px-4 py-3 text-center text-[10px] font-bold text-slate-400 uppercase tracking-wider w-[100px] min-w-[100px] border-b border-slate-200">
                     Quantity
                   </th>
-                  <th scope="col" className="px-4 py-3 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider w-[150px]">
+                  <th scope="col" className="sticky top-0 z-10 bg-slate-50 px-4 py-3 text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider w-[130px] min-w-[130px] border-b border-slate-200">
                     Unit Price ($)
                   </th>
-                  <th scope="col" className="px-4 py-3 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider w-[150px]">
+                  <th scope="col" className="sticky top-0 z-10 bg-slate-50 px-4 py-3 text-right text-[10px] font-bold text-slate-400 uppercase tracking-wider w-[120px] min-w-[120px] border-b border-slate-200">
                     Subtotal ($)
                   </th>
-                  <th scope="col" className="px-4 py-3 text-center text-[10px] font-bold text-slate-400 uppercase tracking-wider w-[60px]">
+                  <th scope="col" className="sticky top-0 z-10 bg-slate-50 px-4 py-3 text-center text-[10px] font-bold text-slate-400 uppercase tracking-wider w-[64px] min-w-[64px] border-b border-slate-200">
                     Actions
                   </th>
                 </tr>
@@ -167,16 +167,29 @@ export default function LineItemTable({
                         <option value="">-- Select Product --</option>
                         {products
                           .filter((p) => p.status !== 'inactive')
-                          .map((p) => (
-                            <option key={p.id} value={p.id} disabled={p.currentStock <= 0 && pricingMode === 'sellingPrice'}>
-                              {p.name} (SKU: {p.sku} {pricingMode === 'sellingPrice' ? `| stock: ${p.currentStock}` : ''})
-                            </option>
-                          ))}
+                          .map((p) => {
+                            const otherRowsQuantityTotal = items.reduce((sum, otherItem, otherIndex) => {
+                              if (otherIndex !== index && otherItem.productId === p.id) {
+                                return sum + (otherItem.quantity || 0);
+                              }
+                              return sum;
+                            }, 0);
+                            const effectiveStock = Math.max(0, (p.currentStock ?? 0) - otherRowsQuantityTotal);
+                            return (
+                              <option 
+                                key={p.id} 
+                                value={p.id} 
+                                disabled={effectiveStock <= 0 && pricingMode === 'sellingPrice'}
+                              >
+                                {p.name} (SKU: {p.sku} {pricingMode === 'sellingPrice' ? `| stock: ${effectiveStock}` : ''})
+                              </option>
+                            );
+                          })}
                       </select>
                     </td>
 
                     {/* Quantity Input Column */}
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 w-[100px] min-w-[100px]">
                       <input
                         type="number"
                         min="1"
@@ -188,7 +201,7 @@ export default function LineItemTable({
                     </td>
 
                     {/* Unit Price Column */}
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 w-[130px] min-w-[130px]">
                       <div className="relative">
                         <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs font-semibold">$</span>
                         <input
@@ -204,12 +217,12 @@ export default function LineItemTable({
                     </td>
 
                     {/* Line Total Column */}
-                    <td className="px-4 py-3 text-right text-xs font-bold text-slate-800 font-mono whitespace-nowrap">
+                    <td className="px-4 py-3 text-right text-xs font-bold text-slate-800 font-mono whitespace-nowrap w-[120px] min-w-[120px]">
                       ${item.subtotal.toFixed(2)}
                     </td>
 
                     {/* Actions Column */}
-                    <td className="px-4 py-3 text-center">
+                    <td className="px-4 py-3 text-center w-[64px] min-w-[64px]">
                       <button
                         type="button"
                         onClick={() => handleRemoveRow(index)}

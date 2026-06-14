@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { X, Save, AlertTriangle } from 'lucide-react';
 import { Product } from '../types';
 
+import { AppPermissions } from '../hooks/usePermission';
+
 interface ItemFormProps {
   id?: string;
   isOpen: boolean;
@@ -10,6 +12,8 @@ interface ItemFormProps {
   onSave: (item: Omit<Product, 'id' | 'createdDate'> & { id?: string }) => void;
   itemToEdit: Product | null;
   categories: string[];
+  products?: Product[];
+  permissions?: AppPermissions;
 }
 
 export default function ItemForm({
@@ -19,6 +23,8 @@ export default function ItemForm({
   onSave,
   itemToEdit,
   categories,
+  products = [],
+  permissions,
 }: ItemFormProps) {
   const [formData, setFormData] = useState({
     name: '',
@@ -58,7 +64,7 @@ export default function ItemForm({
         sku: '',
         category: categories[0] || '',
         price: '',
-        purchasePrice: '',
+        purchasePrice: permissions?.viewProductCost !== false ? '' : '0',
         quantity: '0',
         minQuantity: '',
         supplierName: '',
@@ -88,7 +94,17 @@ export default function ItemForm({
     const newErrors: Record<string, string> = {};
 
     if (!formData.name.trim()) newErrors.name = 'Product name is required';
-    if (!formData.sku.trim()) newErrors.sku = 'SKU identifier is required';
+    
+    const normalizedSku = formData.sku.trim().toUpperCase();
+    if (!formData.sku.trim()) {
+      newErrors.sku = 'SKU identifier is required';
+    } else {
+      const isSkuDuplicate = products.some(p => p.id !== itemToEdit?.id && p.sku.trim().toUpperCase() === normalizedSku);
+      if (isSkuDuplicate) {
+        newErrors.sku = 'SKU already exists. SKU must be unique.';
+      }
+    }
+
     if (!formData.category) newErrors.category = 'Category selection is required';
 
     const priceNum = parseFloat(formData.price);
@@ -96,9 +112,11 @@ export default function ItemForm({
       newErrors.price = 'Selling price must be a positive number';
     }
 
-    const purchasePriceNum = parseFloat(formData.purchasePrice);
-    if (!formData.purchasePrice || isNaN(purchasePriceNum) || purchasePriceNum < 0) {
-      newErrors.purchasePrice = 'Purchase price must be a positive number';
+    if (permissions?.viewProductCost !== false) {
+      const purchasePriceNum = parseFloat(formData.purchasePrice);
+      if (!formData.purchasePrice || isNaN(purchasePriceNum) || purchasePriceNum < 0) {
+        newErrors.purchasePrice = 'Purchase price must be a positive number';
+      }
     }
 
     const qtyNum = parseInt(formData.quantity, 10);
@@ -124,7 +142,9 @@ export default function ItemForm({
     if (!validateForm()) return;
 
     const retailPrice = parseFloat(formData.price);
-    const costPrice = formData.purchasePrice ? parseFloat(formData.purchasePrice) : retailPrice * 0.6;
+    const costPrice = permissions?.viewProductCost !== false
+      ? (formData.purchasePrice ? parseFloat(formData.purchasePrice) : retailPrice * 0.6)
+      : (itemToEdit?.purchasePrice || (retailPrice * 0.6));
 
     onSave({
       id: itemToEdit?.id,
@@ -273,33 +293,35 @@ export default function ItemForm({
             </div>
 
             {/* Row 3: Prices */}
-            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-              <div className="relative w-full">
-                <input
-                  id="form-purchase-price-input"
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  name="purchasePrice"
-                  value={formData.purchasePrice}
-                  onChange={handleChange}
-                  placeholder=" "
-                  className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
-                    errors.purchasePrice 
-                      ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
-                      : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
-                  }`}
-                />
-                <label htmlFor="form-purchase-price-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
-                  Purchase Cost ($) <span className="text-rose-500 font-extrabold">*</span>
-                </label>
-                {errors.purchasePrice && (
-                  <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
-                    <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
-                    <span>{errors.purchasePrice}</span>
-                  </div>
-                )}
-              </div>
+            <div className={`grid grid-cols-1 gap-5 ${permissions?.viewProductCost !== false ? 'sm:grid-cols-2' : ''}`}>
+              {permissions?.viewProductCost !== false && (
+                <div className="relative w-full">
+                  <input
+                    id="form-purchase-price-input"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    name="purchasePrice"
+                    value={formData.purchasePrice}
+                    onChange={handleChange}
+                    placeholder=" "
+                    className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                      errors.purchasePrice 
+                        ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-450 focus:ring-rose-450' 
+                        : 'border-slate-200 focus:border-indigo-605 focus:ring-indigo-650'
+                    }`}
+                  />
+                  <label htmlFor="form-purchase-price-input" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                    Purchase Cost ($) <span className="text-rose-500 font-extrabold">*</span>
+                  </label>
+                  {errors.purchasePrice && (
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                      <span>{errors.purchasePrice}</span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="relative w-full">
                 <input

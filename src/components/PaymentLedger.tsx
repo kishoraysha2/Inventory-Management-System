@@ -378,7 +378,17 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
         if (activeSegment === 'customers') {
           const targetCust = customers.find((c) => c.id === formData.personId)!;
           const prevDue = targetCust.dueBalance;
-          const remDue = Math.max(0, prevDue - amountVal);
+          const prevCredit = targetCust.customerCredit ?? 0;
+
+          let remDue = 0;
+          let newCredit = prevCredit;
+
+          if (amountVal > prevDue) {
+            remDue = 0;
+            newCredit += (amountVal - prevDue);
+          } else {
+            remDue = prevDue - amountVal;
+          }
 
           const paymentId = `cp-${Date.now()}`;
           const newPayment: CustomerPayment = {
@@ -402,7 +412,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
           // Update Customers list
           const savedCustomers = localStorage.getItem('inventory_customers') || '[]';
           let customersList = JSON.parse(savedCustomers);
-          customersList = customersList.map((c: any) => c.id === targetCust.id ? { ...c, dueBalance: remDue } : c);
+          customersList = customersList.map((c: any) => c.id === targetCust.id ? { ...c, dueBalance: remDue, customerCredit: newCredit } : c);
           localStorage.setItem('inventory_customers', JSON.stringify(customersList));
           setCustomersState(customersList);
 
@@ -484,7 +494,17 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
       if (activeSegment === 'customers') {
         const targetCust = customers.find((c) => c.id === formData.personId)!;
         const prevDue = targetCust.dueBalance;
-        const remDue = Math.max(0, prevDue - amountVal);
+        const prevCredit = targetCust.customerCredit ?? 0;
+
+        let remDue = 0;
+        let newCredit = prevCredit;
+
+        if (amountVal > prevDue) {
+          remDue = 0;
+          newCredit += (amountVal - prevDue);
+        } else {
+          remDue = prevDue - amountVal;
+        }
 
         const paymentId = `cp-${Date.now()}`;
         const newPayment: CustomerPayment = {
@@ -504,7 +524,8 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
         // Update Customer Record
         const updatedCustomer: Customer = {
           ...targetCust,
-          dueBalance: remDue
+          dueBalance: remDue,
+          customerCredit: newCredit
         };
         await setDoc(doc(db, 'customers', targetCust.id), updatedCustomer);
 
@@ -523,7 +544,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
         // System Log
         await logSystemActivity(
           "Customer payment",
-          `Recorded customer payment of $${amountVal.toFixed(2)} from "${targetCust.name}". Due balance updated from $${prevDue.toFixed(2)} to $${remDue.toFixed(2)}.`
+          `Recorded customer payment of $${amountVal.toFixed(2)} from "${targetCust.name}". Due balance updated from $${prevDue.toFixed(2)} to $${remDue.toFixed(2)}${newCredit > prevCredit ? `, Customer Credit updated from $${prevCredit.toFixed(2)} to $${newCredit.toFixed(2)}` : ''}.`
         );
 
         setFeedback({
@@ -976,11 +997,17 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                                   ) : null}
                                 </div>
                               </div>
-                              <div className="flex items-center gap-3 shrink-0">
+                              <div className="flex items-center gap-4 shrink-0">
                                 <div className="text-right">
                                   <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest leading-none">Due Balance</p>
-                                  <span className={`text-xs font-bold block mt-1 ${c.dueBalance > 0 ? 'text-orange-600' : 'text-slate-400 font-normal'}`}>
+                                  <span className={`text-xs font-bold block mt-1 ${c.dueBalance > 0 ? 'text-orange-600 font-extrabold' : 'text-slate-400 font-normal'}`}>
                                     ${c.dueBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                  </span>
+                                </div>
+                                <div className="text-right border-l border-slate-100 pl-3">
+                                  <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest leading-none">Customer Credit</p>
+                                  <span className={`text-xs font-bold block mt-1 ${(c.customerCredit || 0) > 0 ? 'text-emerald-600 font-extrabold' : 'text-slate-400 font-normal'}`}>
+                                    ${(c.customerCredit || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                                   </span>
                                 </div>
                                 {(userRole === 'admin' || userRole === 'accountant') && c.dueBalance > 0 && (
@@ -1028,13 +1055,28 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                                   ) : null}
                                 </div>
                               </div>
-                              <div className="flex items-center gap-3 shrink-0">
+                              <div className="flex items-center gap-4 shrink-0">
                                 <div className="text-right">
-                                  <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest leading-none">Credit Balance</p>
+                                  <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest leading-none">Due Balance</p>
+                                  <span className={`text-xs font-bold block mt-1 ${c.dueBalance > 0 ? 'text-orange-600 font-extrabold' : 'text-slate-400 font-normal'}`}>
+                                    ${c.dueBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                  </span>
+                                </div>
+                                <div className="text-right border-l border-slate-100 pl-3">
+                                  <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest leading-none">Customer Credit</p>
                                   <span className="text-xs font-bold block mt-1 text-emerald-600 font-extrabold">
                                     ${(c.customerCredit || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                                   </span>
                                 </div>
+                                {(userRole === 'admin' || userRole === 'accountant') && c.dueBalance > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenRecordModal(c.id)}
+                                    className="px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-150 border border-indigo-100 text-indigo-600 font-bold text-[10px] cursor-pointer transition shrink-0"
+                                  >
+                                    Pay
+                                  </button>
+                                )}
                               </div>
                             </div>
                           ))}
