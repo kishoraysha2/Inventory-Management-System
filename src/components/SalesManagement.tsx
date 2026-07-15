@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { calculateCustomerLedger } from '../lib/utils';
+import { calculateCustomerLedger, isVoidStatus, isInactiveStatus } from '../lib/utils';
 import { 
   TrendingUp, 
   Search, 
@@ -27,8 +27,10 @@ import {
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity, logFinancialAudit } from '../lib/firebase';
 import { collection, onSnapshot, doc, runTransaction, setDoc } from 'firebase/firestore';
 import { Sale, Customer, Product, LineItem, getNormalizedItems, calculateTransactionTotals, calculateLineTotals } from '../types';
+import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveSystemAccount } from '../lib/postingEngine';
 import TaxInvoiceModal from './TaxInvoiceModal';
 import LineItemTable from './LineItemTable';
+import { usePermission, UserRole } from '../hooks/usePermission';
 
 export const INITIAL_SALES: Sale[] = [
   {
@@ -75,19 +77,138 @@ export const INITIAL_SALES: Sale[] = [
   }
 ];
 
-export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
+export default function SalesManagement({ userRole = 'admin' }: { userRole?: UserRole }) {
+  const { permissions } = usePermission({ role: userRole });
+
   // --- States ---
   const [sales, setSales] = useState<Sale[]>([]);
   const [customersState, setCustomersState] = useState<Customer[]>([]);
   const [customerPayments, setCustomerPayments] = useState<any[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [coa, setCoa] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [formData, setFormData] = useState({
+    customerId: '',
+    productId: '',
+    quantity: '1',
+    sellingPrice: '',
+    taxRatePercent: '15',
+    paymentType: 'Cash' as 'Cash' | 'Credit',
+    saleDate: new Date().toISOString().split('T')[0]
+  });
+
+  const [lineItems, setLineItems] = useState<LineItem[]>([]);
+  const [activeIntelligenceProductId, setActiveIntelligenceProductId] = useState<string>('');
+
+  // Keep active intelligence product ID synced with available unique products in line items
+  useEffect(() => {
+    const selectedProductIds = lineItems.map(item => item.productId).filter(Boolean);
+    if (selectedProductIds.length > 0) {
+      if (!selectedProductIds.includes(activeIntelligenceProductId)) {
+        setActiveIntelligenceProductId(selectedProductIds[0]);
+      }
+    } else {
+      setActiveIntelligenceProductId('');
+    }
+  }, [lineItems, activeIntelligenceProductId]);
+
+  const productPriceHistory = useMemo(() => {
+    if (!activeIntelligenceProductId) return { customerHistory: [], generalHistory: [] };
+
+    const customerHistory: Array<{ date: string; price: number; customerName: string }> = [];
+    const generalHistory: Array<{ date: string; price: number; customerName: string }> = [];
+
+    const sortedSales = [...sales]
+      .filter(s => !isVoidStatus(s.status))
+      .sort((a, b) => new Date(b.saleDate || b.timestamp || 0).getTime() - new Date(a.saleDate || a.timestamp || 0).getTime());
+
+    sortedSales.forEach(s => {
+      const items = s.items || [];
+      if (items.length > 0) {
+        items.forEach(item => {
+          if (item.productId === activeIntelligenceProductId) {
+            const pt = {
+              date: s.saleDate || s.timestamp,
+              price: item.unitPrice,
+              customerName: s.customerName
+            };
+            generalHistory.push(pt);
+            if (formData.customerId && s.customerId === formData.customerId) {
+              customerHistory.push(pt);
+            }
+          }
+        });
+      } else if (s.productId === activeIntelligenceProductId) {
+        const pt = {
+          date: s.saleDate || s.timestamp,
+          price: s.sellingPrice || s.unitPrice,
+          customerName: s.customerName
+        };
+        generalHistory.push(pt);
+        if (formData.customerId && s.customerId === formData.customerId) {
+          customerHistory.push(pt);
+        }
+      }
+    });
+
+    return {
+      customerHistory: customerHistory.slice(0, 3), // We only need last 3
+      generalHistory: generalHistory.slice(0, 3)     // We only need last 3 for general
+    };
+  }, [sales, activeIntelligenceProductId, formData.customerId, lineItems]);
+
+  const suggestedPriceInfo = useMemo(() => {
+    if (!activeIntelligenceProductId) return { price: 0, source: 'catalog' as const };
+    
+    const prod = products.find(p => p.id === activeIntelligenceProductId);
+    if (!prod) return { price: 0, source: 'catalog' as const };
+
+    const { customerHistory, generalHistory } = productPriceHistory;
+
+    if (customerHistory.length > 0) {
+      const sum = customerHistory.reduce((s, pt) => s + pt.price, 0);
+      const avg = sum / customerHistory.length;
+      return {
+        price: avg,
+        source: 'customer_average' as const
+      };
+    }
+
+    if (generalHistory.length > 0) {
+      return {
+        price: generalHistory[0].price,
+        source: 'general_last' as const
+      };
+    }
+
+    return {
+      price: prod.sellingPrice,
+      source: 'catalog' as const
+    };
+  }, [products, activeIntelligenceProductId, productPriceHistory]);
+
+  const applySuggestedPrice = (prodId: string, suggestedPrice: number) => {
+    const updatedItems = lineItems.map(item => {
+      if (item.productId === prodId) {
+        const totals = calculateLineTotals(item.quantity, suggestedPrice, parseFloat(formData.taxRatePercent) || 0);
+        return {
+          ...item,
+          unitPrice: suggestedPrice,
+          subtotal: totals.subtotal,
+          taxAmount: totals.taxAmount,
+          totalAmount: totals.totalAmount
+        };
+      }
+      return item;
+    });
+    setLineItems(updatedItems);
+  };
 
   const customers = useMemo(() => {
     return customersState.map(c => {
-      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id);
+      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id, c.dueBalance);
       return {
         ...c,
         dueBalance: Math.max(0, rawDue),
@@ -102,8 +223,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
     // Group sales (valid credit sales only) by customer ID
     const customerSalesGroup: Record<string, Sale[]> = {};
     sales.forEach(s => {
-      const status = (s.status || '').toString().toUpperCase().trim();
-      const isVoid = status === 'VOID' || status === 'VOIDED';
+      const isVoid = isVoidStatus(s.status);
       const isCredit = (s.paymentType || '').toString().toUpperCase().trim() === 'CREDIT';
       if (!isVoid && isCredit) {
         if (!customerSalesGroup[s.customerId]) {
@@ -116,8 +236,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
     // Group payments (valid customer payments only) by customer ID
     const customerPaymentsGroup: Record<string, any[]> = {};
     customerPayments.forEach(p => {
-      const status = (p.status || '').toString().toUpperCase().trim();
-      const isVoid = status === 'VOID' || status === 'VOIDED';
+      const isVoid = isVoidStatus(p.status);
       if (!isVoid) {
         if (!customerPaymentsGroup[p.customerId]) {
           customerPaymentsGroup[p.customerId] = [];
@@ -218,12 +337,8 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
 
         // If credit, rollback customer due balance
         if (sale.paymentType === 'Credit') {
-          customersList = customersList.map(c => {
-            if (c.id === sale.customerId) {
-              return { ...c, dueBalance: Math.max(0, (c.dueBalance ?? 0) - sale.totalAmount) };
-            }
-            return c;
-          });
+          // Do not update dueBalance locally (it remains the Opening Balance)
+          // The dynamic ledger recalculation handles the rollback automatically
         }
 
         // Void the Sale
@@ -264,6 +379,10 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
           customerSnap = await transaction.get(customerRef);
         }
 
+        // Retrieve posting number sequence in READ phase (Voucher type: JV)
+        const year = new Date(sale.saleDate).getFullYear() || 2026;
+        const { postingNumber: jvPostingNumber, nextVal: jvNextVal } = await getNextPostingNumber(transaction, 'JV', year);
+
         // Perform writes - update all items
         normalizedItems.forEach((item, idx) => {
           const productSnap = productSnaps[idx];
@@ -276,10 +395,8 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
         });
 
         if (sale.paymentType === 'Credit' && customerSnap && customerSnap.exists()) {
-          const customerData = customerSnap.data() as Customer;
-          transaction.update(customerRef, {
-            dueBalance: Math.max(0, (customerData.dueBalance ?? 0) - sale.totalAmount)
-          });
+          // Do not update customer dueBalance on the document to preserve the Opening Balance
+          // The dynamic ledger recalculation handles the rollback automatically
         }
 
         const saleRef = doc(db, 'sales', sale.id);
@@ -289,20 +406,152 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
           const cashLedgerRef = doc(db, 'cashLedger', `cl-${sale.id}`);
           transaction.update(cashLedgerRef, { status: 'VOID' });
         }
+
+        // --- REVERSAL LEDGER POSTING (JV) ---
+        const periodMonth = String(new Date(sale.saleDate).getMonth() + 1).padStart(2, '0');
+        const accountingPeriod = `${year}-${periodMonth}`;
+        const narration = `Reversal of Sale: ${sale.paymentType} Sale of items to "${sale.customerName}" due to Voiding. Original Sale ID: ${sale.id}`;
+
+        const lines: any[] = [];
+        const subtotal = sale.subtotal ?? 0;
+        const totalAmount = sale.totalAmount ?? 0;
+        const taxAmount = sale.taxAmount ?? 0;
+
+        // Resolve active system accounts dynamically
+        const cashAcc = resolveSystemAccount('CASH', coa);
+        const arAcc = resolveSystemAccount('ACCOUNTS_RECEIVABLE', coa);
+        const salesRevenueAcc = resolveSystemAccount('SALES_REVENUE', coa);
+        const outputVatAcc = resolveSystemAccount('OUTPUT_VAT', coa);
+        const cogsAcc = resolveSystemAccount('COGS', coa);
+        const inventoryAcc = resolveSystemAccount('INVENTORY', coa);
+
+        // Debit: Sales Revenue (subtotal)
+        lines.push({
+          accountId: salesRevenueAcc.id,
+          accountCode: salesRevenueAcc.code,
+          accountName: salesRevenueAcc.name,
+          debit: subtotal,
+          credit: 0,
+          baseCurrencyDebit: subtotal,
+          baseCurrencyCredit: 0
+        });
+
+        // Debit: Output VAT Payable (if taxAmount > 0)
+        if (taxAmount > 0) {
+          lines.push({
+            accountId: outputVatAcc.id,
+            accountCode: outputVatAcc.code,
+            accountName: outputVatAcc.name,
+            debit: taxAmount,
+            credit: 0,
+            baseCurrencyDebit: taxAmount,
+            baseCurrencyCredit: 0
+          });
+        }
+
+        // Credit: Cash in Hand (if Cash) or Accounts Receivable (if Credit)
+        if (sale.paymentType === 'Cash') {
+          lines.push({
+            accountId: cashAcc.id,
+            accountCode: cashAcc.code,
+            accountName: cashAcc.name,
+            debit: 0,
+            credit: totalAmount,
+            baseCurrencyDebit: 0,
+            baseCurrencyCredit: totalAmount
+          });
+        } else {
+          lines.push({
+            accountId: arAcc.id,
+            accountCode: arAcc.code,
+            accountName: arAcc.name,
+            debit: 0,
+            credit: totalAmount,
+            baseCurrencyDebit: 0,
+            baseCurrencyCredit: totalAmount
+          });
+        }
+
+        // --- LAYER 2: Inventory Consumption Reversal ---
+        const saleCogs = sale.costOfGoodsSold ?? 0;
+        if (saleCogs > 0) {
+          // Debit: Inventory Asset (1300)
+          lines.push({
+            accountId: inventoryAcc.id,
+            accountCode: inventoryAcc.code,
+            accountName: inventoryAcc.name,
+            debit: saleCogs,
+            credit: 0,
+            baseCurrencyDebit: saleCogs,
+            baseCurrencyCredit: 0
+          });
+
+          // Credit: Cost of Goods Sold (5100)
+          lines.push({
+            accountId: cogsAcc.id,
+            accountCode: cogsAcc.code,
+            accountName: cogsAcc.name,
+            debit: 0,
+            credit: saleCogs,
+            baseCurrencyDebit: 0,
+            baseCurrencyCredit: saleCogs
+          });
+        }
+
+        // Validate double entry
+        const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
+        const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
+        if (Math.abs(totalDebits - totalCredits) > 0.01) {
+          throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
+        }
+
+        const entryId = `le-void-sale-${sale.id}`;
+        const ledgerEntry: any = {
+          id: entryId,
+          postingNumber: jvPostingNumber,
+          companyId: sale.companySnapshot?.name ? `comp-${sale.companySnapshot.name.replace(/\s+/g, '-').toLowerCase()}` : 'comp-default',
+          branchId: 'branch-main',
+          fiscalYear: year,
+          accountingPeriod,
+          sourceModule: 'SALES',
+          postingStatus: 'REVERSED',
+          currency: 'USD',
+          exchangeRate: 1,
+          baseCurrencyCode: 'USD',
+          version: 1,
+          narration,
+          createdFrom: sale.id,
+          approvalStatus: 'APPROVED',
+          postingDate: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+          createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+          lines,
+          originalEntryId: `le-sale-${sale.id}`
+        };
+
+        const ledgerRef = doc(db, 'ledgerEntries', entryId);
+        transaction.set(ledgerRef, ledgerEntry);
+
+        // Commit sequence number
+        commitNextPostingNumber(transaction, 'JV', jvNextVal);
       });
 
       // Log financial Audit
-      await logFinancialAudit(
-        'VOID',
-        sale.id,
-        sale,
-        { ...sale, status: 'VOID' },
-        {
-          cash: sale.paymentType === 'Cash' ? -sale.totalAmount : 0,
-          stock: sale.quantity, // increase stock (rolling back the sale)
-          due: sale.paymentType === 'Credit' ? -sale.totalAmount : 0
-        }
-      );
+      await logFinancialAudit({
+        action: 'VOID_SALE',
+        entityType: 'sale',
+        entityId: sale.id,
+        referenceId: sale.paymentType === 'Cash' ? `cl-${sale.id}` : null,
+        customerId: sale.customerId,
+        supplierId: null,
+        productId: sale.productId,
+        amount: sale.totalAmount,
+        paymentType: sale.paymentType,
+        previousState: sale,
+        newState: { ...sale, status: 'VOID' },
+        notes: `Voided sale ID: ${sale.id}`,
+        userRole: userRole
+      });
 
       // Log deletions/voids in system activity
       await logSystemActivity(
@@ -325,17 +574,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
       setFeedback({ message: `Access Abort: ${errMsg}`, type: 'error' });
     }
   };
-  const [formData, setFormData] = useState({
-    customerId: '',
-    productId: '',
-    quantity: '1',
-    sellingPrice: '',
-    taxRatePercent: '15',
-    paymentType: 'Cash' as 'Cash' | 'Credit',
-    saleDate: new Date().toISOString().split('T')[0]
-  });
 
-  const [lineItems, setLineItems] = useState<LineItem[]>([]);
 
   // --- Validation Errors ---
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -355,6 +594,9 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
 
       const savedPayments = localStorage.getItem('inventory_customer_payments');
       setCustomerPayments(savedPayments ? JSON.parse(savedPayments) : []);
+
+      const savedCOA = localStorage.getItem('nexus_chart_of_accounts');
+      setCoa(savedCOA ? JSON.parse(savedCOA) : []);
 
       setLoading(false);
       return;
@@ -410,7 +652,11 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
     const unsubProducts = onSnapshot(collection(db, 'products'), (snapshot) => {
       const prodList: Product[] = [];
       snapshot.forEach((docSnap) => {
-        prodList.push(docSnap.data() as Product);
+        const data = docSnap.data() as Product;
+        prodList.push({
+          ...data,
+          id: data.id || docSnap.id
+        });
       });
       prodList.sort((a, b) => a.name.localeCompare(b.name));
       setProducts(prodList);
@@ -433,11 +679,23 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
       console.error("Payments sync error in SalesManagement", error);
     });
 
+    // 5. Sync Chart of Accounts
+    const unsubCOA = onSnapshot(collection(db, 'chartOfAccounts'), (snapshot) => {
+      const coaList: any[] = [];
+      snapshot.forEach((docSnap) => {
+        coaList.push(docSnap.data());
+      });
+      setCoa(coaList);
+    }, (error) => {
+      console.error("COA sync error in SalesManagement", error);
+    });
+
     return () => {
       unsubSales();
       unsubCustomers();
       unsubProducts();
       unsubPayments();
+      unsubCOA();
     };
   }, []);
 
@@ -625,17 +883,66 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
           };
         }
 
-        // Create items array with snap values
+        // Create customer snapshot
+        const customerSnapshot = {
+          id: chosenCust.id,
+          name: chosenCust.name,
+          phone: chosenCust.phone,
+          address: chosenCust.address,
+          customerType: chosenCust.customerType,
+          vatNumber: chosenCust.vatNumber || "",
+          email: chosenCust.email || ""
+        };
+
+        // Create company snapshot
+        let companySnapshot = {
+          name: "Apex Global Supply Ltd.",
+          address: "740 Industrial Boulevard, Suite C, Austin, TX 78701",
+          phone: "+1 (512) 555-0193",
+          email: "billing@apexsupply.com",
+          website: "www.apexsupply.com",
+          taxRegistrationId: "VAT-US948301140B",
+          taxRatePercent: 15,
+          tradeName: "Apex Global Supply",
+          ownerName: "Apex Global LLC",
+          crNumber: "CR-1010349283",
+          logo: ""
+        };
+
+        const savedCompany = localStorage.getItem('invoice_company_profile');
+        if (savedCompany) {
+          try {
+            const parsed = JSON.parse(savedCompany);
+            companySnapshot = { ...companySnapshot, ...parsed };
+          } catch (e) {
+            console.error("Failed to parse saved company profile", e);
+          }
+        }
+
+        // Generate invoice number
+        const indexPart = saleId.replace('sale-', '');
+        const invoiceNumber = `INV-2026-${indexPart.length > 5 ? indexPart.substring(indexPart.length - 5) : indexPart}`;
+
+        // Create items array with snap values and product snapshots
         const itemsWithSnap = lineItems.map(item => {
           const prod = productsList.find(p => p.id === item.productId);
           const purchasePriceAtSale = prod?.purchasePrice ?? 0;
           const costOfGoodsSold = purchasePriceAtSale * item.quantity;
           const grossProfit = item.subtotal - costOfGoodsSold;
+          const productSnapshot = prod ? {
+            id: prod.id,
+            name: prod.name,
+            sku: prod.sku,
+            category: prod.category,
+            description: prod.description || ""
+          } : undefined;
+
           return {
             ...item,
             purchasePriceAtSale,
             costOfGoodsSold,
-            grossProfit
+            grossProfit,
+            productSnapshot
           };
         });
 
@@ -662,28 +969,18 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
           productSellingPriceAtSale: lineItems[0].unitPrice,
           costOfGoodsSold: totalCOGS,
           grossProfit: totalGrossProfit,
-          items: itemsWithSnap
+          items: itemsWithSnap,
+          customerSnapshot,
+          companySnapshot,
+          invoiceNumber
         };
 
         // If Credit, update customer due balance
         if (formData.paymentType === 'Credit') {
           customersList = customersList.map(c => {
             if (c.id === chosenCust.id) {
-              const currentCredit = c.customerCredit ?? 0;
-              const currentDue = c.dueBalance ?? 0;
-
-              let liveCustBalance = currentDue;
-              let newCredit = currentCredit;
-
-              if (currentCredit >= totalAmount) {
-                newCredit = currentCredit - totalAmount;
-                liveCustBalance = currentDue;
-              } else {
-                const unpaidAmount = totalAmount - currentCredit;
-                newCredit = 0;
-                liveCustBalance = currentDue + unpaidAmount;
-              }
-              return { ...c, dueBalance: liveCustBalance, customerCredit: newCredit };
+              // Preserve original dueBalance (opening balance) and original credit
+              return { ...c };
             }
             return c;
           });
@@ -727,6 +1024,50 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
 
       // Execute Atomic Database Updates
       await runTransaction(db, async (transaction) => {
+        // Retrieve company profile configuration live inside the transaction (READ PHASE - must occur before any writes)
+        let companySnapshot = {
+          name: "Apex Global Supply Ltd.",
+          address: "740 Industrial Boulevard, Suite C, Austin, TX 78701",
+          phone: "+1 (512) 555-0193",
+          email: "billing@apexsupply.com",
+          website: "www.apexsupply.com",
+          taxRegistrationId: "VAT-US948301140B",
+          taxRatePercent: 15,
+          tradeName: "Apex Global Supply",
+          ownerName: "Apex Global LLC",
+          crNumber: "CR-1010349283",
+          logo: ""
+        };
+
+        const companyConfigRef = doc(db, 'businessProfile', 'config');
+        const companyConfigSnap = await transaction.get(companyConfigRef);
+        if (companyConfigSnap.exists()) {
+          const bizData = companyConfigSnap.data();
+          companySnapshot = {
+            name: bizData.name || companySnapshot.name,
+            address: bizData.address || companySnapshot.address,
+            phone: bizData.phone || companySnapshot.phone,
+            email: bizData.email || companySnapshot.email,
+            website: bizData.website || companySnapshot.website,
+            taxRegistrationId: bizData.taxRegistrationId || companySnapshot.taxRegistrationId,
+            taxRatePercent: typeof bizData.taxRatePercent === 'number' ? bizData.taxRatePercent : companySnapshot.taxRatePercent,
+            tradeName: bizData.tradeName || "",
+            ownerName: bizData.ownerName || "",
+            crNumber: bizData.crNumber || "",
+            logo: bizData.logo || ""
+          };
+        } else {
+          const savedCompany = localStorage.getItem('invoice_company_profile');
+          if (savedCompany) {
+            try {
+              const parsed = JSON.parse(savedCompany);
+              companySnapshot = { ...companySnapshot, ...parsed };
+            } catch (e) {
+              console.error("Failed to parse saved company profile", e);
+            }
+          }
+        }
+
         // A. Verify and read Product stock live in transaction
         // Aggregate all quantities by productId first to enforce a product-level aggregated quantity map
         const aggregatedQuantities: Record<string, number> = {};
@@ -760,7 +1101,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
             throw new Error(`Product "${firstItem?.productName || 'Unknown'}" no longer exists.`);
           }
           const productData = snap.data() as Product;
-          if (productData.status === 'inactive') {
+          if (isInactiveStatus(productData.status)) {
             throw new Error(`Transactional abort: Product "${productData.name}" has been marked as inactive.`);
           }
           const liveProductStock = productData.currentStock ?? 0;
@@ -800,6 +1141,10 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
           }
         }
 
+        // Retrieve posting number sequence in READ phase (Voucher type: SV)
+        const year = new Date(formData.saleDate).getFullYear() || 2026;
+        const { postingNumber, nextVal } = await getNextPostingNumber(transaction, 'SV', year);
+
         // C. WRITE operations (after all READS)
         // Apply one final stock update per unique product to prevent overwrite issues
         Object.values(uniqueProductUpdates).forEach(update => {
@@ -809,22 +1154,45 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
         });
 
         if (formData.paymentType === 'Credit' && customerRef) {
-          transaction.update(customerRef, {
-            dueBalance: liveCustBalance,
-            customerCredit: newCredit
-          });
+          // Do not update dueBalance/customerCredit on Customer document to preserve Opening Balance
+          // The dynamic ledger recalculation will automatically compute and reflect the correct balances
         }
 
         // D. Create items snapshot with correct snap prices
+        const customerSnapshot = {
+          id: chosenCust.id,
+          name: chosenCust.name,
+          phone: chosenCust.phone,
+          address: chosenCust.address,
+          customerType: chosenCust.customerType,
+          vatNumber: chosenCust.vatNumber || "",
+          email: chosenCust.email || ""
+        };
+
+        const indexPart = saleId.replace('sale-', '');
+        const invoiceNumber = `INV-2026-${indexPart.length > 5 ? indexPart.substring(indexPart.length - 5) : indexPart}`;
+
         const itemsWithSnap = lineItems.map((item) => {
           const pPrice = uniqueProductUpdates[item.productId].purchasePrice;
           const costOfGoodsSold = pPrice * item.quantity;
           const grossProfit = item.subtotal - costOfGoodsSold;
+          
+          const snap = productSnapsMap[item.productId];
+          const productData = snap?.exists() ? snap.data() as Product : null;
+          const productSnapshot = productData ? {
+            id: productData.id || item.productId,
+            name: productData.name,
+            sku: productData.sku,
+            category: productData.category,
+            description: productData.description || ""
+          } : undefined;
+
           return {
             ...item,
             purchasePriceAtSale: pPrice,
             costOfGoodsSold,
-            grossProfit
+            grossProfit,
+            productSnapshot
           };
         });
 
@@ -852,7 +1220,10 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
           productSellingPriceAtSale: lineItems[0].unitPrice,
           costOfGoodsSold: totalCOGS,
           grossProfit: totalGrossProfit,
-          items: itemsWithSnap
+          items: itemsWithSnap,
+          customerSnapshot,
+          companySnapshot,
+          invoiceNumber
         };
 
         const saleRef = doc(db, 'sales', saleId);
@@ -871,6 +1242,167 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
             timestamp: new Date(formData.saleDate).toISOString()
           });
         }
+
+        // --- AUTOMATIC LEDGER POSTING (SV) ---
+        const periodMonth = String(new Date(formData.saleDate).getMonth() + 1).padStart(2, '0');
+        const accountingPeriod = `${year}-${periodMonth}`;
+        const narration = `${formData.paymentType} Sale of ${lineItems.length} items to "${chosenCust.name}". Invoice #${invoiceNumber}`;
+
+        const lines: any[] = [];
+
+        // Resolve active system accounts dynamically
+        const cashAcc = resolveSystemAccount('CASH', coa);
+        const arAcc = resolveSystemAccount('ACCOUNTS_RECEIVABLE', coa);
+        const salesRevenueAcc = resolveSystemAccount('SALES_REVENUE', coa);
+        const outputVatAcc = resolveSystemAccount('OUTPUT_VAT', coa);
+        const cogsAcc = resolveSystemAccount('COGS', coa);
+        const inventoryAcc = resolveSystemAccount('INVENTORY', coa);
+
+        // Debit: Cash in Hand (if Cash) or Accounts Receivable (if Credit)
+        if (formData.paymentType === 'Cash') {
+          lines.push({
+            accountId: cashAcc.id,
+            accountCode: cashAcc.code,
+            accountName: cashAcc.name,
+            debit: totalAmount,
+            credit: 0,
+            baseCurrencyDebit: totalAmount,
+            baseCurrencyCredit: 0
+          });
+        } else {
+          lines.push({
+            accountId: arAcc.id,
+            accountCode: arAcc.code,
+            accountName: arAcc.name,
+            debit: totalAmount,
+            credit: 0,
+            baseCurrencyDebit: totalAmount,
+            baseCurrencyCredit: 0
+          });
+        }
+
+        // Credit: Sales Revenue (subtotal)
+        lines.push({
+          accountId: salesRevenueAcc.id,
+          accountCode: salesRevenueAcc.code,
+          accountName: salesRevenueAcc.name,
+          debit: 0,
+          credit: subtotal,
+          baseCurrencyDebit: 0,
+          baseCurrencyCredit: subtotal
+        });
+
+        // Credit: Output VAT Payable (if taxAmount > 0)
+        if (taxAmount > 0) {
+          lines.push({
+            accountId: outputVatAcc.id,
+            accountCode: outputVatAcc.code,
+            accountName: outputVatAcc.name,
+            debit: 0,
+            credit: taxAmount,
+            baseCurrencyDebit: 0,
+            baseCurrencyCredit: taxAmount
+          });
+        }
+
+        // --- LAYER 2: Inventory Consumption ---
+        if (totalCOGS > 0) {
+          // Debit: Cost of Goods Sold (5100)
+          lines.push({
+            accountId: cogsAcc.id,
+            accountCode: cogsAcc.code,
+            accountName: cogsAcc.name,
+            debit: totalCOGS,
+            credit: 0,
+            baseCurrencyDebit: totalCOGS,
+            baseCurrencyCredit: 0
+          });
+
+          // Credit: Inventory Asset (1300)
+          lines.push({
+            accountId: inventoryAcc.id,
+            accountCode: inventoryAcc.code,
+            accountName: inventoryAcc.name,
+            debit: 0,
+            credit: totalCOGS,
+            baseCurrencyDebit: 0,
+            baseCurrencyCredit: totalCOGS
+          });
+        }
+
+        // Validate double entry
+        const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
+        const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
+        if (Math.abs(totalDebits - totalCredits) > 0.01) {
+          throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
+        }
+
+        const entryId = `le-sale-${saleId}`;
+        const ledgerEntry: any = {
+          id: entryId,
+          postingNumber,
+          companyId: companySnapshot.name ? `comp-${companySnapshot.name.replace(/\s+/g, '-').toLowerCase()}` : 'comp-default',
+          branchId: 'branch-main',
+          fiscalYear: year,
+          accountingPeriod,
+          sourceModule: 'SALES',
+          postingStatus: 'POSTED',
+          currency: 'USD',
+          exchangeRate: 1,
+          baseCurrencyCode: 'USD',
+          version: 1,
+          narration,
+          createdFrom: saleId,
+          approvalStatus: 'APPROVED',
+          postingDate: new Date(formData.saleDate).toISOString(),
+          createdAt: new Date().toISOString(),
+          createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+          lines
+        };
+
+        const ledgerRef = doc(db, 'ledgerEntries', entryId);
+        transaction.set(ledgerRef, ledgerEntry);
+
+        // Commit sequence number
+        commitNextPostingNumber(transaction, 'SV', nextVal);
+
+        // Ensure system accounts and VAT structures exist
+        const currentCoaIds = coa.map(c => c.id);
+        await ensureSystemAccountsExist(transaction, currentCoaIds);
+      });
+
+      // Log financial Audit
+      await logFinancialAudit({
+        action: 'CREATE_SALE',
+        entityType: 'sale',
+        entityId: saleId,
+        referenceId: formData.paymentType === 'Cash' ? `cl-${saleId}` : null,
+        customerId: chosenCust.id,
+        supplierId: null,
+        productId: lineItems[0].productId,
+        amount: totalAmount,
+        paymentType: formData.paymentType,
+        previousState: {},
+        newState: {
+          id: saleId,
+          customerId: chosenCust.id,
+          customerName: chosenCust.name,
+          productId: lineItems[0].productId,
+          productName: lineItems.length > 1 ? `${lineItems[0].productName} + ${lineItems.length - 1} items` : lineItems[0].productName,
+          quantity: lineItems.reduce((sum, item) => sum + item.quantity, 0),
+          sellingPrice: lineItems[0].unitPrice,
+          unitPrice: lineItems[0].unitPrice,
+          subtotal: subtotal,
+          taxRatePercent: taxRatePercent,
+          taxAmount: taxAmount,
+          totalAmount: totalAmount,
+          paymentType: formData.paymentType,
+          saleDate: new Date(formData.saleDate).toISOString(),
+          timestamp: new Date(formData.saleDate).toISOString(),
+          items: lineItems
+        },
+        notes: `Completed multi-line sale of ${lineItems.length} items to "${chosenCust.name}"`,
+        userRole: userRole
       });
 
       // Log activity to the Logs collection
@@ -909,7 +1441,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
   };
 
   // --- Calculate Dynamic Metrics ---
-  const activeSales = sales.filter(s => s.status !== 'voided' && s.status !== 'VOID');
+  const activeSales = sales.filter(s => !isVoidStatus(s.status));
   const totalSalesRevenue = activeSales.reduce((sum, s) => sum + s.totalAmount, 0);
   const totalSalesCount = activeSales.length;
   const cashSalesTotal = activeSales.filter(s => s.paymentType === 'Cash').reduce((sum, s) => sum + s.totalAmount, 0);
@@ -1038,7 +1570,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
                 </p>
               </div>
 
-              {userRole !== 'viewer' && (
+              {permissions.createSale && (
                 <button
                   type="button"
                   onClick={openForm}
@@ -1178,7 +1710,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
                       </thead>
                       <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
                         {filteredSalesList.map((sale) => {
-                          const isVoided = sale.status === 'voided' || sale.status === 'VOID';
+                          const isVoided = isVoidStatus(sale.status);
                           const isCredit = sale.paymentType === 'Credit';
                           const creditInfo = isCredit && !isVoided
                             ? creditSalesPaymentInfo.get(sale.id) || { amountPaid: 0, remainingBalance: sale.totalAmount, status: 'Unpaid' }
@@ -1291,7 +1823,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
                                       VOIDED
                                     </span>
                                   ) : (
-                                    userRole === 'admin' && (
+                                    permissions.voidSale && (
                                       <button
                                         type="button"
                                         onClick={() => voidTransaction(sale.id)}
@@ -1377,7 +1909,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white rounded-[2rem] border border-slate-200 shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden"
+              className="bg-white rounded-[2rem] border border-slate-200 shadow-xl max-w-5xl w-full max-h-[90vh] flex flex-col overflow-hidden"
             >
               {/* Header */}
               <div className="flex items-center justify-between border-b border-slate-100 px-6 sm:px-8 py-5 shrink-0">
@@ -1401,173 +1933,368 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: 'ad
               {/* Form container with flex-1 overflow-hidden layout */}
               <form onSubmit={handleSubmitSymbol} className="flex flex-col flex-1 overflow-hidden min-h-0">
                 {/* Scrollable Form body content */}
-                <div className="flex-1 overflow-y-auto p-6 sm:p-8 space-y-6 min-h-0">
-                
-                {/* Select Customer */}
-                <div className="relative w-full">
-                  {customers.length === 0 ? (
-                    <div className="p-3.5 bg-rose-50 border border-rose-100 rounded-xl text-xs text-rose-800 font-medium animate-fade-in shadow-3xs">
-                      ⚠️ No customers registered in index. Please configure Customer profiles inside directory first.
+                <div className="flex-1 overflow-y-auto p-6 sm:p-8 min-h-0">
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+                    
+                    {/* Main Form Block (Left 2 columns) */}
+                    <div className="lg:col-span-2 space-y-6">
+                      
+                      {/* Select Customer */}
+                      <div className="relative w-full">
+                        {customers.length === 0 ? (
+                          <div className="p-3.5 bg-rose-50 border border-rose-100 rounded-xl text-xs text-rose-800 font-medium animate-fade-in shadow-3xs">
+                            ⚠️ No customers registered in index. Please configure Customer profiles inside directory first.
+                          </div>
+                        ) : (
+                          <div className="relative w-full">
+                            <select
+                              id="form-sales-customer-field"
+                              value={formData.customerId}
+                              onChange={(e) => handleCustomerChange(e.target.value)}
+                              required
+                              className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 bg-white appearance-none cursor-pointer disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                                errors.customerId 
+                                  ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                                  : 'border-slate-200 focus:border-indigo-605'
+                              }`}
+                            >
+                              <option value="">-- Choose Customer profile --</option>
+                              {customers.filter(cust => !isInactiveStatus(cust.status)).map((cust) => (
+                                <option key={cust.id} value={cust.id}>
+                                  {cust.name} ({cust.customerType} - Due: ${cust.dueBalance.toFixed(2)})
+                                </option>
+                              ))}
+                            </select>
+                            <label htmlFor="form-sales-customer-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                              Customer Name <span className="text-rose-500 font-extrabold">*</span>
+                            </label>
+                          </div>
+                        )}
+                        {errors.customerId && (
+                          <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                            <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                            <span>{errors.customerId}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Reusable LineItemTable Component */}
+                      <LineItemTable
+                        items={lineItems}
+                        onChange={setLineItems}
+                        products={products}
+                        taxRatePercent={parseFloat(formData.taxRatePercent) || 0}
+                        pricingMode="sellingPrice"
+                      />
+
+                      {errors.lineItems && (
+                        <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                          <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                          <span>{errors.lineItems}</span>
+                        </div>
+                      )}
+
+                      {/* Date and Settlement selection */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                        {/* Settlement Segment Choice */}
+                        <div className="relative w-full">
+                          <div className="flex bg-slate-50 border border-slate-200 p-1 rounded-xl h-[52px] items-center">
+                            {([ 'Cash', 'Credit' ] as const).map((typeOpt) => (
+                              <button
+                                key={typeOpt}
+                                type="button"
+                                onClick={() => setFormData({ ...formData, paymentType: typeOpt })}
+                                className={`flex-1 text-center py-2 text-xs font-extrabold rounded-lg uppercase tracking-wider transition cursor-pointer ${
+                                  formData.paymentType === typeOpt 
+                                    ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/40' 
+                                    : 'text-slate-500 hover:text-slate-800 opacity-80'
+                                }`}
+                              >
+                                {typeOpt}
+                              </button>
+                            ))}
+                          </div>
+                          <span className="absolute -top-2.5 left-3 px-1.5 bg-white text-[10px] font-extrabold text-slate-400 uppercase tracking-widest leading-none">
+                            Settlement Type <span className="text-rose-500 font-extrabold">*</span>
+                          </span>
+                        </div>
+
+                        {/* Completion date */}
+                        <div className="relative w-full">
+                          <input
+                            type="date"
+                            required
+                            id="form-sales-date-field"
+                            value={formData.saleDate}
+                            onChange={(e) => setFormData({ ...formData, saleDate: e.target.value })}
+                            className="peer w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition duration-150 cursor-pointer h-[52px]"
+                          />
+                          <label htmlFor="form-sales-date-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                            Sale Completion Date <span className="text-rose-500 font-extrabold">*</span>
+                          </label>
+                          {errors.saleDate && (
+                            <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                              <AlertTriangle className="h-3.5 w-3.5 text-rose-505 shrink-0" />
+                              <span>{errors.saleDate}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Tax Configuration Segment */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                        <div className="relative w-full">
+                          <span className="absolute right-3.5 top-4.5 text-slate-400 text-xs font-semibold leading-none">%</span>
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            step="0.1"
+                            required
+                            id="form-sales-tax-field"
+                            value={formData.taxRatePercent}
+                            onChange={(e) => handleTaxRateChange(e.target.value)}
+                            placeholder=" "
+                            className={`peer w-full rounded-xl border pl-3.5 pr-8 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
+                              errors.taxRatePercent 
+                                ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                                : 'border-slate-200 focus:border-indigo-605'
+                            }`}
+                          />
+                          <label htmlFor="form-sales-tax-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600 font-bold">
+                            Tax / VAT Rate (%) <span className="text-rose-500 font-extrabold">*</span>
+                          </label>
+                          {errors.taxRatePercent && (
+                            <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                              <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                              <span>{errors.taxRatePercent}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Dynamic Summary Breakdown Banner */}
+                      {formData.customerId && lineItems.length > 0 && (() => {
+                        const totalsSummary = calculateTransactionTotals(lineItems);
+                        return (
+                          <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-2 text-xs">
+                            <p className="font-bold text-slate-800 uppercase tracking-wider text-[10px]">Dynamic invoice Summary</p>
+                            <div className="flex items-center justify-between font-medium">
+                              <span className="text-slate-500">
+                                Total Line Items ({lineItems.length})
+                              </span>
+                              <span className="text-slate-800 font-mono font-bold">
+                                ${totalsSummary.subtotal.toFixed(2)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between font-medium text-[11px] text-slate-500 border-t border-dashed border-slate-200/60 pt-1.5">
+                              <span>Total Sales Tax / VAT ({parseFloat(formData.taxRatePercent) || 0}%)</span>
+                              <span className="font-mono font-semibold">
+                                ${totalsSummary.taxAmount.toFixed(2)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between font-bold text-indigo-600 pt-1.5 border-t border-slate-200">
+                              <span>Total Invoice Due (Locked)</span>
+                              <span className="font-mono font-extrabold text-sm">
+                                ${totalsSummary.totalAmount.toFixed(2)}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                      
                     </div>
-                  ) : (
-                    <div className="relative w-full">
-                      <select
-                        id="form-sales-customer-field"
-                        value={formData.customerId}
-                        onChange={(e) => handleCustomerChange(e.target.value)}
-                        required
-                        className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 bg-white appearance-none cursor-pointer disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
-                          errors.customerId 
-                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
-                            : 'border-slate-200 focus:border-indigo-605'
-                        }`}
-                      >
-                        <option value="">-- Choose Customer profile --</option>
-                        {customers.filter(cust => cust.status !== 'inactive').map((cust) => (
-                          <option key={cust.id} value={cust.id}>
-                            {cust.name} ({cust.customerType} - Due: ${cust.dueBalance.toFixed(2)})
-                          </option>
-                        ))}
-                      </select>
-                      <label htmlFor="form-sales-customer-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
-                        Customer Name <span className="text-rose-500 font-extrabold">*</span>
-                      </label>
+
+                    {/* Price Intelligence Sidebar (Right 1 column) */}
+                    <div className="col-span-1 bg-slate-50 border border-slate-200 rounded-3xl p-5 space-y-4 shadow-3xs">
+                      <div className="flex items-center justify-between border-b border-slate-200/60 pb-3">
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="h-4 w-4 text-indigo-500 animate-pulse" />
+                          <h4 className="text-xs font-black uppercase tracking-wider text-slate-800">
+                            Price Intelligence
+                          </h4>
+                        </div>
+                        <span className="text-[9px] bg-indigo-50 text-indigo-750 px-2 py-0.5 rounded-full font-bold uppercase tracking-widest">
+                          Smart AI
+                        </span>
+                      </div>
+
+                      {!formData.customerId ? (
+                        <div className="py-8 text-center text-slate-400 text-xs font-semibold leading-relaxed">
+                          Please select a customer first to load real-time pricing intelligence.
+                        </div>
+                      ) : lineItems.filter(item => item.productId).length === 0 ? (
+                        <div className="py-8 text-center text-slate-400 text-xs font-semibold leading-relaxed">
+                          No products added to this transaction. Select a product in your line items table to analyze price suggestions.
+                        </div>
+                      ) : (
+                        <>
+                          {/* Selected product tab selector if multiple unique products exist */}
+                          {(() => {
+                            const uniqueSelectedProducts = lineItems
+                              .filter(item => item.productId)
+                              .reduce((acc, item) => {
+                                if (!acc.find(p => p.id === item.productId)) {
+                                  const prod = products.find(p => p.id === item.productId);
+                                  if (prod) acc.push(prod);
+                                }
+                                return acc;
+                              }, [] as Product[]);
+
+                            return (
+                              uniqueSelectedProducts.length > 1 && (
+                                <div className="space-y-1.5">
+                                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                                    Select Product to Analyze:
+                                  </span>
+                                  <div className="flex flex-wrap gap-1">
+                                    {uniqueSelectedProducts.map(p => (
+                                      <button
+                                        key={p.id}
+                                        type="button"
+                                        onClick={() => setActiveIntelligenceProductId(p.id)}
+                                        className={`px-2 py-1 text-[10px] font-bold rounded-lg border transition-all cursor-pointer ${
+                                          activeIntelligenceProductId === p.id
+                                            ? 'bg-indigo-600 border-indigo-600 text-white shadow-3xs'
+                                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                                        }`}
+                                      >
+                                        {p.name.split(' ')[0]}...
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              )
+                            );
+                          })()}
+
+                          {/* Active Product analysis */}
+                          {(() => {
+                            const activeProd = products.find(p => p.id === activeIntelligenceProductId);
+                            if (!activeProd) return null;
+
+                            const { customerHistory, generalHistory } = productPriceHistory;
+                            const suggestion = suggestedPriceInfo;
+
+                            return (
+                              <div className="space-y-4 text-xs">
+                                {/* Selected Product info */}
+                                <div className="bg-white border border-slate-200 p-3 rounded-2xl shadow-3xs">
+                                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">
+                                    Analyzing Pricing for:
+                                  </span>
+                                  <span className="font-bold text-slate-800 text-xs block mt-0.5 truncate">
+                                    {activeProd.name}
+                                  </span>
+                                  <div className="flex justify-between items-center text-[10px] font-semibold text-slate-500 mt-1.5 border-t border-slate-100 pt-1.5">
+                                    <span>Catalog Selling Price:</span>
+                                    <span className="font-bold text-slate-900 font-mono">${activeProd.sellingPrice.toFixed(2)}</span>
+                                  </div>
+                                </div>
+
+                                {/* Clickable Suggested Price block */}
+                                <div className="bg-indigo-50/50 border border-indigo-100 rounded-2xl p-4 text-center space-y-2">
+                                  <span className="text-[10px] font-bold text-indigo-700 uppercase tracking-widest block">
+                                    Suggested selling price
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => applySuggestedPrice(activeIntelligenceProductId, suggestion.price)}
+                                    className="mx-auto block px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-sm rounded-xl transition-all shadow-xs hover:shadow-md cursor-pointer group animate-pulse"
+                                    title="Click to apply to Unit Price fields"
+                                  >
+                                    ${suggestion.price.toFixed(2)}
+                                    <span className="block text-[8px] font-semibold opacity-85 uppercase tracking-widest mt-0.5 group-hover:scale-105 transition-transform">
+                                      {suggestion.source === 'customer_average' && '✨ Avg price paid by this customer'}
+                                      {suggestion.source === 'general_last' && '✨ Last general sold price'}
+                                      {suggestion.source === 'catalog' && '⚙️ Catalog retail standard'}
+                                    </span>
+                                  </button>
+                                  <span className="text-[9px] text-slate-400 block font-medium leading-normal">
+                                    Click button to instantly auto-fill the unit price fields for this item
+                                  </span>
+                                </div>
+
+                                {/* Customer specific price history */}
+                                <div className="space-y-2">
+                                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                                    Customer purchase history
+                                  </span>
+                                  {customerHistory.length === 0 ? (
+                                    <p className="text-[10px] text-slate-400 font-semibold italic bg-slate-100/50 p-3 rounded-xl border border-slate-200/50 text-center">
+                                      No past invoices found of this product for this customer.
+                                    </p>
+                                  ) : (
+                                    <div className="space-y-1.5">
+                                      {customerHistory.map((pt, i) => (
+                                        <div key={i} className="flex justify-between items-center bg-white border border-slate-100 p-2 rounded-xl text-[11px] shadow-4xs">
+                                          <span className="text-slate-500 font-medium">
+                                            {new Date(pt.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                                          </span>
+                                          <span className="font-mono font-black text-slate-800">${pt.price.toFixed(2)}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Customer Stats summary (min, max, average) */}
+                                {customerHistory.length > 0 && (() => {
+                                  const prices = customerHistory.map(pt => pt.price);
+                                  const minPrice = Math.min(...prices);
+                                  const maxPrice = Math.max(...prices);
+                                  const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
+
+                                  return (
+                                    <div className="bg-slate-100 border border-slate-200 rounded-2xl p-3 grid grid-cols-3 text-center gap-1.5 shadow-4xs">
+                                      <div>
+                                        <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider block">Min Paid</span>
+                                        <span className="font-mono text-[10px] font-bold text-slate-700">${minPrice.toFixed(2)}</span>
+                                      </div>
+                                      <div className="border-x border-slate-200">
+                                        <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider block">Average</span>
+                                        <span className="font-mono text-[10px] font-bold text-slate-800">${avgPrice.toFixed(2)}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider block">Max Paid</span>
+                                        <span className="font-mono text-[10px] font-bold text-slate-700">${maxPrice.toFixed(2)}</span>
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
+
+                                {/* General system-wide references */}
+                                <div className="space-y-2 pt-1 border-t border-slate-200/50">
+                                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                                    General System sales history
+                                  </span>
+                                  {generalHistory.length === 0 ? (
+                                    <p className="text-[10px] text-slate-400 font-semibold italic bg-slate-100/50 p-3 rounded-xl border border-slate-200/50 text-center">
+                                      No past transactions of this product logged across any profiles.
+                                    </p>
+                                  ) : (
+                                    <div className="space-y-1.5">
+                                      {generalHistory.slice(0, 2).map((pt, i) => (
+                                        <div key={i} className="flex justify-between items-center bg-white/70 border border-slate-100 p-2 rounded-xl text-[10px] shadow-4xs">
+                                          <div className="truncate pr-2 max-w-[120px]">
+                                            <span className="font-bold text-slate-600 block truncate">{pt.customerName}</span>
+                                            <span className="text-[9px] text-slate-400">{new Date(pt.date).toLocaleDateString()}</span>
+                                          </div>
+                                          <span className="font-mono font-bold text-slate-700 whitespace-nowrap">${pt.price.toFixed(2)}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </>
+                      )}
                     </div>
-                  )}
-                  {errors.customerId && (
-                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
-                      <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
-                      <span>{errors.customerId}</span>
-                    </div>
-                  )}
+
+                  </div>
                 </div>
-
-                {/* Reusable LineItemTable Component */}
-                <LineItemTable
-                  items={lineItems}
-                  onChange={setLineItems}
-                  products={products}
-                  taxRatePercent={parseFloat(formData.taxRatePercent) || 0}
-                  pricingMode="sellingPrice"
-                />
-
-                {errors.lineItems && (
-                  <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
-                    <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
-                    <span>{errors.lineItems}</span>
-                  </div>
-                )}
-
-                {/* Date and Settlement selection */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                  {/* Settlement Segment Choice */}
-                  <div className="relative w-full">
-                    <div className="flex bg-slate-50 border border-slate-200 p-1 rounded-xl h-[52px] items-center">
-                      {([ 'Cash', 'Credit' ] as const).map((typeOpt) => (
-                        <button
-                          key={typeOpt}
-                          type="button"
-                          onClick={() => setFormData({ ...formData, paymentType: typeOpt })}
-                          className={`flex-1 text-center py-2 text-xs font-extrabold rounded-lg uppercase tracking-wider transition cursor-pointer ${
-                            formData.paymentType === typeOpt 
-                              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/40' 
-                              : 'text-slate-500 hover:text-slate-800 opacity-80'
-                          }`}
-                        >
-                          {typeOpt}
-                        </button>
-                      ))}
-                    </div>
-                    <span className="absolute -top-2.5 left-3 px-1.5 bg-white text-[10px] font-extrabold text-slate-400 uppercase tracking-widest leading-none">
-                      Settlement Type <span className="text-rose-500 font-extrabold">*</span>
-                    </span>
-                  </div>
-
-                  {/* Completion date */}
-                  <div className="relative w-full">
-                    <input
-                      type="date"
-                      required
-                      id="form-sales-date-field"
-                      value={formData.saleDate}
-                      onChange={(e) => setFormData({ ...formData, saleDate: e.target.value })}
-                      className="peer w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition duration-150 cursor-pointer h-[52px]"
-                    />
-                    <label htmlFor="form-sales-date-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
-                      Sale Completion Date <span className="text-rose-500 font-extrabold">*</span>
-                    </label>
-                    {errors.saleDate && (
-                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
-                        <AlertTriangle className="h-3.5 w-3.5 text-rose-505 shrink-0" />
-                        <span>{errors.saleDate}</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Tax Configuration Segment */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                  <div className="relative w-full">
-                    <span className="absolute right-3.5 top-4.5 text-slate-400 text-xs font-semibold leading-none">%</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      step="0.1"
-                      required
-                      id="form-sales-tax-field"
-                      value={formData.taxRatePercent}
-                      onChange={(e) => handleTaxRateChange(e.target.value)}
-                      placeholder=" "
-                      className={`peer w-full rounded-xl border pl-3.5 pr-8 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all placeholder-transparent focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] ${
-                        errors.taxRatePercent 
-                          ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
-                          : 'border-slate-200 focus:border-indigo-605'
-                      }`}
-                    />
-                    <label htmlFor="form-sales-tax-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600 font-bold">
-                      Tax / VAT Rate (%) <span className="text-rose-500 font-extrabold">*</span>
-                    </label>
-                    {errors.taxRatePercent && (
-                      <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
-                        <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
-                        <span>{errors.taxRatePercent}</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Dynamic Summary Breakdown Banner */}
-                {formData.customerId && lineItems.length > 0 && (() => {
-                  const totalsSummary = calculateTransactionTotals(lineItems);
-                  return (
-                    <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-2 text-xs">
-                      <p className="font-bold text-slate-800 uppercase tracking-wider text-[10px]">Dynamic invoice Summary</p>
-                      <div className="flex items-center justify-between font-medium">
-                        <span className="text-slate-500">
-                          Total Line Items ({lineItems.length})
-                        </span>
-                        <span className="text-slate-800 font-mono font-bold">
-                          ${totalsSummary.subtotal.toFixed(2)}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between font-medium text-[11px] text-slate-500 border-t border-dashed border-slate-200/60 pt-1.5">
-                        <span>Total Sales Tax / VAT ({parseFloat(formData.taxRatePercent) || 0}%)</span>
-                        <span className="font-mono font-semibold">
-                          ${totalsSummary.taxAmount.toFixed(2)}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between font-bold text-indigo-600 pt-1.5 border-t border-slate-200">
-                        <span>Total Invoice Due (Locked)</span>
-                        <span className="font-mono font-extrabold text-sm">
-                          ${totalsSummary.totalAmount.toFixed(2)}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })()}
-
-                </div> {/* Close of scrollable body div */}
 
                 {/* Submits - Sticky Footer */}
                 <div className="flex justify-end items-center gap-3 px-6 sm:px-8 py-5 border-t border-slate-100 bg-slate-50 shrink-0">

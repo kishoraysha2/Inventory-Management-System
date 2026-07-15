@@ -20,6 +20,7 @@ import QRCode from 'qrcode';
 import { Sale, Customer, Product, getNormalizedItems } from '../types';
 import { db, auth } from '../lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { isVoidStatus } from '../lib/utils';
 
 interface TaxInvoiceModalProps {
   sale: Sale;
@@ -194,7 +195,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
   // Calculate payment status, summary, and history track
   const paymentInfo = React.useMemo(() => {
     const isCredit = (sale.paymentType || '').toString().toUpperCase().trim() === 'CREDIT';
-    const isVoid = (sale as any).status === 'VOID' || (sale as any).status === 'voided';
+    const isVoid = isVoidStatus((sale as any).status);
     
     if (isVoid) {
       return {
@@ -224,8 +225,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
     // Filter and sort all valid credit sales of this customer chronologically
     const custSales = sales.filter(s => {
-      const status = ((s as any).status || '').toString().toUpperCase().trim();
-      const sVoid = status === 'VOID' || status === 'VOIDED';
+      const sVoid = isVoidStatus((s as any).status);
       const sCredit = (s.paymentType || '').toString().toUpperCase().trim() === 'CREDIT';
       return s.customerId === custId && !sVoid && sCredit;
     });
@@ -233,8 +233,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
     // Filter and sort all valid payments of this customer chronologically
     const custPayments = customerPayments.filter(p => {
-      const status = (p.status || '').toString().toUpperCase().trim();
-      return p.customerId === custId && status !== 'VOID' && status !== 'VOIDED';
+      return p.customerId === custId && !isVoidStatus(p.status);
     });
     custPayments.sort((a, b) => new Date(a.paymentDate || 0).getTime() - new Date(b.paymentDate || 0).getTime());
 
@@ -315,6 +314,9 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
   const [invoiceNotes, setInvoiceNotes] = useState<string>("Terms: Net 30 days. Please include the Invoice Number with your payment. Thank you for your continued business!");
   const [invoiceNumber, setInvoiceNumber] = useState<string>(() => {
+    if (sale.invoiceNumber) {
+      return sale.invoiceNumber;
+    }
     // Generate clean predictable invoice tracking code
     const indexPart = sale.id.replace('sale-', '');
     return `INV-2026-${indexPart.length > 5 ? indexPart.substring(indexPart.length - 5) : indexPart}`;
@@ -337,16 +339,41 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
   const matchedCustomer = customers.find(c => c.id === sale.customerId);
   const matchedProduct = products.find(p => p.id === sale.productId);
 
+  const activeCompany = React.useMemo(() => {
+    return sale.companySnapshot || company;
+  }, [sale.companySnapshot, company]);
+
+  const resolvedCustomer = React.useMemo(() => {
+    if (sale.customerSnapshot) {
+      return {
+        name: sale.customerSnapshot.name,
+        address: sale.customerSnapshot.address || "Address not specified, physical profile pending updates",
+        phone: sale.customerSnapshot.phone || "N/A",
+        vatNumber: sale.customerSnapshot.vatNumber || "N/A",
+        email: sale.customerSnapshot.email || "N/A",
+        customerType: sale.customerSnapshot.customerType
+      };
+    }
+    return {
+      name: sale.customerName || matchedCustomer?.name || "Deleted Customer",
+      address: matchedCustomer?.address || "Address not specified, physical profile pending updates",
+      phone: matchedCustomer?.phone || "N/A",
+      vatNumber: matchedCustomer?.vatNumber || "N/A",
+      email: matchedCustomer?.email || "N/A",
+      customerType: matchedCustomer?.customerType || sale.paymentType || "Cash"
+    };
+  }, [sale.customerSnapshot, sale.customerName, sale.paymentType, matchedCustomer]);
+
   // --- Invoice Financial Formula Processing ---
   const isUpgradedSale = sale.subtotal !== undefined;
   const subtotal = isUpgradedSale ? sale.subtotal : sale.totalAmount;
-  const taxRatePercent = isUpgradedSale ? sale.taxRatePercent : company.taxRatePercent;
-  const taxAmount = isUpgradedSale ? sale.taxAmount : (subtotal * company.taxRatePercent) / 100;
+  const taxRatePercent = isUpgradedSale ? sale.taxRatePercent : activeCompany.taxRatePercent;
+  const taxAmount = isUpgradedSale ? sale.taxAmount : (subtotal * activeCompany.taxRatePercent) / 100;
   const grandTotal = isUpgradedSale ? sale.totalAmount : subtotal + taxAmount;
 
   // Track customer meta defaults
-  const customerAddress = matchedCustomer?.address || "Address not specified, physical profile pending updates";
-  const customerPhone = matchedCustomer?.phone || "N/A";
+  const customerAddress = resolvedCustomer.address;
+  const customerPhone = resolvedCustomer.phone;
 
   // --- Action 1: Standard Browser Hardware Printing ---
   const handlePrint = () => {
@@ -361,13 +388,14 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
     const normalized = getNormalizedItems(sale);
     const items = normalized.map((item, idx) => {
       const prod = products.find(p => p.id === item.productId);
-      const sku = prod?.sku || `SKU-${item.productId ? item.productId.substring(0, 6).toUpperCase() : 'UNKNOWN'}`;
+      const sku = item.productSnapshot?.sku || prod?.sku || `SKU-${item.productId ? item.productId.substring(0, 6).toUpperCase() : 'UNKNOWN'}`;
+      const productName = item.productSnapshot?.name || item.productName;
       const itemTaxRate = item.taxRatePercent !== undefined ? item.taxRatePercent : taxRatePercent;
       const itemVatAmount = item.taxAmount !== undefined ? item.taxAmount : (item.subtotal * itemTaxRate) / 100;
       return {
         sl: idx + 1,
         id: item.productId || `item-${idx}`,
-        productName: item.productName,
+        productName: productName,
         sku: sku,
         quantity: item.quantity,
         unit: 'Pcs',
@@ -615,8 +643,8 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         const vatStr = overallTotals.totalVat.toFixed(2);
         
         const tlvPayload = generateZatcaTlvBase64(
-          company.name,
-          company.taxRegistrationId,
+          activeCompany.name,
+          activeCompany.taxRegistrationId,
           timestamp,
           totalStr,
           vatStr
@@ -638,8 +666,8 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
     };
     generateQr();
   }, [
-    company.name,
-    company.taxRegistrationId,
+    activeCompany.name,
+    activeCompany.taxRegistrationId,
     sale.saleDate,
     overallTotals.grandTotalAll,
     overallTotals.totalVat,
@@ -675,7 +703,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(11);
         doc.setTextColor(15, 23, 42); // slate-900
-        const bizNameLines = doc.splitTextToSize(company.name.toUpperCase(), 72);
+        const bizNameLines = doc.splitTextToSize(activeCompany.name.toUpperCase(), 72);
         bizNameLines.forEach((line: string) => {
           doc.text(line, 15, leftY);
           leftY += 4.5;
@@ -685,8 +713,8 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.setFontSize(7.5);
         doc.setTextColor(71, 85, 105);
         
-        if (company.tradeName) {
-          const tradeLines = doc.splitTextToSize(`Trade Name: ${company.tradeName}`, 72);
+        if (activeCompany.tradeName) {
+          const tradeLines = doc.splitTextToSize(`Trade Name: ${activeCompany.tradeName}`, 72);
           tradeLines.forEach((line: string) => {
             doc.text(line, 15, leftY);
             leftY += 3.5;
@@ -695,7 +723,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         
         // Emphasized VAT
         doc.setFont('helvetica', 'bold');
-        const vatLineInput = `VAT Number: ${company.taxRegistrationId}`;
+        const vatLineInput = `VAT Number: ${activeCompany.taxRegistrationId}`;
         const vatLines = doc.splitTextToSize(vatLineInput, 72);
         vatLines.forEach((line: string) => {
           doc.text(line, 15, leftY);
@@ -703,36 +731,36 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         });
         doc.setFont('helvetica', 'normal');
 
-        if (company.crNumber) {
-          const crLines = doc.splitTextToSize(`CR Number: ${company.crNumber}`, 72);
+        if (activeCompany.crNumber) {
+          const crLines = doc.splitTextToSize(`CR Number: ${activeCompany.crNumber}`, 72);
           crLines.forEach((line: string) => {
             doc.text(line, 15, leftY);
             leftY += 3.5;
           });
         }
         
-        const addressLines = doc.splitTextToSize(company.address, 72);
+        const addressLines = doc.splitTextToSize(activeCompany.address, 72);
         addressLines.forEach((line: string) => {
           doc.text(line, 15, leftY);
           leftY += 3.5;
         });
         
-        const phoneLine = `Phone: ${company.phone}`;
+        const phoneLine = `Phone: ${activeCompany.phone}`;
         const phoneLines = doc.splitTextToSize(phoneLine, 72);
         phoneLines.forEach((line: string) => {
           doc.text(line, 15, leftY);
           leftY += 3.5;
         });
 
-        const emailLine = `Email: ${company.email}`;
+        const emailLine = `Email: ${activeCompany.email}`;
         const emailLines = doc.splitTextToSize(emailLine, 72);
         emailLines.forEach((line: string) => {
           doc.text(line, 15, leftY);
           leftY += 3.5;
         });
 
-        if (company.website) {
-          const webLine = `Website: ${company.website}`;
+        if (activeCompany.website) {
+          const webLine = `Website: ${activeCompany.website}`;
           const webLines = doc.splitTextToSize(webLine, 72);
           webLines.forEach((line: string) => {
             doc.text(line, 15, leftY);
@@ -764,6 +792,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         }
 
         // RIGHT: Customer Information (compact layout) - 40% Width (72mm max width, starts at 123, ends at 195)
+        // Highly visible, right aligned at X = 123
         let rightY = 12;
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(8);
@@ -774,7 +803,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(9.5);
         doc.setTextColor(79, 70, 229); // indigo-650
-        const custNameLines = doc.splitTextToSize(sale.customerName.toUpperCase(), 72);
+        const custNameLines = doc.splitTextToSize(resolvedCustomer.name.toUpperCase(), 72);
         custNameLines.forEach((line: string) => {
           doc.text(line, 123, rightY);
           rightY += 4.5;
@@ -784,21 +813,21 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.setFontSize(7.5);
         doc.setTextColor(71, 85, 105);
         
-        const custAddrLines = doc.splitTextToSize(customerAddress, 72);
+        const custAddrLines = doc.splitTextToSize(resolvedCustomer.address, 72);
         custAddrLines.forEach((line: string) => {
           doc.text(line, 123, rightY);
           rightY += 3.5;
         });
 
-        const custPhoneLine = `Phone: ${customerPhone}`;
+        const custPhoneLine = `Phone: ${resolvedCustomer.phone}`;
         const custPhoneLines = doc.splitTextToSize(custPhoneLine, 72);
         custPhoneLines.forEach((line: string) => {
           doc.text(line, 123, rightY);
           rightY += 3.5;
         });
 
-        if (matchedCustomer?.email) {
-          const custEmailLine = `Email: ${matchedCustomer.email}`;
+        if (resolvedCustomer.email && resolvedCustomer.email !== "N/A") {
+          const custEmailLine = `Email: ${resolvedCustomer.email}`;
           const custEmailLines = doc.splitTextToSize(custEmailLine, 72);
           custEmailLines.forEach((line: string) => {
             doc.text(line, 123, rightY);
@@ -806,9 +835,9 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
           });
         }
 
-        if (matchedCustomer?.vatNumber) {
+        if (resolvedCustomer.vatNumber && resolvedCustomer.vatNumber !== "N/A") {
           doc.setFont('helvetica', 'bold');
-          const custVatLine = `VAT Number: ${matchedCustomer.vatNumber}`;
+          const custVatLine = `VAT Number: ${resolvedCustomer.vatNumber}`;
           const custVatLines = doc.splitTextToSize(custVatLine, 72);
           custVatLines.forEach((line: string) => {
             doc.text(line, 123, rightY);
@@ -869,7 +898,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(9);
         doc.setTextColor(15, 23, 42);
-        const compLines = doc.splitTextToSize(company.name.toUpperCase(), 72);
+        const compLines = doc.splitTextToSize(activeCompany.name.toUpperCase(), 72);
         let leftCY = 9;
         compLines.forEach((line: string) => {
           doc.text(line, 15, leftCY);
@@ -894,7 +923,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(9);
         doc.setTextColor(79, 70, 229);
-        const custContLines = doc.splitTextToSize(sale.customerName.toUpperCase(), 72);
+        const custContLines = doc.splitTextToSize(resolvedCustomer.name.toUpperCase(), 72);
         let rightCY = 9;
         custContLines.forEach((line: string) => {
           doc.text(line, 195, rightCY, { align: 'right' });
@@ -1329,14 +1358,14 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                         <div className="flex flex-row items-center justify-between border-b border-slate-100 pb-2 mb-2 w-full">
                           {/* LEFT: Business Information (40% width, never overflows) */}
                           <div className="w-2/5 space-y-0.5 text-left text-slate-500 pr-4 break-words whitespace-normal">
-                            <h1 className="text-xs font-black text-slate-900 tracking-tight leading-tight uppercase font-sans mb-1">{company.name}</h1>
-                            {company.tradeName && <p className="text-[10px] font-medium text-slate-700 leading-tight">Trade Name: {company.tradeName}</p>}
-                            <p className="text-[10px] font-bold text-indigo-600 leading-tight">VAT Number: {company.taxRegistrationId}</p>
-                            {company.crNumber && <p className="text-[10px] font-medium text-slate-500 leading-tight">CR Number: {company.crNumber}</p>}
-                            <p className="text-[10px] text-slate-400 leading-snug mt-1">{company.address}</p>
-                            <p className="text-[10px] text-slate-400 leading-snug">Phone: {company.phone}</p>
-                            <p className="text-[10px] text-slate-400 leading-snug break-all">Email: {company.email}</p>
-                            {company.website && <p className="text-[10px] text-slate-400 leading-snug break-all font-mono">{company.website}</p>}
+                            <h1 className="text-xs font-black text-slate-900 tracking-tight leading-tight uppercase font-sans mb-1">{activeCompany.name}</h1>
+                            {activeCompany.tradeName && <p className="text-[10px] font-medium text-slate-700 leading-tight">Trade Name: {activeCompany.tradeName}</p>}
+                            <p className="text-[10px] font-bold text-indigo-600 leading-tight">VAT Number: {activeCompany.taxRegistrationId}</p>
+                            {activeCompany.crNumber && <p className="text-[10px] font-medium text-slate-500 leading-tight">CR Number: {activeCompany.crNumber}</p>}
+                            <p className="text-[10px] text-slate-400 leading-snug mt-1">{activeCompany.address}</p>
+                            <p className="text-[10px] text-slate-400 leading-snug">Phone: {activeCompany.phone}</p>
+                            <p className="text-[10px] text-slate-400 leading-snug break-all">Email: {activeCompany.email}</p>
+                            {activeCompany.website && <p className="text-[10px] text-slate-400 leading-snug break-all font-mono">{activeCompany.website}</p>}
                           </div>
 
                           {/* CENTER: QR Code (20% width, centered always) */}
@@ -1357,11 +1386,11 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                           {/* RIGHT: Customer Information (40% width, never overflows) */}
                           <div className="w-2/5 space-y-0.5 text-right text-slate-500 pl-4 break-words whitespace-normal font-sans">
                             <span className="text-[9px] font-mono font-black uppercase tracking-wider text-slate-400 block leading-none mb-1">BILL TO</span>
-                            <h2 className="text-xs font-black text-indigo-650 block leading-tight mb-1 break-words">{sale.customerName.toUpperCase()}</h2>
-                            <p className="text-[10px] text-slate-400 block leading-snug">{customerAddress}</p>
-                            <p className="text-[10px] text-slate-400 leading-snug">Phone: {customerPhone}</p>
-                            {matchedCustomer?.email && <p className="text-[10px] text-slate-400 leading-snug break-all">Email: {matchedCustomer.email}</p>}
-                            {matchedCustomer?.vatNumber && <p className="text-[10px] font-bold text-slate-650 leading-snug">VAT Number: {matchedCustomer.vatNumber}</p>}
+                            <h2 className="text-xs font-black text-indigo-650 block leading-tight mb-1 break-words">{resolvedCustomer.name.toUpperCase()}</h2>
+                            <p className="text-[10px] text-slate-400 block leading-snug">{resolvedCustomer.address}</p>
+                            <p className="text-[10px] text-slate-400 leading-snug">Phone: {resolvedCustomer.phone}</p>
+                            {resolvedCustomer.email && resolvedCustomer.email !== "N/A" && <p className="text-[10px] text-slate-400 leading-snug break-all">Email: {resolvedCustomer.email}</p>}
+                            {resolvedCustomer.vatNumber && resolvedCustomer.vatNumber !== "N/A" && <p className="text-[10px] font-bold text-slate-650 leading-snug">VAT Number: {resolvedCustomer.vatNumber}</p>}
                           </div>
                         </div>
                       ) : (
@@ -1369,7 +1398,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                         <div className="flex flex-row items-center justify-between pb-2 border-b border-slate-200 mb-2 w-full">
                           {/* LEFT: Business Name (40% width, never overflows) */}
                           <div className="w-2/5 text-left pr-4 break-words whitespace-normal">
-                            <span className="text-xs font-black text-slate-900 tracking-tight uppercase leading-tight block">{company.name}</span>
+                            <span className="text-xs font-black text-slate-900 tracking-tight uppercase leading-tight block">{activeCompany.name}</span>
                             <p className="text-[9px] text-slate-400 font-mono mt-0.5 leading-none">Invoice No: {invoiceNumber}</p>
                           </div>
                           
@@ -1390,7 +1419,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
                           {/* RIGHT: Customer Name (40% width, never overflows) */}
                           <div className="w-2/5 text-right pl-4 break-words whitespace-normal">
-                            <span className="text-xs font-black text-indigo-650 block uppercase leading-tight">{sale.customerName.toUpperCase()}</span>
+                            <span className="text-xs font-black text-indigo-650 block uppercase leading-tight">{resolvedCustomer.name.toUpperCase()}</span>
                             <p className="text-[9px] text-slate-400 mt-0.5 leading-none">Page {pageIdx + 1} of {pageCount}</p>
                           </div>
                         </div>

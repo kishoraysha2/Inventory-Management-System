@@ -16,14 +16,18 @@ import {
   Calendar, 
   DollarSign, 
   TrendingUp,
-  ChevronRight
+  ChevronRight,
+  FileText
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { Customer } from '../types';
-import { calculateCustomerLedger } from '../lib/utils';
+import { calculateCustomerLedger, isInactiveStatus } from '../lib/utils';
+import { usePermission, UserRole } from '../hooks/usePermission';
 
-export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
+export default function CustomerManagement({ userRole = 'admin' }: { userRole?: UserRole }) {
+  const { permissions } = usePermission({ role: userRole });
+
   // --- State ---
   const [customersState, setCustomersState] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
@@ -125,7 +129,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
 
   const customers = useMemo(() => {
     return customersState.map(c => {
-      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id);
+      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id, c.dueBalance);
       return {
         ...c,
         dueBalance: Math.max(0, rawDue),
@@ -159,12 +163,15 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
   const openForm = (customer: Customer | null = null) => {
     if (customer) {
       setEditingCustomer(customer);
+      // Retrieve the original opening balance from customersState to prevent overwriting it on save
+      const originalCust = customersState.find(c => c.id === customer.id);
+      const openingBalance = originalCust ? originalCust.dueBalance : customer.dueBalance;
       setFormData({
         name: customer.name,
         phone: customer.phone,
         address: customer.address,
         customerType: customer.customerType,
-        dueBalance: customer.dueBalance.toString(),
+        dueBalance: openingBalance.toString(),
         status: customer.status || 'active',
         vatNumber: customer.vatNumber || '',
         email: customer.email || ''
@@ -463,7 +470,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
   // --- Filtered Customers Summary ---
   const filteredCustomers = customers.filter(customer => {
     // Hide inactive customers from standard listings
-    if (customer.status === 'inactive') return false;
+    if (isInactiveStatus(customer.status)) return false;
 
     const matchesSearch = 
       customer.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -475,10 +482,10 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
   });
 
   // --- Analytical Calculations ---
-  const outstandingBalanceTotal = customers.filter(c => c.status !== 'inactive').reduce((sum, item) => sum + item.dueBalance, 0);
-  const customerCreditTotal = customers.filter(c => c.status !== 'inactive').reduce((sum, item) => sum + (item.customerCredit || 0), 0);
-  const creditAccountsCount = customers.filter(c => c.status !== 'inactive' && c.customerType === 'Credit').length;
-  const cashAccountsCount = customers.filter(c => c.status !== 'inactive' && c.customerType === 'Cash').length;
+  const outstandingBalanceTotal = customers.filter(c => !isInactiveStatus(c.status)).reduce((sum, item) => sum + item.dueBalance, 0);
+  const customerCreditTotal = customers.filter(c => !isInactiveStatus(c.status)).reduce((sum, item) => sum + (item.customerCredit || 0), 0);
+  const creditAccountsCount = customers.filter(c => !isInactiveStatus(c.status) && c.customerType === 'Credit').length;
+  const cashAccountsCount = customers.filter(c => !isInactiveStatus(c.status) && c.customerType === 'Cash').length;
 
   return (
     <div id="customer-registry-view" className="space-y-8 animate-fade-in">
@@ -520,7 +527,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
             {loading ? (
               <div className="h-9 w-12 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">{customers.filter(c => c.status !== 'inactive').length}</p>
+              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">{customers.filter(c => !isInactiveStatus(c.status)).length}</p>
             )}
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400">
@@ -617,7 +624,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                 </p>
               </div>
 
-              {userRole === 'admin' && (
+              {permissions.createCustomer && (
                 <button
                   type="button"
                   onClick={() => openForm()}
@@ -760,7 +767,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                           <th className="py-4 px-5">Date Added</th>
                           <th className="py-4 px-5 text-right">Outstanding Due</th>
                           <th className="py-4 px-5 text-right">Customer Credit</th>
-                          {userRole === 'admin' && <th className="py-4 px-6 text-center">Actions</th>}
+                          <th className="py-4 px-6 text-center">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
@@ -780,7 +787,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                               }`}>
                                 {customer.customerType} Account
                               </span>
-                              {customer.status === 'inactive' ? (
+                              {isInactiveStatus(customer.status) ? (
                                 <span className="inline-flex items-center px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-slate-50 text-slate-500 border border-slate-200 shadow-3xs">
                                   Inactive
                                 </span>
@@ -817,9 +824,21 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                                 <span className="text-slate-300">-</span>
                               )}
                             </td>
-                            {userRole === 'admin' && (
-                              <td className="py-4 px-6 text-center whitespace-nowrap">
-                                <div className="flex items-center justify-center gap-1.5">
+                            <td className="py-4 px-6 text-center whitespace-nowrap">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    sessionStorage.setItem('nexus_target_customer_id', customer.id);
+                                    sessionStorage.setItem('nexus_target_report_type', 'customer_statement');
+                                    window.dispatchEvent(new CustomEvent('nexus-change-tab', { detail: 'reports' }));
+                                  }}
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 border border-transparent hover:border-emerald-100 transition cursor-pointer"
+                                  title="View customer ledger statement"
+                                >
+                                  <FileText className="h-4 w-4" />
+                                </button>
+                                {permissions.editCustomer && (
                                   <button
                                     type="button"
                                     onClick={() => openForm(customer)}
@@ -828,6 +847,8 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                                   >
                                     <Edit2 className="h-4 w-4" />
                                   </button>
+                                )}
+                                {permissions.deleteCustomer && (
                                   <button
                                     type="button"
                                     onClick={() => handleDeleteClick(customer)}
@@ -836,9 +857,9 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                                   >
                                     <Trash2 className="h-4 w-4" />
                                   </button>
-                                </div>
-                              </td>
-                            )}
+                                )}
+                              </div>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -884,12 +905,12 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                 <div>
                   <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
                     <span>Credit Ratio</span>
-                    <span className="font-bold">{customers.filter(c => c.status !== 'inactive').length > 0 ? Math.round((creditAccountsCount / customers.filter(c => c.status !== 'inactive').length) * 100) : 0}%</span>
+                    <span className="font-bold">{customers.filter(c => !isInactiveStatus(c.status)).length > 0 ? Math.round((creditAccountsCount / customers.filter(c => !isInactiveStatus(c.status)).length) * 100) : 0}%</span>
                   </div>
                   <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
                     <div 
                       className="bg-indigo-600 h-1.5 rounded-full transition-all duration-500" 
-                      style={{ width: `${customers.filter(c => c.status !== 'inactive').length > 0 ? (creditAccountsCount / customers.filter(c => c.status !== 'inactive').length) * 100 : 0}%` }}
+                      style={{ width: `${customers.filter(c => !isInactiveStatus(c.status)).length > 0 ? (creditAccountsCount / customers.filter(c => !isInactiveStatus(c.status)).length) * 100 : 0}%` }}
                     ></div>
                   </div>
                 </div>

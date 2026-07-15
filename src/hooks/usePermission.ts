@@ -71,6 +71,12 @@ export interface AppPermissions {
   viewSettings: boolean;
   manageSettings: boolean;
   voidAny: boolean;
+
+  // Category: Expenses
+  viewExpenses: boolean;
+  createExpense: boolean;
+  editExpense: boolean;
+  voidExpense: boolean;
 }
 
 // Default role templates mapping privileges to each of the 8 target roles
@@ -111,6 +117,10 @@ export const ROLE_PERMISSIONS_TEMPLATES: Record<UserRole, AppPermissions> = {
     viewSettings: true,
     manageSettings: true,
     voidAny: true,
+    viewExpenses: true,
+    createExpense: true,
+    editExpense: true,
+    voidExpense: true,
   },
   admin: {
     viewDashboard: true,
@@ -148,6 +158,10 @@ export const ROLE_PERMISSIONS_TEMPLATES: Record<UserRole, AppPermissions> = {
     viewSettings: true,
     manageSettings: true,
     voidAny: true,
+    viewExpenses: true,
+    createExpense: true,
+    editExpense: true,
+    voidExpense: true,
   },
   manager: {
     viewDashboard: true,
@@ -185,6 +199,10 @@ export const ROLE_PERMISSIONS_TEMPLATES: Record<UserRole, AppPermissions> = {
     viewSettings: true,
     manageSettings: false,
     voidAny: false,
+    viewExpenses: true,
+    createExpense: true,
+    editExpense: true,
+    voidExpense: false,
   },
   supervisor: {
     viewDashboard: true,
@@ -222,6 +240,10 @@ export const ROLE_PERMISSIONS_TEMPLATES: Record<UserRole, AppPermissions> = {
     viewSettings: false,
     manageSettings: false,
     voidAny: false,
+    viewExpenses: true,
+    createExpense: false,
+    editExpense: false,
+    voidExpense: false,
   },
   accountant: {
     viewDashboard: true,
@@ -259,6 +281,10 @@ export const ROLE_PERMISSIONS_TEMPLATES: Record<UserRole, AppPermissions> = {
     viewSettings: false,
     manageSettings: false,
     voidAny: false,
+    viewExpenses: true,
+    createExpense: true,
+    editExpense: true,
+    voidExpense: true,
   },
   cashier: {
     viewDashboard: true,
@@ -296,6 +322,10 @@ export const ROLE_PERMISSIONS_TEMPLATES: Record<UserRole, AppPermissions> = {
     viewSettings: false,
     manageSettings: false,
     voidAny: false,
+    viewExpenses: true,
+    createExpense: true,
+    editExpense: false,
+    voidExpense: false,
   },
   salesman: {
     viewDashboard: true,
@@ -333,6 +363,10 @@ export const ROLE_PERMISSIONS_TEMPLATES: Record<UserRole, AppPermissions> = {
     viewSettings: false,
     manageSettings: false,
     voidAny: false,
+    viewExpenses: false,
+    createExpense: false,
+    editExpense: false,
+    voidExpense: false,
   },
   viewer: {
     viewDashboard: true,
@@ -370,6 +404,10 @@ export const ROLE_PERMISSIONS_TEMPLATES: Record<UserRole, AppPermissions> = {
     viewSettings: false,
     manageSettings: false,
     voidAny: false,
+    viewExpenses: true,
+    createExpense: false,
+    editExpense: false,
+    voidExpense: false,
   },
 };
 
@@ -383,21 +421,32 @@ export async function seedRolePermissions() {
   try {
     const colRef = collection(db, 'rolePermissions');
     const snapshot = await getDocs(colRef);
-    if (snapshot.empty) {
-      console.log('rolePermissions collection is empty. Auto-seeding default templates...');
-      const batch = writeBatch(db);
-      for (const [role, privileges] of Object.entries(ROLE_PERMISSIONS_TEMPLATES)) {
-        const docRef = doc(db, 'rolePermissions', role);
-        batch.set(docRef, {
-          role,
-          privileges,
-          lastUpdatedBy: 'system_auto_seed',
-          lastUpdatedTime: new Date().toISOString()
-        });
-      }
-      await batch.commit();
-      console.log('rolePermissions collection successfully seeded!');
+    
+    // Seed ONLY when rolePermissions collection is completely empty.
+    if (!snapshot.empty) {
+      console.log('rolePermissions collection is not empty. Skipping seeding to preserve all customized company permissions.');
+      return;
     }
+
+    const batch = writeBatch(db);
+
+    for (const [role, templatePrivileges] of Object.entries(ROLE_PERMISSIONS_TEMPLATES)) {
+      const userRole = role as UserRole;
+      const docRef = doc(db, 'rolePermissions', userRole);
+
+      batch.set(docRef, {
+        role: userRole,
+        privileges: templatePrivileges,
+        ownerBaselinePrivileges: templatePrivileges,
+        baselineUpdatedBy: 'system_auto_seed',
+        baselineUpdatedTime: new Date().toISOString(),
+        lastUpdatedBy: 'system_auto_seed',
+        lastUpdatedTime: new Date().toISOString()
+      });
+    }
+
+    await batch.commit();
+    console.log('rolePermissions collection successfully seeded!');
   } catch (err) {
     console.error('Failed to auto-seed role permissions:', err);
   }

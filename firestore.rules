@@ -16,8 +16,11 @@ service cloud.firestore {
     function hasRole(role) {
       return isSignedIn() 
         && (
-          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role)
-          || (role == 'admin' && request.auth.token.email == 'kishor.aysha2@gmail.com')
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && (
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role
+            || (role == 'admin' && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'owner')
+          ))
+          || (role == 'admin' && (request.auth.token.email == 'kishor.aysha2@gmail.com' || request.auth.token.email == 'kishor.aysha1@gmail.com'))
         );
     }
 
@@ -30,7 +33,7 @@ service cloud.firestore {
     // Helper to validate complete InventoryItem schema
     function isValidItem(data) {
       return data.keys().hasAll(['id', 'name', 'sku', 'category', 'price', 'quantity', 'minQuantity', 'supplierName', 'supplierEmail', 'location', 'description', 'lastUpdated'])
-          && data.keys().size() == 12
+          && data.keys().hasOnly(['id', 'name', 'sku', 'category', 'price', 'quantity', 'minQuantity', 'supplierName', 'supplierEmail', 'location', 'description', 'lastUpdated'])
           && data.id is string && data.id.size() <= 128
           && data.name is string && data.name.size() > 0 && data.name.size() <= 200
           && data.sku is string && data.sku.size() > 0 && data.sku.size() <= 100
@@ -48,29 +51,32 @@ service cloud.firestore {
     // Helper to validate complete ActivityLog schema
     function isValidLog(data) {
       return data.keys().hasAll(['id', 'itemId', 'itemName', 'type', 'description', 'timestamp'])
-          && (data.keys().size() == 6 || data.keys().size() == 7)
+          && data.keys().hasOnly(['id', 'itemId', 'itemName', 'type', 'description', 'timestamp', 'quantityDifference', 'reason'])
           && data.id is string && data.id.size() <= 128
           && data.itemId is string && data.itemId.size() <= 128
           && data.itemName is string && data.itemName.size() <= 200
           && data.type is string && (data.type == 'add' || data.type == 'edit' || data.type == 'delete' || data.type == 'stock_change')
           && data.description is string && data.description.size() <= 500
-          && data.timestamp is string;
+          && data.timestamp is string
+          && (!data.keys().hasAny(['quantityDifference']) || (data.quantityDifference is number || data.quantityDifference is int))
+          && (!data.keys().hasAny(['reason']) || data.reason is string);
     }
 
     // Helper to validate complete SystemLog schema
     function isValidSystemLog(data) {
       return data.keys().hasAll(['id', 'action', 'user', 'timestamp', 'details'])
-          && data.keys().size() == 5
+          && data.keys().hasOnly(['id', 'action', 'user', 'timestamp', 'details'])
           && data.id is string && data.id.size() <= 128
           && data.action is string && data.action.size() <= 100
           && data.user is string && data.user.size() <= 200
           && data.timestamp is string
-          && data.details is string && data.details.size() <= 2000;
+          && data.details is string && data.details.size() <= 5000;
     }
 
     // Helper to validate complete Supplier schema
     function isValidSupplier(data) {
       return data.keys().hasAll(['id', 'name', 'phone'])
+          && data.keys().hasOnly(['id', 'name', 'phone', 'contactPerson', 'email', 'category', 'address', 'paymentType', 'dueBalance', 'supplierAdvance', 'createdDate', 'status', 'vatNumber', 'updatedAt'])
           && data.id is string && data.id.size() <= 128
           && data.name is string && data.name.size() > 0 && data.name.size() <= 200
           && data.phone is string && data.phone.size() > 0 && data.phone.size() <= 50
@@ -80,20 +86,24 @@ service cloud.firestore {
           && (!data.keys().hasAny(['address']) || (data.address is string && data.address.size() <= 500))
           && (!data.keys().hasAny(['paymentType']) || (data.paymentType is string && (data.paymentType == 'Cash' || data.paymentType == 'Credit')))
           && (!data.keys().hasAny(['dueBalance']) || (data.dueBalance is number || data.dueBalance is int))
+          && (!data.keys().hasAny(['supplierAdvance']) || (data.supplierAdvance is number || data.supplierAdvance is int))
           && (!data.keys().hasAny(['createdDate']) || data.createdDate is string)
-          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'inactive')));
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'inactive')))
+          && (!data.keys().hasAny(['vatNumber']) || data.vatNumber is string)
+          && (!data.keys().hasAny(['updatedAt']) || data.updatedAt is string);
     }
 
     // Helper to validate complete Customer schema
     function isValidCustomer(data) {
       return data.keys().hasAll(['id', 'name', 'phone', 'address', 'customerType', 'dueBalance', 'createdDate'])
-          && (data.keys().size() >= 7 && data.keys().size() <= 10)
+          && data.keys().hasOnly(['id', 'name', 'phone', 'address', 'customerType', 'dueBalance', 'customerCredit', 'createdDate', 'status', 'vatNumber', 'email'])
           && data.id is string && data.id.size() <= 128
           && data.name is string && data.name.size() > 0 && data.name.size() <= 200
           && data.phone is string && data.phone.size() > 0 && data.phone.size() <= 50
           && data.address is string && data.address.size() <= 500
           && data.customerType is string && (data.customerType == 'Cash' || data.customerType == 'Credit')
           && (data.dueBalance is number || data.dueBalance is int)
+          && (!data.keys().hasAny(['customerCredit']) || (data.customerCredit is number || data.customerCredit is int))
           && data.createdDate is string
           && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'inactive')))
           && (!data.keys().hasAny(['vatNumber']) || data.vatNumber is string)
@@ -103,7 +113,7 @@ service cloud.firestore {
     // Helper to validate complete Product schema
     function isValidProduct(data) {
       return data.keys().hasAll(['id', 'name', 'sku', 'category', 'purchasePrice', 'sellingPrice', 'currentStock', 'minimumStockAlert'])
-          && (data.keys().size() == 8 || data.keys().size() == 9 || data.keys().size() == 10)
+          && data.keys().hasOnly(['id', 'name', 'sku', 'category', 'purchasePrice', 'sellingPrice', 'currentStock', 'minimumStockAlert', 'createdDate', 'status', 'initialStock', 'location', 'supplierName', 'supplierEmail', 'description'])
           && data.id is string && data.id.size() <= 128
           && data.name is string && data.name.size() > 0 && data.name.size() <= 200
           && data.sku is string && data.sku.size() > 0 && data.sku.size() <= 100
@@ -113,13 +123,18 @@ service cloud.firestore {
           && (data.currentStock is number || data.currentStock is int) && data.currentStock >= 0
           && (data.minimumStockAlert is number || data.minimumStockAlert is int) && data.minimumStockAlert >= 0
           && (!data.keys().hasAny(['createdDate']) || data.createdDate is string)
-          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'inactive')));
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'inactive')))
+          && (!data.keys().hasAny(['initialStock']) || (data.initialStock is number || data.initialStock is int))
+          && (!data.keys().hasAny(['location']) || data.location is string)
+          && (!data.keys().hasAny(['supplierName']) || data.supplierName is string)
+          && (!data.keys().hasAny(['supplierEmail']) || data.supplierEmail is string)
+          && (!data.keys().hasAny(['description']) || data.description is string);
     }
 
     // Helper to validate complete Sale schema
     function isValidSale(data) {
       return data.keys().hasAll(['id', 'customerId', 'customerName', 'productId', 'productName', 'quantity', 'sellingPrice', 'unitPrice', 'subtotal', 'taxRatePercent', 'taxAmount', 'totalAmount', 'paymentType', 'saleDate', 'timestamp'])
-          && (data.keys().size() >= 15 && data.keys().size() <= 19)
+          && data.keys().hasOnly(['id', 'customerId', 'customerName', 'productId', 'productName', 'quantity', 'sellingPrice', 'unitPrice', 'subtotal', 'taxRatePercent', 'taxAmount', 'totalAmount', 'paymentType', 'saleDate', 'timestamp', 'productPurchasePriceAtSale', 'productSellingPriceAtSale', 'costOfGoodsSold', 'grossProfit', 'items', 'status', 'invoiceNumber', 'customerSnapshot', 'companySnapshot'])
           && data.id is string && data.id.size() <= 128
           && data.customerId is string && data.customerId.size() <= 128
           && data.customerName is string && data.customerName.size() > 0 && data.customerName.size() <= 200
@@ -138,13 +153,18 @@ service cloud.firestore {
           && (!data.keys().hasAny(['productPurchasePriceAtSale']) || (data.productPurchasePriceAtSale is number || data.productPurchasePriceAtSale is int))
           && (!data.keys().hasAny(['productSellingPriceAtSale']) || (data.productSellingPriceAtSale is number || data.productSellingPriceAtSale is int))
           && (!data.keys().hasAny(['costOfGoodsSold']) || (data.costOfGoodsSold is number || data.costOfGoodsSold is int))
-          && (!data.keys().hasAny(['grossProfit']) || (data.grossProfit is number || data.grossProfit is int));
+          && (!data.keys().hasAny(['grossProfit']) || (data.grossProfit is number || data.grossProfit is int))
+          && (!data.keys().hasAny(['items']) || data.items is list)
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'voided' || data.status == 'VOID')))
+          && (!data.keys().hasAny(['invoiceNumber']) || data.invoiceNumber is string)
+          && (!data.keys().hasAny(['customerSnapshot']) || data.customerSnapshot is map)
+          && (!data.keys().hasAny(['companySnapshot']) || data.companySnapshot is map);
     }
 
     // Helper to validate complete Purchase schema
     function isValidPurchase(data) {
       return data.keys().hasAll(['id', 'supplierId', 'supplierName', 'productId', 'productName', 'quantity', 'purchasePrice', 'totalAmount', 'paymentType', 'purchaseDate'])
-          && (data.keys().size() == 10 || data.keys().size() == 11)
+          && data.keys().hasOnly(['id', 'supplierId', 'supplierName', 'productId', 'productName', 'quantity', 'purchasePrice', 'totalAmount', 'paymentType', 'purchaseDate', 'items', 'status'])
           && data.id is string && data.id.size() <= 128
           && data.supplierId is string && data.supplierId.size() <= 128
           && data.supplierName is string && data.supplierName.size() > 0 && data.supplierName.size() <= 200
@@ -155,13 +175,14 @@ service cloud.firestore {
           && (data.totalAmount is number || data.totalAmount is int) && data.totalAmount >= 0
           && data.paymentType is string && (data.paymentType == 'Cash' || data.paymentType == 'Credit')
           && data.purchaseDate is string
-          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'voided')));
+          && (!data.keys().hasAny(['items']) || data.items is list)
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'voided' || data.status == 'VOID')));
     }
 
     // Helper to validate complete CustomerPayment schema
     function isValidCustomerPayment(data) {
-      return data.keys().hasAll(['id', 'customerId', 'amountPaid', 'previousDue', 'remainingDue', 'paymentDate'])
-          && (data.keys().size() == 6 || data.keys().size() == 7 || data.keys().size() == 8)
+      return data.keys().hasAll(['id', 'customerId', 'amountPaid', 'previousDue', 'remainingDue', 'paymentDate', 'receiptNumber', 'receiptDate', 'receivedBy'])
+          && data.keys().hasOnly(['id', 'customerId', 'customerName', 'amountPaid', 'previousDue', 'remainingDue', 'paymentDate', 'receiptNumber', 'receiptDate', 'receivedBy', 'referenceNumber', 'chequeOrBankRef', 'notes', 'status', 'updatedAt'])
           && data.id is string && data.id.size() <= 128
           && data.customerId is string && data.customerId.size() <= 128
           && (!data.keys().hasAny(['customerName']) || (data.customerName is string && data.customerName.size() <= 200))
@@ -169,13 +190,20 @@ service cloud.firestore {
           && (data.previousDue is number || data.previousDue is int) && data.previousDue >= 0
           && (data.remainingDue is number || data.remainingDue is int) && data.remainingDue >= 0
           && data.paymentDate is string
-          && (!data.keys().hasAny(['notes']) || (data.notes is string && data.notes.size() <= 1000));
+          && data.receiptNumber is string && data.receiptNumber.size() <= 100
+          && data.receiptDate is string
+          && data.receivedBy is string && data.receivedBy.size() <= 200
+          && (!data.keys().hasAny(['referenceNumber']) || (data.referenceNumber is string && data.referenceNumber.size() <= 100))
+          && (!data.keys().hasAny(['chequeOrBankRef']) || (data.chequeOrBankRef is string && data.chequeOrBankRef.size() <= 100))
+          && (!data.keys().hasAny(['notes']) || (data.notes is string && data.notes.size() <= 1000))
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'voided' || data.status == 'VOID' || data.status == 'success')))
+          && (!data.keys().hasAny(['updatedAt']) || data.updatedAt is string);
     }
 
     // Helper to validate complete SupplierPayment schema
     function isValidSupplierPayment(data) {
-      return data.keys().hasAll(['id', 'supplierId', 'amountPaid', 'previousDue', 'remainingDue', 'paymentDate'])
-          && (data.keys().size() == 6 || data.keys().size() == 7 || data.keys().size() == 8)
+      return data.keys().hasAll(['id', 'supplierId', 'amountPaid', 'previousDue', 'remainingDue', 'paymentDate', 'voucherNumber', 'paidBy'])
+          && data.keys().hasOnly(['id', 'supplierId', 'supplierName', 'amountPaid', 'previousDue', 'remainingDue', 'paymentDate', 'voucherNumber', 'paidBy', 'referenceNumber', 'chequeOrBankRef', 'notes', 'status', 'updatedAt'])
           && data.id is string && data.id.size() <= 128
           && data.supplierId is string && data.supplierId.size() <= 128
           && (!data.keys().hasAny(['supplierName']) || (data.supplierName is string && data.supplierName.size() <= 200))
@@ -183,37 +211,64 @@ service cloud.firestore {
           && (data.previousDue is number || data.previousDue is int) && data.previousDue >= 0
           && (data.remainingDue is number || data.remainingDue is int) && data.remainingDue >= 0
           && data.paymentDate is string
-          && (!data.keys().hasAny(['notes']) || (data.notes is string && data.notes.size() <= 1000));
+          && data.voucherNumber is string && data.voucherNumber.size() <= 100
+          && data.paidBy is string && data.paidBy.size() <= 200
+          && (!data.keys().hasAny(['referenceNumber']) || (data.referenceNumber is string && data.referenceNumber.size() <= 100))
+          && (!data.keys().hasAny(['chequeOrBankRef']) || (data.chequeOrBankRef is string && data.chequeOrBankRef.size() <= 100))
+          && (!data.keys().hasAny(['notes']) || (data.notes is string && data.notes.size() <= 1000))
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'voided' || data.status == 'VOID' || data.status == 'success')))
+          && (!data.keys().hasAny(['updatedAt']) || data.updatedAt is string);
     }
 
     // Helper to validate complete CashLedgerEntry schema
     function isValidCashLedgerEntry(data) {
       return data.keys().hasAll(['id', 'type', 'source', 'amount', 'description', 'timestamp'])
-          && (data.keys().size() == 6 || data.keys().size() == 7 || data.keys().size() == 8)
+          && data.keys().hasOnly(['id', 'type', 'source', 'amount', 'description', 'timestamp', 'referenceId', 'status'])
           && data.id is string && data.id.size() <= 128
           && data.type is string && (data.type == 'inflow' || data.type == 'outflow')
-          && data.source is string && (data.source == 'sale' || data.source == 'purchase' || data.source == 'payment' || data.source == 'manual')
+          && data.source is string && (data.source == 'sale' || data.source == 'purchase' || data.source == 'payment' || data.source == 'manual' || data.source == 'procurement' || data.source == 'expense')
           && (data.amount is number || data.amount is int) && data.amount >= 0
           && data.description is string && data.description.size() <= 1000
           && data.timestamp is string
           && (!data.keys().hasAny(['referenceId']) || (data.referenceId is string && data.referenceId.size() <= 128))
-          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'voided' || data.status == 'VOID')));
+          && (!data.keys().hasAny(['status']) || (data.status is string && (data.status == 'active' || data.status == 'voided' || data.status == 'VOID' || data.status == 'void')));
     }
 
     // Helper to validate complete Capital schema
     function isValidCapital(data) {
       return data.keys().hasAll(['id', 'amount', 'date', 'createdBy'])
-          && (data.keys().size() == 4 || data.keys().size() == 5)
+          && data.keys().hasOnly(['id', 'amount', 'date', 'createdBy', 'note', 'notes'])
           && data.id is string && data.id.size() <= 128
           && (data.amount is number || data.amount is int) && data.amount >= 0
           && data.date is string
           && data.createdBy is string
-          && (!data.keys().hasAny(['note']) || (data.note is string && data.note.size() <= 1000));
+          && (!data.keys().hasAny(['note']) || (data.note is string && data.note.size() <= 1000))
+          && (!data.keys().hasAny(['notes']) || (data.notes is string && data.notes.size() <= 1000));
+    }
+
+    // Helper to validate complete ChartOfAccount schema
+    function isValidChartOfAccount(data) {
+      return data.keys().hasAll(['id', 'code', 'name', 'type', 'normalBalance', 'status', 'isSystem'])
+          && data.keys().hasOnly(['id', 'code', 'name', 'type', 'normalBalance', 'status', 'isSystem', 'subType', 'description', 'createdAt', 'updatedAt', 'parentAccount', 'editable'])
+          && data.id is string && data.id.size() <= 128
+          && data.code is string && data.code.size() > 0 && data.code.size() <= 50
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 200
+          && data.type is string && (data.type == 'Asset' || data.type == 'Liability' || data.type == 'Equity' || data.type == 'Revenue' || data.type == 'Expense')
+          && data.normalBalance is string && (data.normalBalance == 'Debit' || data.normalBalance == 'Credit')
+          && data.status is string && (data.status == 'active' || data.status == 'inactive')
+          && data.isSystem is bool
+          && (!data.keys().hasAny(['subType']) || (data.subType is string && data.subType.size() <= 100))
+          && (!data.keys().hasAny(['description']) || (data.description is string && data.description.size() <= 1000))
+          && (!data.keys().hasAny(['createdAt']) || data.createdAt is string)
+          && (!data.keys().hasAny(['updatedAt']) || data.updatedAt is string)
+          && (!data.keys().hasAny(['parentAccount']) || (data.parentAccount is string && data.parentAccount.size() <= 128))
+          && (!data.keys().hasAny(['editable']) || data.editable is bool);
     }
 
     // Helper to validate complete BusinessProfile schema
     function isValidBusinessProfile(data) {
       return data.keys().hasAll(['name', 'taxRegistrationId', 'address', 'phone'])
+          && data.keys().hasOnly(['name', 'taxRegistrationId', 'address', 'phone', 'tradeName', 'ownerName', 'crNumber', 'email', 'website', 'logo', 'taxRatePercent'])
           && data.name is string && data.name.size() > 0 && data.name.size() <= 200
           && data.taxRegistrationId is string && data.taxRegistrationId.size() > 0 && data.taxRegistrationId.size() <= 100
           && data.address is string && data.address.size() > 0 && data.address.size() <= 500
@@ -227,20 +282,104 @@ service cloud.firestore {
           && (!data.keys().hasAny(['taxRatePercent']) || (data.taxRatePercent is number || data.taxRatePercent is int));
     }
 
+    // Helper to validate complete Expense schema
+    function isValidExpense(data) {
+      return data.keys().hasAll(['id', 'expenseNumber', 'expenseDate', 'category', 'vendor', 'description', 'amount', 'paymentMethod', 'referenceNumber', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+          && data.keys().hasOnly(['id', 'expenseNumber', 'expenseDate', 'category', 'vendor', 'description', 'amount', 'paymentMethod', 'referenceNumber', 'status', 'createdBy', 'createdAt', 'updatedAt', 'notes'])
+          && data.id is string && data.id.size() <= 128
+          && data.expenseNumber is string && data.expenseNumber.size() > 0 && data.expenseNumber.size() <= 100
+          && data.expenseDate is string && data.expenseDate.size() <= 50
+          && data.category is string && data.category.size() > 0 && data.category.size() <= 100
+          && data.vendor is string && data.vendor.size() > 0 && data.vendor.size() <= 200
+          && data.description is string && data.description.size() <= 1000
+          && (data.amount is number || data.amount is int) && data.amount >= 0
+          && data.paymentMethod is string && data.paymentMethod.size() > 0 && data.paymentMethod.size() <= 100
+          && data.referenceNumber is string && data.referenceNumber.size() <= 100
+          && data.status is string && (data.status == 'active' || data.status == 'void')
+          && data.createdBy is string && data.createdBy.size() <= 200
+          && data.createdAt is string
+          && data.updatedAt is string
+          && (!data.keys().hasAny(['notes']) || (data.notes is string && data.notes.size() <= 2000));
+    }
+
+    // Helper to validate complete ExpenseCategory schema
+    function isValidExpenseCategory(data) {
+      return data.keys().hasAll(['id', 'name'])
+          && data.keys().hasOnly(['id', 'name'])
+          && data.id is string && data.id.size() <= 128
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 100;
+    }
+
+    // Helper to validate complete LedgerEntry schema
+    function isValidLedgerEntry(data) {
+      return data.keys().hasAll([
+        'id', 'postingNumber', 'companyId', 'branchId', 'fiscalYear', 
+        'accountingPeriod', 'sourceModule', 'postingStatus', 'currency', 
+        'exchangeRate', 'baseCurrencyCode', 'version', 'narration', 
+        'createdFrom', 'approvalStatus', 'postingDate', 'createdAt', 
+        'createdBy', 'lines'
+      ])
+      && data.keys().hasOnly([
+        'id', 'postingNumber', 'companyId', 'branchId', 'fiscalYear', 
+        'accountingPeriod', 'sourceModule', 'postingStatus', 'currency', 
+        'exchangeRate', 'baseCurrencyCode', 'version', 'narration', 
+        'createdFrom', 'approvalStatus', 'postingDate', 'createdAt', 
+        'createdBy', 'lines', 'originalEntryId'
+      ])
+      && data.id is string && data.id.size() <= 128
+      && data.postingNumber is string && data.postingNumber.size() <= 100
+      && data.companyId is string && data.companyId.size() <= 100
+      && data.branchId is string && data.branchId.size() <= 100
+      && data.fiscalYear is int
+      && data.accountingPeriod is string && data.accountingPeriod.matches('^\\d{4}-\\d{2}$')
+      && data.sourceModule is string && (
+        data.sourceModule == 'SALES' || data.sourceModule == 'PROCUREMENT' || 
+        data.sourceModule == 'EXPENSE' || data.sourceModule == 'CUSTOMER_PAYMENT' || 
+        data.sourceModule == 'SUPPLIER_PAYMENT' || data.sourceModule == 'CAPITAL' || 
+        data.sourceModule == 'OPENING_BALANCE' || data.sourceModule == 'STOCK_ADJUSTMENT' || 
+        data.sourceModule == 'MANUAL_JOURNAL' || data.sourceModule == 'YEAR_CLOSING' || 
+        data.sourceModule == 'SYSTEM'
+      )
+      && data.postingStatus is string && (
+        data.postingStatus == 'POSTED' || data.postingStatus == 'REVERSED' || 
+        data.postingStatus == 'PENDING' || data.postingStatus == 'FAILED' || 
+        data.postingStatus == 'LOCKED'
+      )
+      && data.currency is string && data.currency.size() <= 10
+      && (data.exchangeRate is number || data.exchangeRate is int) && data.exchangeRate > 0
+      && data.baseCurrencyCode is string && data.baseCurrencyCode.size() <= 10
+      && data.version is int
+      && data.narration is string && data.narration.size() <= 2000
+      && data.createdFrom is string && data.createdFrom.size() <= 128
+      && data.approvalStatus is string && (
+        data.approvalStatus == 'PENDING' || data.approvalStatus == 'APPROVED' || 
+        data.approvalStatus == 'REJECTED'
+      )
+      && data.postingDate is string
+      && data.createdAt is string
+      && data.createdBy is string
+      && data.lines is list
+      && data.lines.size() >= 2
+      && (!data.keys().hasAny(['originalEntryId']) || (data.originalEntryId is string && data.originalEntryId.size() <= 128));
+    }
+
 
     // --- COLLECTION GATES AND DIRECT PATH MATCHES ---
 
     // Users Collection
     match /users/{uid} {
-      allow read: if isSignedIn() && (request.auth.uid == uid || hasRole('admin'));
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow read: if isSignedIn() && (hasRole('admin') || hasRole('owner'));
+      
       // Prevent role spoofing on initial self-creation, and allow admin full control
-      allow create: if isSignedIn() && (hasRole('admin') || (request.auth.uid == uid && request.resource.data.role == 'viewer'));
+      allow create: if isSignedIn() && (request.auth.uid == uid && request.resource.data.role == 'viewer');
+      allow create: if isSignedIn() && (hasRole('admin') || hasRole('owner'));
+      
       // Block viewer from updating user records, only admin and logged-in non-viewer can update (role stays read-only)
-      allow update: if isSignedIn() && (
-                      hasRole('admin') || 
-                      (request.auth.uid == uid && !hasRole('viewer') && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']))
-                    );
-      allow delete: if hasRole('admin');
+      allow update: if isSignedIn() && (request.auth.uid == uid && resource.data.role != 'viewer' && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']));
+      allow update: if isSignedIn() && (hasRole('admin') || hasRole('owner'));
+      
+      allow delete: if hasRole('admin') || hasRole('owner');
     }
 
     // Items Collection
@@ -310,12 +449,10 @@ service cloud.firestore {
     // Sales Collection
     match /sales/{saleId} {
       allow read: if isSignedIn();
-      allow create: if (hasRole('admin') || hasRole('cashier')) 
+      allow create: if (hasRole('admin') || hasRole('cashier') || hasRole('accountant')) 
                     && isValidId(saleId) 
                     && isValidSale(request.resource.data)
-                    && exists(/databases/$(database)/documents/products/$(request.resource.data.productId))
-                    && get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data.currentStock >= request.resource.data.quantity
-                    && (!('status' in get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data) || get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data.status != 'inactive');
+                    && exists(/databases/$(database)/documents/products/$(request.resource.data.productId));
       allow update: if (hasRole('admin') || hasRole('accountant'))
                     && (request.resource.data.status == 'voided' || request.resource.data.status == 'VOID')
                     && (!('status' in resource.data) || resource.data.status == 'active')
@@ -396,6 +533,27 @@ service cloud.firestore {
       allow delete: if hasRole('admin');
     }
 
+    // Expenses Collection
+    match /expenses/{expenseId} {
+      allow read: if isSignedIn();
+      allow create: if (hasRole('admin') || hasRole('accountant') || hasRole('cashier'))
+                    && isValidId(expenseId)
+                    && isValidExpense(request.resource.data);
+      allow update: if (hasRole('admin') || hasRole('accountant'))
+                    && isValidId(expenseId)
+                    && isValidExpense(request.resource.data);
+      allow delete: if false; // Expenses must NEVER be physically deleted. Void only.
+    }
+
+    // Expense Categories Collection
+    match /expenseCategories/{categoryId} {
+      allow read: if isSignedIn();
+      allow create, update: if (hasRole('admin') || hasRole('accountant'))
+                            && isValidId(categoryId)
+                            && isValidExpenseCategory(request.resource.data);
+      allow delete: if (hasRole('admin') || hasRole('accountant'));
+    }
+
     // Role Permissions Matrix configuration
     match /rolePermissions/{roleId} {
       allow read: if isSignedIn();
@@ -407,6 +565,41 @@ service cloud.firestore {
           (hasRole('owner') || hasRole('admin'))
         )
       );
+    }
+
+    // Chart of Accounts Collection
+    match /chartOfAccounts/{accountId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (hasRole('admin') || hasRole('accountant'))
+                    && isValidId(accountId)
+                    && isValidChartOfAccount(request.resource.data);
+      allow update: if isSignedIn() && (hasRole('admin') || hasRole('accountant'))
+                    && isValidId(accountId)
+                    && isValidChartOfAccount(request.resource.data)
+                    && (!resource.data.isSystem || (
+                      request.resource.data.code == resource.data.code &&
+                      request.resource.data.type == resource.data.type &&
+                      request.resource.data.normalBalance == resource.data.normalBalance &&
+                      request.resource.data.isSystem == resource.data.isSystem
+                    ));
+      allow delete: if isSignedIn() && (hasRole('admin') || hasRole('accountant'))
+                    && !resource.data.isSystem;
+    }
+
+    // Ledger Entries Collection (Immutable Accounting Ledger Records)
+    match /ledgerEntries/{entryId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (hasRole('admin') || hasRole('accountant'))
+                    && isValidId(entryId)
+                    && isValidLedgerEntry(request.resource.data);
+      allow update, delete: if false; // Strict Immutability
+    }
+
+    // Sequence Counters Collection (Posting Sequences)
+    match /counters/{counterId} {
+      allow read, write: if isSignedIn()
+                        && (hasRole('admin') || hasRole('accountant') || hasRole('cashier'))
+                        && isValidId(counterId);
     }
   }
 }

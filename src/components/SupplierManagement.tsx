@@ -17,13 +17,18 @@ import {
   DollarSign, 
   TrendingUp,
   ChevronRight,
-  Package
+  Package,
+  FileText
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { Supplier } from '../types';
+import { isInactiveStatus } from '../lib/utils';
+import { usePermission, UserRole } from '../hooks/usePermission';
 
-export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
+export default function SupplierManagement({ userRole = 'admin' }: { userRole?: UserRole }) {
+  const { permissions } = usePermission({ role: userRole });
+
   // --- State ---
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(true);
@@ -145,6 +150,13 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
     window.addEventListener('nexus-trigger-add-modal', handleTrigger);
     return () => window.removeEventListener('nexus-trigger-add-modal', handleTrigger);
   }, []);
+
+  // --- Programmatic Statement Redirection ---
+  const handleViewStatement = (supplier: Supplier) => {
+    sessionStorage.setItem('nexus_target_report_type', 'supplier_statement');
+    sessionStorage.setItem('nexus_target_supplier_id', supplier.id);
+    window.dispatchEvent(new CustomEvent('nexus-change-tab', { detail: { tab: 'reports' } }));
+  };
 
   // --- Open Form for Create/Edit ---
   const openForm = (supplier: Supplier | null = null) => {
@@ -454,7 +466,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
   // --- Filtered Suppliers ---
   const filteredSuppliers = suppliers.filter(supplier => {
     // Hide inactive suppliers from standard listings
-    if (supplier.status === 'inactive') return false;
+    if (isInactiveStatus(supplier.status)) return false;
 
     const matchesSearch = 
       supplier.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -468,9 +480,9 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
   });
 
   // --- Metric Calculations ---
-  const outstandingCostTotal = suppliers.filter(s => s.status !== 'inactive').reduce((sum, item) => sum + (item.dueBalance ?? 0), 0);
-  const creditAccountsCount = suppliers.filter(s => s.status !== 'inactive' && (s.paymentType || 'Cash') === 'Credit').length;
-  const cashAccountsCount = suppliers.filter(s => s.status !== 'inactive' && (s.paymentType || 'Cash') === 'Cash').length;
+  const outstandingCostTotal = suppliers.filter(s => !isInactiveStatus(s.status)).reduce((sum, item) => sum + (item.dueBalance ?? 0), 0);
+  const creditAccountsCount = suppliers.filter(s => !isInactiveStatus(s.status) && (s.paymentType || 'Cash') === 'Credit').length;
+  const cashAccountsCount = suppliers.filter(s => !isInactiveStatus(s.status) && (s.paymentType || 'Cash') === 'Cash').length;
 
   return (
     <div id="supplier-registry-view" className="space-y-8 animate-fade-in">
@@ -512,7 +524,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
             {loading ? (
               <div className="h-9 w-12 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">{suppliers.filter(s => s.status !== 'inactive').length}</p>
+              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">{suppliers.filter(s => !isInactiveStatus(s.status)).length}</p>
             )}
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400">
@@ -589,7 +601,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
                 </p>
               </div>
 
-              {userRole === 'admin' && (
+              {permissions.createSupplier && (
                 <button
                   type="button"
                   onClick={() => openForm()}
@@ -731,7 +743,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
                           <th className="py-4 px-5">Contact Details</th>
                           <th className="py-4 px-5">Representative</th>
                           <th className="py-4 px-5 text-right">Outstanding Payable</th>
-                          {userRole === 'admin' && <th className="py-4 px-6 text-center">Actions</th>}
+                          <th className="py-4 px-6 text-center">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
@@ -756,7 +768,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
                               }`}>
                                 {(supplier.paymentType || 'Cash')} Terms
                               </span>
-                              {supplier.status === 'inactive' ? (
+                              {isInactiveStatus(supplier.status) ? (
                                 <span className="inline-flex items-center px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-slate-50 text-slate-500 border border-slate-200 shadow-3xs">
                                   Inactive
                                 </span>
@@ -793,9 +805,17 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
                             }`}>
                               ${(supplier.dueBalance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </td>
-                            {userRole === 'admin' && (
-                              <td className="py-4 px-6 text-center whitespace-nowrap">
-                                <div className="flex items-center justify-center gap-1.5">
+                            <td className="py-4 px-6 text-center whitespace-nowrap">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleViewStatement(supplier)}
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-600 hover:bg-slate-50 transition"
+                                  title="View Account Ledger Statement"
+                                >
+                                  <FileText className="h-4 w-4" />
+                                </button>
+                                {permissions.editSupplier && (
                                   <button
                                     type="button"
                                     onClick={() => openForm(supplier)}
@@ -804,6 +824,8 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
                                   >
                                     <Edit2 className="h-4 w-4" />
                                   </button>
+                                )}
+                                {permissions.deleteSupplier && (
                                   <button
                                     type="button"
                                     onClick={() => handleDeleteClick(supplier)}
@@ -812,9 +834,9 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
                                   >
                                     <Trash2 className="h-4 w-4" />
                                   </button>
-                                </div>
-                              </td>
-                            )}
+                                )}
+                              </div>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -860,12 +882,12 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
                 <div>
                   <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
                     <span>Active Credit Ratio</span>
-                    <span className="font-bold">{suppliers.filter(s => s.status !== 'inactive').length > 0 ? Math.round((creditAccountsCount / suppliers.filter(s => s.status !== 'inactive').length) * 100) : 0}%</span>
+                    <span className="font-bold">{suppliers.filter(s => !isInactiveStatus(s.status)).length > 0 ? Math.round((creditAccountsCount / suppliers.filter(s => !isInactiveStatus(s.status)).length) * 100) : 0}%</span>
                   </div>
                   <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
                     <div 
                       className="bg-indigo-600 h-1.5 rounded-full transition-all duration-500" 
-                      style={{ width: `${suppliers.filter(s => s.status !== 'inactive').length > 0 ? (creditAccountsCount / suppliers.filter(s => s.status !== 'inactive').length) * 100 : 0}%` }}
+                      style={{ width: `${suppliers.filter(s => !isInactiveStatus(s.status)).length > 0 ? (creditAccountsCount / suppliers.filter(s => !isInactiveStatus(s.status)).length) * 100 : 0}%` }}
                     ></div>
                   </div>
                 </div>

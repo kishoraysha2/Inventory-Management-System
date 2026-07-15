@@ -13,6 +13,7 @@ import {
   Upload,
   RotateCcw,
   TrendingUp,
+  TrendingDown,
   Box,
   DollarSign,
   MapPin,
@@ -33,14 +34,18 @@ import {
   LogOut,
   Key,
   Shield,
+  Crown,
   Loader2,
   Eye,
   EyeOff,
   UserPlus,
-  Settings
+  Settings,
+  RefreshCw,
+  BookOpen
 } from 'lucide-react';
 
 import { Product, ActivityLog, Supplier, CashLedgerEntry, Capital } from './types';
+import { isInactiveStatus } from './lib/utils';
 import { INITIAL_PRODUCTS, INITIAL_LOGS, INITIAL_SUPPLIERS, INITIAL_CASH_LEDGER, INITIAL_CAPITAL } from './data';
 import MetricCard from './components/MetricCard';
 import ItemForm from './components/ItemForm';
@@ -55,9 +60,12 @@ import ProcurementManagement from './components/ProcurementManagement';
 import Dashboard from './components/Dashboard';
 import ReportsPage from './components/ReportsPage';
 import BalanceSheet from './components/BalanceSheet';
+import ChartOfAccounts from './components/ChartOfAccounts';
 import CompanySettings from './components/CompanySettings';
 import PrivilegeMatrix from './components/PrivilegeMatrix';
-import { usePermission, AppPermissions, seedRolePermissions } from './hooks/usePermission';
+import ExpenseManagement from './components/ExpenseManagement';
+import ProductLedger from './components/ProductLedger';
+import { usePermission, AppPermissions, seedRolePermissions, UserRole } from './hooks/usePermission';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from './lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, getDoc, updateDoc } from 'firebase/firestore';
 import { signOut, onAuthStateChanged, User, GoogleAuthProvider, signInWithPopup, signInAnonymously, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
@@ -102,7 +110,7 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports' | 'balancesheet' | 'users' | 'company_settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports' | 'balancesheet' | 'chart_of_accounts' | 'users' | 'company_settings' | 'expenses' | 'product_ledger'>('dashboard');
   const [userAccessTab, setUserAccessTab] = useState<'users' | 'matrix'>('users');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -114,9 +122,11 @@ export default function App() {
 
   // --- Core Authentication State ---
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [currentUserProfile, setCurrentUserProfile] = useState<{ role: 'admin' | 'accountant' | 'cashier' | 'viewer'; name: string; email: string } | null>(null);
+  const [currentUserProfile, setCurrentUserProfile] = useState<{ role: UserRole; name: string; email: string } | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [usersList, setUsersList] = useState<any[]>([]);
+  const [usersLoading, setUsersLoading] = useState(true);
+  const [usersError, setUsersError] = useState<string | null>(null);
 
   // --- Auth View Controls ---
   const [authFeedback, setAuthFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -167,10 +177,10 @@ export default function App() {
 
   // --- Trigger Database Privilege Seeding ---
   useEffect(() => {
-    if (currentUser) {
+    if (currentUser && (userRole === 'admin' || userRole === 'owner' || currentUser.email === 'kishor.aysha2@gmail.com' || currentUser.email === 'kishor.aysha1@gmail.com')) {
       seedRolePermissions();
     }
-  }, [currentUser]);
+  }, [currentUser, userRole]);
 
   // --- Observe Authentication State ---
   useEffect(() => {
@@ -194,9 +204,10 @@ export default function App() {
         const userRef = doc(db, 'users', user.uid);
         try {
           const docSnap = await getDoc(userRef);
+          const isUserAdmin = user.email === 'kishor.aysha2@gmail.com' || user.email === 'kishor.aysha1@gmail.com';
           if (docSnap.exists()) {
             const data = docSnap.data();
-            if (user.email === 'kishor.aysha2@gmail.com' && data.role !== 'admin') {
+            if (isUserAdmin && data.role !== 'admin') {
               await setDoc(userRef, { role: 'admin' }, { merge: true });
               const name = data.name || 'Kishor Aysha (Admin)';
               const email = user.email || 'kishor.aysha2@gmail.com';
@@ -219,19 +230,19 @@ export default function App() {
               await checkAndLogLogin(user.uid, email, name, role);
             }
           } else {
-            const defaultRole = user.email === 'kishor.aysha2@gmail.com' ? 'admin' : 'viewer';
+            const defaultRole = isUserAdmin ? 'admin' : 'viewer';
             await setDoc(userRef, {
-              name: user.email === 'kishor.aysha2@gmail.com' ? 'Kishor Aysha (Admin)' : (user.email?.split('@')[0] || 'User'),
+              name: isUserAdmin ? 'Kishor Aysha (Admin)' : (user.email?.split('@')[0] || 'User'),
               email: user.email || '',
               role: 'viewer',
               createdAt: new Date().toISOString()
             });
 
-            if (user.email === 'kishor.aysha2@gmail.com') {
+            if (isUserAdmin) {
               await updateDoc(userRef, { role: 'admin' });
             }
 
-            const name = user.email === 'kishor.aysha2@gmail.com' ? 'Kishor Aysha (Admin)' : (user.email?.split('@')[0] || 'User');
+            const name = isUserAdmin ? 'Kishor Aysha (Admin)' : (user.email?.split('@')[0] || 'User');
             const email = user.email || '';
             setCurrentUserProfile({
               role: defaultRole as any,
@@ -242,7 +253,8 @@ export default function App() {
           }
         } catch (err) {
           console.error("Failed to load user profile document:", err);
-          const role = user.email === 'kishor.aysha2@gmail.com' ? 'admin' : 'viewer';
+          const isUserAdmin = user.email === 'kishor.aysha2@gmail.com' || user.email === 'kishor.aysha1@gmail.com';
+          const role = isUserAdmin ? 'admin' : 'viewer';
           const name = user.email?.split('@')[0] || 'User';
           const email = user.email || '';
           setCurrentUserProfile({
@@ -439,7 +451,7 @@ export default function App() {
     }
   };
 
-  const handleUpdateUserRole = async (targetUid: string, targetEmail: string, newRole: 'admin' | 'accountant' | 'cashier' | 'viewer') => {
+  const handleUpdateUserRole = async (targetUid: string, targetEmail: string, newRole: UserRole) => {
     if (!permissions.manageUsers) {
       setFeedback({ message: 'Access Denied: Only system administrators can adjust security clearance.', type: 'error' });
       return;
@@ -447,11 +459,32 @@ export default function App() {
 
     try {
       const targetUser = usersList.find(u => u.uid === targetUid);
-      const previousRole = targetUser?.role || 'viewer';
+      const previousRole = (targetUser?.role || 'viewer') as UserRole;
       const targetName = targetUser?.name || 'Anonymous';
       const changedByUid = auth.currentUser?.uid || 'unknown-uid';
       const changedByUserName = currentUserProfile?.name || auth.currentUser?.displayName || auth.currentUser?.email || 'Anonymous Admin';
       const timestampString = new Date().toISOString();
+
+      // FEATURE 5: Admin behavior checks - Admin cannot update owner and cannot update to owner
+      if (userRole === 'admin') {
+        if (previousRole === 'owner') {
+          setFeedback({ message: 'Access Denied: Administrators are not authorized to modify Owner profiles.', type: 'error' });
+          return;
+        }
+        if (newRole === 'owner') {
+          setFeedback({ message: 'Access Denied: Administrators cannot grant Owner status.', type: 'error' });
+          return;
+        }
+      }
+
+      // FEATURE 6: Protection rules - At least 1 Owner must always remain
+      if (previousRole === 'owner' && newRole !== 'owner') {
+        const ownerCount = usersList.filter(u => u.role === 'owner').length;
+        if (ownerCount <= 1) {
+          setFeedback({ message: 'Owner Lockout Protection: At least one Owner must remain registered at all times.', type: 'error' });
+          return;
+        }
+      }
 
       const userRef = doc(db, 'users', targetUid);
       await updateDoc(userRef, {
@@ -489,11 +522,18 @@ export default function App() {
         setUsersList([
           { uid: currentUser.uid, name: currentUser.displayName || 'Kishor Aysha (Admin Bypass)', email: currentUser.email, role: 'admin', createdAt: new Date().toISOString() }
         ]);
+        setUsersLoading(false);
+        setUsersError(null);
       } else {
         setUsersList([]);
+        setUsersLoading(false);
+        setUsersError(null);
       }
       return;
     }
+
+    setUsersLoading(true);
+    setUsersError(null);
 
     const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
       const list: any[] = [];
@@ -501,12 +541,16 @@ export default function App() {
         list.push({ uid: docSnap.id, ...docSnap.data() });
       });
       setUsersList(list);
+      setUsersError(null);
+      setUsersLoading(false);
     }, (error) => {
       console.error("Users Sync Error", error);
+      setUsersError("Failed to synchronize user list. This typically indicates insufficient credentials or permission policies under your current clearance level.");
+      setUsersLoading(false);
     });
 
     return () => unsubUsers();
-  }, [currentUser, userRole]);
+  }, [currentUser, userRole, permissions?.viewUsers]);
 
   // --- Reference Nodes ---
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -519,7 +563,11 @@ export default function App() {
     const unsubProducts = onSnapshot(collection(db, 'products'), (snapshot) => {
       const productsList: Product[] = [];
       snapshot.forEach((docSnap) => {
-        productsList.push(docSnap.data() as Product);
+        const data = docSnap.data() as Product;
+        productsList.push({
+          ...data,
+          id: data.id || docSnap.id
+        });
       });
       
       setProducts(productsList);
@@ -607,6 +655,40 @@ export default function App() {
     };
   }, [currentUser]);
 
+  // --- Task 2: Safe Idempotent Backward-Compatibility Migration ---
+  useEffect(() => {
+    if (!currentUser || !auth.currentUser) return;
+    if (userRole !== 'admin' && userRole !== 'accountant' && userRole !== 'owner') return;
+    if (products.length === 0) return;
+
+    const performProductMigration = async () => {
+      const alreadyRun = sessionStorage.getItem('nexus_products_migrated_v1');
+      if (alreadyRun === 'true') return;
+
+      let migratedCount = 0;
+      for (const product of products) {
+        if (product.minimumStockAlert === undefined) {
+          try {
+            const productRef = doc(db, 'products', product.id);
+            await updateDoc(productRef, {
+              minimumStockAlert: 0
+            });
+            migratedCount++;
+          } catch (err) {
+            console.error(`[Schema Migration] Failed to migrate product ${product.id}:`, err);
+          }
+        }
+      }
+
+      sessionStorage.setItem('nexus_products_migrated_v1', 'true');
+      if (migratedCount > 0) {
+        console.log(`[Schema Migration] Idempotent product schema migration completed. Migrated ${migratedCount} products to include minimumStockAlert: 0.`);
+      }
+    };
+
+    performProductMigration();
+  }, [currentUser, products, userRole]);
+
   // --- Autosave to LocalStorage for offline resilience ---
   useEffect(() => {
     localStorage.setItem('inventory_products', JSON.stringify(products));
@@ -637,15 +719,15 @@ export default function App() {
   }, [feedback]);
 
   // --- Derived Categories ---
-  const categories: string[] = ['All', ...Array.from(new Set(products.filter(p => p.status !== 'inactive').map((p) => p.category))).map(String)];
+  const categories: string[] = ['All', ...Array.from(new Set(products.filter(p => !isInactiveStatus(p.status)).map((p) => p.category))).map(String)];
 
   // --- Global Metrics ---
-  const totalProducts = products.filter(p => p.status !== 'inactive').length;
-  const totalStockQuantity = products.filter(p => p.status !== 'inactive').reduce((acc, p) => acc + p.currentStock, 0);
-  const totalValuation = products.filter(p => p.status !== 'inactive').reduce((acc, p) => acc + p.sellingPrice * p.currentStock, 0);
-  const lowStockItemsCount = products.filter((p) => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert).length;
+  const totalProducts = products.filter(p => !isInactiveStatus(p.status)).length;
+  const totalStockQuantity = products.filter(p => !isInactiveStatus(p.status)).reduce((acc, p) => acc + p.currentStock, 0);
+  const totalValuation = products.filter(p => !isInactiveStatus(p.status)).reduce((acc, p) => acc + p.sellingPrice * p.currentStock, 0);
+  const lowStockItemsCount = products.filter((p) => !isInactiveStatus(p.status) && p.currentStock <= p.minimumStockAlert).length;
 
-  const lowStockList = products.filter((p) => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert);
+  const lowStockList = products.filter((p) => !isInactiveStatus(p.status) && p.currentStock <= p.minimumStockAlert);
 
   // --- Quick Stock Increments ---
   const handleQuickQuantityAdjust = (productId: string, delta: number) => {
@@ -880,7 +962,7 @@ export default function App() {
   const filteredItems = products
     .filter((item) => {
       // Exclude soft-deleted/inactive items from standard inventory workspace
-      if (item.status === 'inactive') return false;
+      if (isInactiveStatus(item.status)) return false;
 
       const query = search.toLowerCase();
       const matchesSearch =
@@ -1387,8 +1469,10 @@ export default function App() {
             </div>
 
             {/* Admin Badge */}
-            <span id="user-role-badge" className={`inline-flex items-center gap-0.5 sm:gap-1 rounded-md px-1.5 py-0.5 sm:px-2.5 sm:py-0.5 text-[9px] sm:text-[10px] font-black uppercase border shadow-3xs select-none shrink-0 ${
-              userRole === 'admin' 
+            <span id="user-role-badge" className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[9px] sm:text-[10px] font-extrabold uppercase border shadow-3xs select-none shrink-0 ${
+              userRole === 'owner'
+                ? 'bg-gradient-to-r from-amber-500 to-yellow-500 text-white border-amber-400 font-extrabold shadow-[0_0_12px_rgba(245,158,11,0.45)]'
+                : userRole === 'admin' 
                 ? 'bg-emerald-50 border-emerald-150 text-emerald-700' 
                 : userRole === 'accountant'
                 ? 'bg-blue-50 border-blue-200 text-blue-700'
@@ -1396,7 +1480,11 @@ export default function App() {
                 ? 'bg-amber-50 border-amber-100 text-amber-700'
                 : 'bg-slate-50 border-slate-100 text-slate-600'
             }`}>
-              <Shield className="w-2.5 h-2.5 shrink-0" />
+              {userRole === 'owner' ? (
+                <Crown className="w-3 h-3 text-white fill-amber-100 shrink-0 animate-pulse" />
+              ) : (
+                <Shield className="w-2.5 h-2.5 shrink-0" />
+              )}
               <span className="leading-none">{userRole}</span>
             </span>
 
@@ -1521,6 +1609,18 @@ export default function App() {
         </button>
         <button
           type="button"
+          onClick={() => setActiveTab('product_ledger')}
+          className={`flex-1 min-w-[115px] flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
+            activeTab === 'product_ledger'
+              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
+              : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <RefreshCw className="h-4 w-4" />
+          <span>Stock Card</span>
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveTab('customers')}
           className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
             activeTab === 'customers'
@@ -1603,6 +1703,20 @@ export default function App() {
           <BarChart3 className="h-4 w-4" />
           <span>Reports</span>
         </button>
+        {permissions.viewExpenses && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('expenses')}
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition min-w-[100px] ${
+              activeTab === 'expenses'
+                ? 'bg-white text-rose-600 shadow-xs border border-slate-200/50'
+                : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <TrendingDown className="h-4 w-4" />
+            <span>Expenses</span>
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setActiveTab('balancesheet')}
@@ -1614,6 +1728,18 @@ export default function App() {
         >
           <Scale className="h-4 w-4" />
           <span>Balance Sheet</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('chart_of_accounts')}
+          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition min-w-[145px] ${
+            activeTab === 'chart_of_accounts'
+              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
+              : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <BookOpen className="h-4 w-4" />
+          <span>Chart of Accounts</span>
         </button>
         {permissions.viewUsers && (
           <button
@@ -2132,11 +2258,34 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-50">
-                      {usersList.length === 0 ? (
+                      {usersLoading ? (
                         <tr>
                           <td colSpan={4} className="p-10 text-center text-slate-400">
                             <Loader2 className="w-5 h-5 animate-spin mx-auto text-indigo-600 mb-2" />
                             <span>Querying Firestore user list...</span>
+                          </td>
+                        </tr>
+                      ) : usersError ? (
+                        <tr>
+                          <td colSpan={4} className="p-10 text-center bg-rose-50/50 border border-dashed border-rose-200 rounded-xl">
+                            <div className="font-bold text-rose-600 mb-1 font-sans text-xs uppercase tracking-wider">Access Control Restriction</div>
+                            <div className="text-[11px] text-slate-500 max-w-md mx-auto leading-relaxed">{usersError}</div>
+                            <button 
+                              type="button"
+                              onClick={() => {
+                                setUsersLoading(true);
+                                setUsersError(null);
+                              }}
+                              className="mt-3 px-3 py-1.5 bg-rose-100 text-rose-700 hover:bg-rose-200 text-[10px] font-sans font-bold rounded uppercase tracking-wider transition-all cursor-pointer"
+                            >
+                              Retry Sync
+                            </button>
+                          </td>
+                        </tr>
+                      ) : usersList.length === 0 ? (
+                        <tr>
+                          <td colSpan={4} className="p-10 text-center text-slate-400">
+                            <span>No interactive identities discovered in the directory.</span>
                           </td>
                         </tr>
                       ) : (
@@ -2157,17 +2306,25 @@ export default function App() {
                             <td className="p-4 text-center">
                               {usr.email === 'kishor.aysha2@gmail.com' ? (
                                 <span className="font-mono text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-2.5 py-1 uppercase">Root Admin</span>
-                              ) : (
+                              ) : usr.role === 'owner' ? (
+                                <span className="font-mono text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-150 rounded px-2.5 py-1 uppercase">👑 Owner</span>
+                              ) : (userRole === 'owner' || (userRole === 'admin' && usr.role !== 'admin')) ? (
                                 <select
                                   value={usr.role || 'viewer'}
                                   onChange={(e) => handleUpdateUserRole(usr.uid, usr.email, e.target.value as any)}
                                   className="bg-slate-50 border border-slate-200 text-slate-700 font-mono font-bold rounded-lg px-2.5 py-1.5 text-xs focus:ring-1 focus:ring-slate-400 cursor-pointer outline-none uppercase"
                                 >
-                                  <option value="admin">🔒 Admin</option>
+                                  {userRole === 'owner' && <option value="owner">👑 Owner</option>}
+                                  {userRole === 'owner' && <option value="admin">🔒 Admin</option>}
+                                  <option value="manager">🛡️ Manager</option>
+                                  <option value="supervisor">👁️‍ Supervisor</option>
                                   <option value="accountant">💰 Accountant</option>
                                   <option value="cashier">💼 Cashier</option>
+                                  <option value="salesman">🛒 Salesman</option>
                                   <option value="viewer">👁️ Viewer</option>
                                 </select>
+                              ) : (
+                                <span className="font-mono text-[10px] font-bold text-slate-500 bg-slate-50 border border-slate-150 rounded px-2.5 py-1 uppercase">{usr.role || 'viewer'}</span>
                               )}
                             </td>
                           </tr>
@@ -2186,6 +2343,18 @@ export default function App() {
       ) : activeTab === 'reports' ? (
         <SafeTabWrapper tab="reports" userRole={userRole} permissions={permissions}>
           <ReportsPage userRole={userRole} />
+        </SafeTabWrapper>
+      ) : activeTab === 'expenses' ? (
+        <SafeTabWrapper tab="expenses" userRole={userRole} permissions={permissions}>
+          <ExpenseManagement userRole={userRole} permissions={permissions} />
+        </SafeTabWrapper>
+      ) : activeTab === 'product_ledger' ? (
+        <SafeTabWrapper tab="inventory" userRole={userRole} permissions={permissions}>
+          <ProductLedger userRole={userRole} />
+        </SafeTabWrapper>
+      ) : activeTab === 'chart_of_accounts' ? (
+        <SafeTabWrapper tab="chart_of_accounts" userRole={userRole} permissions={permissions}>
+          <ChartOfAccounts userRole={userRole} permissions={permissions} />
         </SafeTabWrapper>
       ) : (
         <SafeTabWrapper tab="company_settings" userRole={userRole} permissions={permissions}>
@@ -2405,6 +2574,22 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
+                    setActiveTab('product_ledger');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'product_ledger'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <RefreshCw className="h-4.5 w-4.5" />
+                  <span>Stock Card</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
                     setActiveTab('customers');
                     setIsMobileMenuOpen(false);
                   }}
@@ -2514,6 +2699,24 @@ export default function App() {
                   <span>Reports</span>
                 </button>
 
+                {permissions.viewExpenses && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab('expenses');
+                      setIsMobileMenuOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                      activeTab === 'expenses'
+                        ? 'bg-rose-50 border-rose-100 text-rose-700 font-black'
+                        : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                    }`}
+                  >
+                    <TrendingDown className="h-4.5 w-4.5" />
+                    <span>Expenses</span>
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => {
@@ -2528,6 +2731,22 @@ export default function App() {
                 >
                   <Scale className="h-4.5 w-4.5" />
                   <span>Balance Sheet</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('chart_of_accounts');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                    activeTab === 'chart_of_accounts'
+                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
+                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <BookOpen className="h-4.5 w-4.5" />
+                  <span>Chart of Accounts</span>
                 </button>
 
                 {permissions.viewUsers && (
@@ -2669,8 +2888,10 @@ function SafeTabWrapper({ children, tab, userRole, permissions }: SafeTabWrapper
   else if (tab === 'sales') isAccessible = permissions.viewSales;
   else if (tab === 'procurement') isAccessible = permissions.viewProcurement;
   else if (tab === 'balancesheet') isAccessible = permissions.viewFinancialReports;
+  else if (tab === 'chart_of_accounts') isAccessible = permissions.viewFinancialReports;
   else if (tab === 'users') isAccessible = permissions.viewUsers;
   else if (tab === 'reports') isAccessible = permissions.viewReports;
+  else if (tab === 'expenses') isAccessible = permissions.viewExpenses;
   else if (tab === 'company_settings') isAccessible = permissions.viewSettings || permissions.voidPayment;
   
   if (!isAccessible) {

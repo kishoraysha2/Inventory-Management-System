@@ -19,16 +19,22 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity, logFinancialAudit } from '../lib/firebase';
-import { collection, onSnapshot, doc, runTransaction, setDoc, deleteDoc } from 'firebase/firestore';
+import { collection, onSnapshot, doc, runTransaction, setDoc, deleteDoc, updateDoc, getDoc } from 'firebase/firestore';
 import { Purchase, Supplier, Product, CashLedgerEntry, Capital } from '../types';
+import { usePermission, UserRole } from '../hooks/usePermission';
+import { isVoidStatus, isInactiveStatus } from '../lib/utils';
+import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveSystemAccount } from '../lib/postingEngine';
 
-export default function ProcurementManagement({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
+export default function ProcurementManagement({ userRole = 'admin' }: { userRole?: UserRole }) {
+  const { permissions } = usePermission({ role: userRole });
+
   // --- States ---
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [cashLedger, setCashLedger] = useState<CashLedgerEntry[]>([]);
   const [capital, setCapital] = useState<Capital[]>([]);
+  const [coa, setCoa] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -39,6 +45,15 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
   const [searchQuery, setSearchQuery] = useState('');
   const [paymentFilter, setPaymentFilter] = useState<'All' | 'Cash' | 'Credit'>('All');
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [diagnosticTrace, setDiagnosticTrace] = useState<{
+    step: string;
+    path: string;
+    op: string;
+    payload: string;
+    status: 'PASS' | 'FAIL' | 'PENDING';
+    expression?: string;
+    reason?: string;
+  }[] | null>(null);
   const [voidConfirmationPurchase, setVoidConfirmationPurchase] = useState<Purchase | null>(null);
 
   // --- Form States ---
@@ -70,6 +85,9 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
 
       const savedCapital = localStorage.getItem('inventory_capital');
       setCapital(savedCapital ? JSON.parse(savedCapital) : []);
+
+      const savedCOA = localStorage.getItem('nexus_chart_of_accounts');
+      setCoa(savedCOA ? JSON.parse(savedCOA) : []);
 
       setLoading(false);
       return;
@@ -110,7 +128,11 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
     const unsubProducts = onSnapshot(collection(db, 'products'), (snapshot) => {
       const productList: Product[] = [];
       snapshot.forEach((docSnap) => {
-        productList.push(docSnap.data() as Product);
+        const data = docSnap.data() as Product;
+        productList.push({
+          ...data,
+          id: data.id || docSnap.id
+        });
       });
       setProducts(productList);
     }, (error) => {
@@ -139,12 +161,24 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       console.error('Error syncing capital in procurement modal:', error);
     });
 
+    // 6. Sync Chart of Accounts
+    const unsubCOA = onSnapshot(collection(db, 'chartOfAccounts'), (snapshot) => {
+      const coaList: any[] = [];
+      snapshot.forEach((docSnap) => {
+        coaList.push(docSnap.data());
+      });
+      setCoa(coaList);
+    }, (error) => {
+      console.error('Error syncing COA in procurement modal:', error);
+    });
+
     return () => {
       unsubPurchases();
       unsubSuppliers();
       unsubProducts();
       unsubCashLedger();
       unsubCapital();
+      unsubCOA();
     };
   }, []);
 
@@ -237,10 +271,10 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
     if (formData.paymentType === 'Cash') {
       const startingCapital = capital.reduce((sum, entry) => sum + entry.amount, 0);
       const totalInflow = cashLedger
-        .filter(entry => entry.type === 'inflow' && entry.status !== 'voided' && entry.status !== 'VOID')
+        .filter(entry => entry.type === 'inflow' && !isVoidStatus(entry.status))
         .reduce((sum, entry) => sum + entry.amount, 0);
       const totalOutflow = cashLedger
-        .filter(entry => entry.type === 'outflow' && entry.status !== 'voided' && entry.status !== 'VOID')
+        .filter(entry => entry.type === 'outflow' && !isVoidStatus(entry.status))
         .reduce((sum, entry) => sum + entry.amount, 0);
       const currentCashInHand = startingCapital + totalInflow - totalOutflow;
 
@@ -277,6 +311,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
 
     setIsSaving(true);
     setFeedback(null);
+    setDiagnosticTrace(null);
 
     try {
       if (!auth.currentUser) {
@@ -421,7 +456,33 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           oldSupplierSnap = await transaction.get(oldSupplierRef);
         }
 
-        // --- 3. Perform calculations & validation codes, then write ---
+        // Single Sequence Counter Read for atomic sequence generation
+        const counterRef = doc(db, 'counters', 'posting_sequences');
+        const counterSnap = await transaction.get(counterRef);
+        
+        let currentSequences = { JV: 0, RV: 0, PV: 0, SV: 0, CV: 0 };
+        if (counterSnap.exists()) {
+          currentSequences = { ...currentSequences, ...counterSnap.data() };
+        }
+
+        const transDateYear = new Date(formData.purchaseDate).getFullYear() || 2026;
+        const voucherType = formData.paymentType === 'Cash' ? 'CV' : 'JV';
+
+        // Resolve new entry sequence
+        const newNextVal = (currentSequences[voucherType] || 0) + 1;
+        const postingNumber = `${voucherType}-${transDateYear}-${String(newNextVal).padStart(6, '0')}`;
+        currentSequences[voucherType] = newNextVal;
+
+        // Resolve reversal entry sequence if editing
+        let revPostingNumber = '';
+        if (editingPurchase) {
+          const oldDateYear = new Date(editingPurchase.purchaseDate).getFullYear() || 2026;
+          const rNV = (currentSequences['JV'] || 0) + 1;
+          revPostingNumber = `JV-${oldDateYear}-${String(rNV).padStart(6, '0')}`;
+          currentSequences['JV'] = rNV;
+        }
+
+        // --- 3. Perform writes ---
 
         // A. Handle rollbacks if we are editing
         if (editingPurchase) {
@@ -446,6 +507,65 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
               });
             }
           }
+
+          // --- REVERSAL LEDGER POSTING ---
+          const invAcc = resolveSystemAccount('INVENTORY', coa);
+          const contraAcc = editingPurchase.paymentType === 'Cash' 
+            ? resolveSystemAccount('CASH', coa) 
+            : resolveSystemAccount('ACCOUNTS_PAYABLE', coa);
+
+          const revLines = [
+            // Credit: Inventory Asset (1300) is reversed with Credit
+            {
+              accountId: invAcc.id,
+              accountCode: invAcc.code,
+              accountName: invAcc.name,
+              debit: 0,
+              credit: editingPurchase.totalAmount,
+              baseCurrencyDebit: 0,
+              baseCurrencyCredit: editingPurchase.totalAmount
+            },
+            // Debit: Cash (1100) or Accounts Payable (2100) is reversed with Debit
+            {
+              accountId: contraAcc.id,
+              accountCode: contraAcc.code,
+              accountName: contraAcc.name,
+              debit: editingPurchase.totalAmount,
+              credit: 0,
+              baseCurrencyDebit: editingPurchase.totalAmount,
+              baseCurrencyCredit: 0
+            }
+          ];
+
+          const oldPeriodMonth = String(new Date(editingPurchase.purchaseDate).getMonth() + 1).padStart(2, '0');
+          const oldAccountingPeriod = `${new Date(editingPurchase.purchaseDate).getFullYear() || 2026}-${oldPeriodMonth}`;
+          const revEntryId = `le-purchase-rev-${editingPurchase.id}-${Date.now()}`;
+
+          const reversalLedgerEntry = {
+            id: revEntryId,
+            postingNumber: revPostingNumber,
+            companyId: 'comp-default',
+            branchId: 'branch-main',
+            fiscalYear: new Date(editingPurchase.purchaseDate).getFullYear() || 2026,
+            accountingPeriod: oldAccountingPeriod,
+            sourceModule: 'PROCUREMENT' as const,
+            postingStatus: 'REVERSED' as const,
+            currency: 'USD',
+            exchangeRate: 1,
+            baseCurrencyCode: 'USD',
+            version: 1,
+            narration: `Reversal of Procurement Entry due to Edit - Original: ${editingPurchase.id}`,
+            createdFrom: editingPurchase.id,
+            approvalStatus: 'APPROVED' as const,
+            postingDate: new Date().toISOString(),
+            createdAt: new Date().toISOString(),
+            createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+            lines: revLines,
+            originalEntryId: `le-purchase-${editingPurchase.id}`
+          };
+
+          const revLedgerRef = doc(db, 'ledgerEntries', revEntryId);
+          transaction.set(revLedgerRef, reversalLedgerEntry);
         }
 
         // B. Update target product with new stock level
@@ -503,8 +623,101 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           });
         } else {
           // If edited and changed from Cash to Credit, delete the CashLedger entry
-          transaction.delete(cashLedgerRef);
+          if (editingPurchase && editingPurchase.paymentType === 'Cash') {
+            transaction.delete(cashLedgerRef);
+          }
         }
+
+        // --- F. Double-Entry General Ledger Posting ---
+        const invAcc = resolveSystemAccount('INVENTORY', coa);
+        const contraAcc = formData.paymentType === 'Cash'
+          ? resolveSystemAccount('CASH', coa)
+          : resolveSystemAccount('ACCOUNTS_PAYABLE', coa);
+
+        const lines = [
+          // Debit: Inventory Asset (1300)
+          {
+            accountId: invAcc.id,
+            accountCode: invAcc.code,
+            accountName: invAcc.name,
+            debit: totalCalc,
+            credit: 0,
+            baseCurrencyDebit: totalCalc,
+            baseCurrencyCredit: 0
+          },
+          // Credit: Cash in Hand (1100) or Accounts Payable (2100)
+          {
+            accountId: contraAcc.id,
+            accountCode: contraAcc.code,
+            accountName: contraAcc.name,
+            debit: 0,
+            credit: totalCalc,
+            baseCurrencyDebit: 0,
+            baseCurrencyCredit: totalCalc
+          }
+        ];
+
+        // Verify Debit == Credit
+        const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
+        const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
+        if (Math.abs(totalDebits - totalCredits) > 0.01) {
+          throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
+        }
+
+        const periodMonth = String(new Date(formData.purchaseDate).getMonth() + 1).padStart(2, '0');
+        const accountingPeriod = `${transDateYear}-${periodMonth}`;
+        const entryId = `le-purchase-${purchaseId}`;
+
+        const ledgerEntry = {
+          id: entryId,
+          postingNumber,
+          companyId: 'comp-default',
+          branchId: 'branch-main',
+          fiscalYear: transDateYear,
+          accountingPeriod,
+          sourceModule: 'PROCUREMENT' as const,
+          postingStatus: 'POSTED' as const,
+          currency: 'USD',
+          exchangeRate: 1,
+          baseCurrencyCode: 'USD',
+          version: 1,
+          narration: `Procured x${numQty} "${chosenProduct.name}" from "${chosenSupplier.name}" (${formData.paymentType} Purchase)`,
+          createdFrom: purchaseId,
+          approvalStatus: 'APPROVED' as const,
+          postingDate: new Date(formData.purchaseDate + 'T12:00:00Z').toISOString(),
+          createdAt: new Date().toISOString(),
+          createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+          lines
+        };
+
+        const ledgerEntryRef = doc(db, 'ledgerEntries', entryId);
+        transaction.set(ledgerEntryRef, ledgerEntry);
+
+        // Commit sequence counters
+        transaction.set(counterRef, currentSequences, { merge: true });
+
+        // Ensure default system accounts exist in COA
+        const currentCoaIds = coa.map(c => c.id);
+        await ensureSystemAccountsExist(transaction, currentCoaIds);
+      });
+
+      // Log financial Audit
+      await logFinancialAudit({
+        action: editingPurchase ? 'UPDATE_PROCUREMENT' : 'CREATE_PROCUREMENT',
+        entityType: 'purchase',
+        entityId: purchaseId,
+        referenceId: formData.paymentType === 'Cash' ? `cl-${purchaseId}` : null,
+        customerId: null,
+        supplierId: chosenSupplier.id,
+        productId: chosenProduct.id,
+        amount: totalCalc,
+        paymentType: formData.paymentType,
+        previousState: editingPurchase || {},
+        newState: finalizedPurchaseData,
+        notes: editingPurchase 
+          ? `Updated procurement of x${numQty} "${chosenProduct.name}" from "${chosenSupplier.name}"`
+          : `Procured x${numQty} "${chosenProduct.name}" from "${chosenSupplier.name}"`,
+        userRole: userRole
       });
 
       // Log system operations
@@ -540,6 +753,130 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       } catch (dbErr: any) {
         errMsg = dbErr.message;
       }
+
+      // --- RUN TIME SEQUENTIAL DIAGNOSTIC TRACE ---
+      const trace: {
+        step: string;
+        path: string;
+        op: string;
+        payload: string;
+        status: 'PASS' | 'FAIL' | 'PENDING';
+        expression?: string;
+        reason?: string;
+      }[] = [];
+
+      try {
+        const productRef = doc(db, 'products', chosenProduct.id);
+        const purchaseRef = doc(db, 'purchases', purchaseId);
+        const cashLedgerId = `cl-${purchaseId}`;
+        const cashLedgerRef = doc(db, 'cashLedger', cashLedgerId);
+
+        // Fetch product data to compute exact stock levels
+        const productSnap = await getDoc(productRef);
+        const currentProductData = productSnap.exists() ? (productSnap.data() as Product) : null;
+        let initialStockForCalc = currentProductData?.currentStock ?? 0;
+        if (editingPurchase && editingPurchase.productId === chosenProduct.id) {
+          initialStockForCalc = Math.max(0, initialStockForCalc - editingPurchase.quantity);
+        }
+        const finalProductStock = initialStockForCalc + numQty;
+
+        // Step 1: Product stock level update check
+        let step1Pass = false;
+        try {
+          trace.push({
+            step: 'STEP 1',
+            path: `products/${chosenProduct.id}`,
+            op: 'UPDATE',
+            payload: JSON.stringify({ currentStock: finalProductStock }, null, 2),
+            status: 'PENDING'
+          });
+
+          // Perform individual update
+          await updateDoc(productRef, { currentStock: finalProductStock });
+
+          // Succeeded! Instantly rollback to preserve pristine database consistency
+          if (currentProductData) {
+            await updateDoc(productRef, { currentStock: currentProductData.currentStock ?? 0 });
+          }
+
+          trace[trace.length - 1].status = 'PASS';
+          step1Pass = true;
+        } catch (step1Err: any) {
+          console.error("Step 1 Probe Error:", step1Err);
+          trace[trace.length - 1].status = 'FAIL';
+          trace[trace.length - 1].expression = 'isValidProduct(request.resource.data) && (hasRole("admin") || hasRole("accountant") || (hasRole("cashier") && affectedKeys().hasOnly(["currentStock"])))';
+          trace[trace.length - 1].reason = step1Err.message || 'Permission denied on update';
+        }
+
+        // Step 2: Purchase entry creation check
+        let step2Pass = false;
+        if (step1Pass) {
+          try {
+            trace.push({
+              step: 'STEP 2',
+              path: `purchases/${purchaseId}`,
+              op: 'CREATE',
+              payload: JSON.stringify(finalizedPurchaseData, null, 2),
+              status: 'PENDING'
+            });
+
+            // Perform individual write
+            await setDoc(purchaseRef, finalizedPurchaseData);
+
+            // Succeeded! Clean up immediately
+            await deleteDoc(purchaseRef);
+
+            trace[trace.length - 1].status = 'PASS';
+            step2Pass = true;
+          } catch (step2Err: any) {
+            console.error("Step 2 Probe Error:", step2Err);
+            trace[trace.length - 1].status = 'FAIL';
+            trace[trace.length - 1].expression = 'isValidPurchase(request.resource.data) && (hasRole("admin") || hasRole("accountant"))';
+            trace[trace.length - 1].reason = step2Err.message || 'Permission denied on create';
+          }
+        }
+
+        // Step 3: Cash Accounting ledger entry creation check
+        if (step1Pass && step2Pass && formData.paymentType === 'Cash') {
+          const cashLedgerPayload = {
+            id: cashLedgerId,
+            type: 'outflow',
+            source: 'purchase',
+            amount: totalCalc,
+            referenceId: purchaseId,
+            description: `Procured x${numQty} "${chosenProduct.name}" from "${chosenSupplier.name}"`,
+            timestamp: new Date(formData.purchaseDate).toISOString()
+          };
+
+          try {
+            trace.push({
+              step: 'STEP 3',
+              path: `cashLedger/${cashLedgerId}`,
+              op: 'CREATE',
+              payload: JSON.stringify(cashLedgerPayload, null, 2),
+              status: 'PENDING'
+            });
+
+            // Perform individual write
+            await setDoc(cashLedgerRef, cashLedgerPayload);
+
+            // Succeeded! Clean up immediately
+            await deleteDoc(cashLedgerRef);
+
+            trace[trace.length - 1].status = 'PASS';
+          } catch (step3Err: any) {
+            console.error("Step 3 Probe Error:", step3Err);
+            trace[trace.length - 1].status = 'FAIL';
+            trace[trace.length - 1].expression = 'isValidCashLedgerEntry(request.resource.data) && (hasRole("admin") || hasRole("accountant") || hasRole("cashier"))';
+            trace[trace.length - 1].reason = step3Err.message || 'Permission denied on create';
+          }
+        }
+
+      } catch (probeErr: any) {
+        console.error("Diagnostic execution failed:", probeErr);
+      }
+
+      setDiagnosticTrace(trace);
       setFeedback({ message: `Transaction failed: ${errMsg}`, type: 'error' });
     } finally {
       setIsSaving(false);
@@ -623,6 +960,21 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           supplierSnap = await transaction.get(supplierRef);
         }
 
+        // Single Sequence Counter Read for atomic sequence generation
+        const counterRef = doc(db, 'counters', 'posting_sequences');
+        const counterSnap = await transaction.get(counterRef);
+        
+        let currentSequences = { JV: 0, RV: 0, PV: 0, SV: 0, CV: 0 };
+        if (counterSnap.exists()) {
+          currentSequences = { ...currentSequences, ...counterSnap.data() };
+        }
+
+        const purchaseDate = purchase.purchaseDate || new Date().toISOString().split('T')[0];
+        const purchaseYear = new Date(purchaseDate).getFullYear() || 2026;
+        const jvNextVal = (currentSequences['JV'] || 0) + 1;
+        const jvPostingNumber = `JV-${purchaseYear}-${String(jvNextVal).padStart(6, '0')}`;
+        currentSequences['JV'] = jvNextVal;
+
         // -- 2. Perform WRITES --
         if (productSnap.exists()) {
           const productData = productSnap.data() as Product;
@@ -645,20 +997,86 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           const cashLedgerRef = doc(db, 'cashLedger', `cl-${purchase.id}`);
           transaction.update(cashLedgerRef, { status: 'VOID' });
         }
+
+        // --- REVERSAL LEDGER POSTING ---
+        const invAcc = resolveSystemAccount('INVENTORY', coa);
+        const contraAcc = purchase.paymentType === 'Cash' 
+          ? resolveSystemAccount('CASH', coa) 
+          : resolveSystemAccount('ACCOUNTS_PAYABLE', coa);
+
+        const revLines = [
+          // Debit: Cash (1100) or Accounts Payable (2100) is debited to reverse credit
+          {
+            accountId: contraAcc.id,
+            accountCode: contraAcc.code,
+            accountName: contraAcc.name,
+            debit: purchase.totalAmount,
+            credit: 0,
+            baseCurrencyDebit: purchase.totalAmount,
+            baseCurrencyCredit: 0
+          },
+          // Credit: Inventory Asset (1300) is credited to reverse stock addition
+          {
+            accountId: invAcc.id,
+            accountCode: invAcc.code,
+            accountName: invAcc.name,
+            debit: 0,
+            credit: purchase.totalAmount,
+            baseCurrencyDebit: 0,
+            baseCurrencyCredit: purchase.totalAmount
+          }
+        ];
+
+        const periodMonth = String(new Date(purchaseDate).getMonth() + 1).padStart(2, '0');
+        const accountingPeriod = `${purchaseYear}-${periodMonth}`;
+        const revEntryId = `le-purchase-void-${purchase.id}`;
+
+        const reversalLedgerEntry = {
+          id: revEntryId,
+          postingNumber: jvPostingNumber,
+          companyId: 'comp-default',
+          branchId: 'branch-main',
+          fiscalYear: purchaseYear,
+          accountingPeriod,
+          sourceModule: 'PROCUREMENT' as const,
+          postingStatus: 'REVERSED' as const,
+          currency: 'USD',
+          exchangeRate: 1,
+          baseCurrencyCode: 'USD',
+          version: 1,
+          narration: `Reversal of Procurement Entry due to Void - Original: ${purchase.id}`,
+          createdFrom: purchase.id,
+          approvalStatus: 'APPROVED' as const,
+          postingDate: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+          createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+          lines: revLines,
+          originalEntryId: `le-purchase-${purchase.id}`
+        };
+
+        const revLedgerRef = doc(db, 'ledgerEntries', revEntryId);
+        transaction.set(revLedgerRef, reversalLedgerEntry);
+
+        // Commit sequence counters
+        transaction.set(counterRef, currentSequences, { merge: true });
       });
 
       // Log financial Audit
-      await logFinancialAudit(
-        'VOID',
-        purchase.id,
-        purchase,
-        { ...purchase, status: 'VOID' },
-        {
-          cash: purchase.paymentType === 'Cash' ? -purchase.totalAmount : 0,
-          stock: -purchase.quantity,
-          due: purchase.paymentType === 'Credit' ? -purchase.totalAmount : 0
-        }
-      );
+      await logFinancialAudit({
+        action: 'VOID_PROCUREMENT',
+        entityType: 'purchase',
+        entityId: purchase.id,
+        referenceId: purchase.paymentType === 'Cash' ? `cl-${purchase.id}` : null,
+        customerId: null,
+        supplierId: purchase.supplierId,
+        productId: purchase.productId,
+        amount: purchase.totalAmount,
+        paymentType: purchase.paymentType,
+        previousState: purchase,
+        newState: { ...purchase, status: 'VOID' },
+        notes: `Voided procurement ID: ${purchase.id}`,
+        userRole: userRole
+      });
 
       // Log system/void activity
       await logSystemActivity(
@@ -683,10 +1101,10 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
   };
 
   // --- Calculate Procurement Intelligence parameters ---
-  const activePurchases = purchases.filter(p => p.status !== 'voided' && p.status !== 'VOID');
+  const activePurchases = purchases.filter(p => !isVoidStatus(p.status));
   const totalPurchasesVolume = activePurchases.reduce((sum, p) => sum + p.totalAmount, 0);
   const totalUnitsProcured = activePurchases.reduce((sum, p) => sum + p.quantity, 0);
-  const totalCreditDueOutstanding = suppliers.reduce((sum, s) => sum + (s.dueBalance ?? 0), 0);
+  const totalCreditDueOutstanding = suppliers.filter(s => !isInactiveStatus(s.status)).reduce((sum, s) => sum + (s.dueBalance ?? 0), 0);
 
   // --- Listing Filters ---
   const filteredPurchases = purchases.filter((item) => {
@@ -850,7 +1268,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
             ))}
           </div>
 
-          {(userRole === 'admin' || userRole === 'accountant') && (
+          {permissions.createProcurement && (
             <button
               type="button"
               onClick={() => openForm()}
@@ -965,7 +1383,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                     <tr 
                       key={purchase.id} 
                       className={`hover:bg-indigo-50/20 even:bg-slate-50/30 transition duration-150 group ${
-                        purchase.status === 'voided' || purchase.status === 'VOID' 
+                        isVoidStatus(purchase.status) 
                           ? 'opacity-40 bg-slate-50/50 line-through text-slate-400' 
                           : ''
                       }`}
@@ -1002,14 +1420,14 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                         </span>
                       </td>
                       <td className="py-3 px-3 sm:py-4 sm:px-8 text-center whitespace-nowrap">
-                        {purchase.status === 'voided' || purchase.status === 'VOID' ? (
+                        {isVoidStatus(purchase.status) ? (
                           <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider bg-rose-50 text-rose-700 border border-rose-200 shadow-3xs animate-fade-in">
                             <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse"></span>
                             Void
                           </span>
                         ) : (
                           <div className="flex items-center justify-center gap-1.5">
-                            {userRole === 'admin' && (
+                            {permissions.voidProcurement && (
                               <button
                                 type="button"
                                 onClick={() => voidTransaction(purchase.id)}
@@ -1087,7 +1505,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                         }`}
                       >
                         <option value="">-- Choose Supplier --</option>
-                        {suppliers.filter(s => s.status !== 'inactive').map(s => (
+                        {suppliers.filter(s => !isInactiveStatus(s.status)).map(s => (
                           <option key={s.id} value={s.id}>
                             {s.name} ({s.category || 'Trading Channel'})
                           </option>
@@ -1118,7 +1536,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                         }`}
                       >
                         <option value="">-- Choose Product --</option>
-                        {products.filter(p => p.status !== 'inactive').map(p => (
+                        {products.filter(p => !isInactiveStatus(p.status)).map(p => (
                           <option key={p.id} value={p.id}>
                             {p.name} (Stock: {p.currentStock})
                           </option>
@@ -1275,6 +1693,65 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                         </span>
                       </div>
                     </motion.div>
+                  )}
+
+                  {/* DIAGNOSTIC RUNTIME TRACE PANEL */}
+                  {diagnosticTrace && (
+                    <div id="diagnostic-trace-panel" className="bg-slate-950 text-slate-100 rounded-2xl p-5 font-mono text-[11px] space-y-4 border border-slate-800 shadow-xl animate-fade-in">
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+                        <span className="font-extrabold uppercase tracking-widest text-[10px] text-rose-500 flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+                          Runtime Write Transaction Failure Trace
+                        </span>
+                        <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">
+                          ABAC Gatekeeper Audit
+                        </span>
+                      </div>
+                      
+                      <div className="space-y-3.5 max-h-[250px] overflow-y-auto pr-2 custom-scrollbar">
+                        {diagnosticTrace.map((op, idx) => (
+                          <div key={idx} className="border-b border-slate-900 pb-3 last:border-b-0 last:pb-0">
+                            <div className="flex items-center justify-between font-bold mb-1.5">
+                              <span className="text-slate-300 font-black">{op.step}</span>
+                              <span className={`px-2 py-0.5 rounded text-[9px] uppercase font-black ${
+                                op.status === 'PASS' 
+                                  ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-900' 
+                                  : op.status === 'FAIL' 
+                                    ? 'bg-rose-950/80 text-rose-400 border border-rose-900' 
+                                    : 'bg-amber-950/80 text-amber-400 border border-amber-900'
+                              }`}>
+                                {op.status}
+                              </span>
+                            </div>
+                            
+                            <div className="space-y-1 text-[11px] text-slate-400 leading-relaxed">
+                              <div>
+                                <span className="text-slate-500 font-bold">Path:</span> <span className="text-indigo-400 font-semibold">{op.path}</span>
+                              </div>
+                              <div>
+                                <span className="text-slate-500 font-bold">Operation:</span> <span className="text-sky-400 font-semibold">{op.op}</span>
+                              </div>
+                              <div className="bg-slate-905/80 rounded p-1.5 mt-1 overflow-x-auto text-[10px] border border-slate-900 font-mono text-slate-300">
+                                <span className="text-slate-500 font-bold block mb-0.5">Payload:</span>
+                                <code>{op.payload}</code>
+                              </div>
+                              {op.status === 'FAIL' && (
+                                <>
+                                  <div className="mt-2 text-rose-400 font-semibold">
+                                    <span className="text-rose-500 font-black block mb-0.5">Rule Checked Expression:</span>
+                                    <span className="font-mono bg-rose-950/30 px-1 py-0.5 rounded border border-rose-900/40 text-[10px] break-all block">{op.expression}</span>
+                                  </div>
+                                  <div className="mt-2 text-slate-400 font-bold">
+                                    <span className="text-slate-500 block mb-0.5">Root Cause Reason:</span>
+                                    <span className="font-normal text-rose-300 block bg-slate-900/50 p-1 rounded border border-slate-800">{op.reason}</span>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   )}
 
                   {/* Submission and Cancel controls */}

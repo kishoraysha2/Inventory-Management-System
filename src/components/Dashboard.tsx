@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { calculateCustomerLedger } from '../lib/utils';
+import { calculateCustomerLedger, isVoidStatus, isInactiveStatus } from '../lib/utils';
 import { 
   TrendingUp, 
+  TrendingDown,
   DollarSign, 
   ShoppingBag, 
   AlertTriangle, 
@@ -30,9 +31,10 @@ import {
   Save
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError } from '../lib/firebase';
-import { collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
-import { Sale, Customer, Product, Supplier, Capital, CashLedgerEntry, getNormalizedItems, getSaleSummary } from '../types';
+import { collection, onSnapshot, doc, setDoc, deleteDoc, runTransaction } from 'firebase/firestore';
+import { Sale, Customer, Product, Supplier, Capital, CashLedgerEntry, getNormalizedItems, getSaleSummary, LedgerEntry } from '../types';
 import { AppPermissions, UserRole } from '../hooks/usePermission';
+import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveSystemAccount } from '../lib/postingEngine';
 
 export default function Dashboard({ userRole, permissions }: { userRole: UserRole | string; permissions: AppPermissions }) {
   // --- States ---
@@ -45,11 +47,14 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
   const [systemLogs, setSystemLogs] = useState<any[]>([]);
   const [cashLedger, setCashLedger] = useState<any[]>([]);
   const [capital, setCapital] = useState<Capital[]>([]);
+  const [ledgerEntries, setLedgerEntries] = useState<LedgerEntry[]>([]);
+  const [expenses, setExpenses] = useState<any[]>([]);
+  const [coa, setCoa] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   const customers = useMemo(() => {
     return customersState.map(c => {
-      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id);
+      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id, c.dueBalance);
       return {
         ...c,
         dueBalance: Math.max(0, rawDue),
@@ -112,24 +117,117 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
         return;
       }
 
-      await setDoc(doc(db, 'capital', capId), {
-        id: capId,
-        amount: amt,
-        date: newCapDate,
-        note: newCapNote,
-        createdBy: 'admin_01'
+      await runTransaction(db, async (transaction) => {
+        // --- 1. Read Phase ---
+        const transDateYear = new Date(newCapDate).getFullYear() || 2026;
+        const { postingNumber, nextVal } = await getNextPostingNumber(transaction, 'CV', transDateYear);
+
+        // --- 2. Write Phase ---
+        const capRef = doc(db, 'capital', capId);
+        transaction.set(capRef, {
+          id: capId,
+          amount: amt,
+          date: newCapDate,
+          note: newCapNote,
+          createdBy: 'admin_01'
+        });
+
+        const cashLedgerId = `cl-${capId}`;
+        const cashLedgerRef = doc(db, 'cashLedger', cashLedgerId);
+        transaction.set(cashLedgerRef, {
+          id: cashLedgerId,
+          type: 'inflow',
+          source: 'manual',
+          amount: amt,
+          referenceId: capId,
+          description: `Capital contribution injection: ${newCapNote || 'No notes'}`,
+          timestamp: new Date(newCapDate + 'T12:00:00Z').toISOString()
+        });
+
+        const cashAcc = resolveSystemAccount('CASH', coa);
+        const capAcc = resolveSystemAccount('CAPITAL', coa);
+
+        const lines = [
+          // Debit: Cash in Hand (1100)
+          {
+            accountId: cashAcc.id,
+            accountCode: cashAcc.code,
+            accountName: cashAcc.name,
+            debit: amt,
+            credit: 0,
+            baseCurrencyDebit: amt,
+            baseCurrencyCredit: 0
+          },
+          // Credit: Owner Capital (3100)
+          {
+            accountId: capAcc.id,
+            accountCode: capAcc.code,
+            accountName: capAcc.name,
+            debit: 0,
+            credit: amt,
+            baseCurrencyDebit: 0,
+            baseCurrencyCredit: amt
+          }
+        ];
+
+        // Double-entry validation
+        const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
+        const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
+        if (Math.abs(totalDebits - totalCredits) > 0.01) {
+          throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
+        }
+
+        const periodMonth = String(new Date(newCapDate).getMonth() + 1).padStart(2, '0');
+        const accountingPeriod = `${transDateYear}-${periodMonth}`;
+        const entryId = `le-capital-${capId}`;
+
+        const ledgerEntry = {
+          id: entryId,
+          postingNumber,
+          companyId: 'comp-default',
+          branchId: 'branch-main',
+          fiscalYear: transDateYear,
+          accountingPeriod,
+          sourceModule: 'CAPITAL' as const,
+          postingStatus: 'POSTED' as const,
+          currency: 'USD',
+          exchangeRate: 1,
+          baseCurrencyCode: 'USD',
+          version: 1,
+          narration: `Owner manual Capital contribution injection: ${newCapNote || 'No notes'}`,
+          createdFrom: capId,
+          approvalStatus: 'APPROVED' as const,
+          postingDate: new Date(newCapDate + 'T12:00:00Z').toISOString(),
+          createdAt: new Date().toISOString(),
+          createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+          lines
+        };
+
+        const ledgerRef = doc(db, 'ledgerEntries', entryId);
+        transaction.set(ledgerRef, ledgerEntry);
+
+        // Commit sequence number
+        commitNextPostingNumber(transaction, 'CV', nextVal);
+
+        // Ensure default system accounts exist
+        const currentCoaIds = coa.map(c => c.id);
+        await ensureSystemAccountsExist(transaction, currentCoaIds);
+
+        // Log this system operation
+        const logId = `log-${Date.now()}`;
+        const logRef = doc(db, 'Logs', logId);
+        transaction.set(logRef, {
+          id: logId,
+          action: 'Capital contribution',
+          user: auth.currentUser?.email || 'admin_01',
+          timestamp: new Date().toISOString(),
+          details: `Injected manual capital contribution of $${amt.toLocaleString()} on ${newCapDate} (${newCapNote || 'No notes'})`
+        });
       });
+
       setCapFeedback({ message: 'Capital investment successfully logged & synchronized!', type: 'success' });
       setNewCapAmount('');
       setNewCapNote('');
-      // Log this system operation
-      await setDoc(doc(db, 'Logs', `log-${Date.now()}`), {
-        id: `log-${Date.now()}`,
-        action: 'Capital contribution',
-        user: 'admin_01',
-        timestamp: new Date().toISOString(),
-        details: `Injected manual capital contribution of $${amt.toLocaleString()} on ${newCapDate} (${newCapNote || 'No notes'})`
-      });
     } catch (err: any) {
       setCapFeedback({ message: `Failed to save Capital: ${err.message}`, type: 'error' });
     }
@@ -209,6 +307,12 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       const savedCapital = localStorage.getItem('inventory_capital');
       setCapital(savedCapital ? JSON.parse(savedCapital) : []);
 
+      const savedLedgerEntries = localStorage.getItem('inventory_ledger_entries');
+      setLedgerEntries(savedLedgerEntries ? JSON.parse(savedLedgerEntries) : []);
+
+      const savedExpenses = localStorage.getItem('expenses');
+      setExpenses(savedExpenses ? JSON.parse(savedExpenses) : []);
+
       setLoading(false);
       return;
     }
@@ -230,7 +334,11 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
     const unsubProducts = onSnapshot(collection(db, 'products'), (snapshot) => {
       const prodList: Product[] = [];
       snapshot.forEach((docSnap) => {
-        prodList.push(docSnap.data() as Product);
+        const data = docSnap.data() as Product;
+        prodList.push({
+          ...data,
+          id: data.id || docSnap.id
+        });
       });
       setProducts(prodList);
     }, (err) => {
@@ -326,6 +434,45 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       console.error("Dashboard error syncing purchases", err);
     });
 
+    // 9. Sync Expenses
+    const unsubExpenses = onSnapshot(collection(db, 'expenses'), (snapshot) => {
+      const list: any[] = [];
+      snapshot.forEach((docSnap) => {
+        if (docSnap.exists()) {
+          list.push({ id: docSnap.id, ...docSnap.data() });
+        }
+      });
+      setExpenses(list);
+    }, (err) => {
+      console.error("Dashboard error syncing expenses", err);
+    });
+
+    // 10. Sync Chart of Accounts
+    const unsubCOA = onSnapshot(collection(db, 'chartOfAccounts'), (snapshot) => {
+      const list: any[] = [];
+      snapshot.forEach((docSnap) => {
+        if (docSnap.exists()) {
+          list.push(docSnap.data());
+        }
+      });
+      setCoa(list);
+    }, (err) => {
+      console.error("Dashboard error syncing COA", err);
+    });
+
+    // 11. Sync Ledger Entries
+    const unsubLedgerEntries = onSnapshot(collection(db, 'ledgerEntries'), (snapshot) => {
+      const list: LedgerEntry[] = [];
+      snapshot.forEach((docSnap) => {
+        if (docSnap.exists()) {
+          list.push(docSnap.data() as LedgerEntry);
+        }
+      });
+      setLedgerEntries(list);
+    }, (err) => {
+      console.error("Dashboard error syncing ledgerEntries", err);
+    });
+
     return () => {
       unsubSales();
       unsubProducts();
@@ -336,6 +483,9 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       unsubCashLedger();
       unsubCapital();
       unsubPurchases();
+      unsubExpenses();
+      unsubCOA();
+      unsubLedgerEntries();
     };
   }, []);
 
@@ -346,57 +496,177 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
   const refDate = new Date(simulationDateStr);
   const todayStr = new Date().toISOString().split('T')[0];
 
-  // 1. Today's Sales (excluding VOID/voided)
-  const todaysSalesValue = sales.filter(s => {
-    if (!s.saleDate || s.status === 'VOID' || s.status === 'voided') return false;
-    const datePart = s.saleDate.split('T')[0];
-    return datePart === todayStr;
-  }).reduce((sum, s) => sum + s.totalAmount, 0);
+  // 1. Today's Sales (excl. VOID) - Ledger-Backed
+  const todaysSalesValue = useMemo(() => {
+    let sum = 0;
+    ledgerEntries.forEach(entry => {
+      if (entry.postingStatus !== 'POSTED') return;
+      const postingDate = entry.postingDate || entry.createdAt;
+      const datePart = postingDate.split('T')[0];
+      if (datePart === todayStr) {
+        entry.lines.forEach(line => {
+          if (line.accountCode === '4100') {
+            sum += line.credit || 0;
+          }
+        });
+      }
+    });
+    return sum;
+  }, [ledgerEntries, todayStr]);
 
-  // 2. Monthly Sales (June 2026) (excluding VOID/voided)
-  const currentMonthNum = refDate.getMonth(); // 5 (June)
-  const currentYearNum = refDate.getFullYear(); // 2026
-  const monthlySalesValue = sales.filter(s => {
-    if (!s.saleDate || s.status === 'VOID' || s.status === 'voided') return false;
-    const d = new Date(s.saleDate);
-    return d.getMonth() === currentMonthNum && d.getFullYear() === currentYearNum;
-  }).reduce((sum, s) => sum + s.totalAmount, 0);
+  // 2. Monthly Sales (June 2026) - Ledger-Backed
+  const currentMonthNum = refDate.getMonth();
+  const currentYearNum = refDate.getFullYear();
+  const monthlySalesValue = useMemo(() => {
+    let sum = 0;
+    ledgerEntries.forEach(entry => {
+      if (entry.postingStatus !== 'POSTED') return;
+      const postingDate = entry.postingDate || entry.createdAt;
+      const d = new Date(postingDate);
+      if (d.getMonth() === currentMonthNum && d.getFullYear() === currentYearNum) {
+        entry.lines.forEach(line => {
+          if (line.accountCode === '4100') {
+            sum += line.credit || 0;
+          }
+        });
+      }
+    });
+    return sum;
+  }, [ledgerEntries, currentMonthNum, currentYearNum]);
 
-  // 3. Profit calculations (based strictly on subtotal minus costOfGoodsSold, excluding tax) (excluding VOID/voided)
-  const cashProfitValue = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided' && (s.paymentType || '').toString().toUpperCase().trim() !== 'CREDIT').reduce((sum, s) => {
-    const summary = getSaleSummary(s, products);
-    return sum + (summary.subtotal - summary.costOfGoodsSold);
-  }, 0);
+  // 2.2 Expense Operational calculations - Ledger-Backed
+  const totalExpensesValue = useMemo(() => {
+    let sum = 0;
+    ledgerEntries.forEach(entry => {
+      if (entry.postingStatus !== 'POSTED') return;
+      entry.lines.forEach(line => {
+        if (line.accountCode.startsWith('61') || line.accountCode === '5200') {
+          sum += line.debit || 0;
+        }
+      });
+    });
+    return sum;
+  }, [ledgerEntries]);
 
-  const creditProfitValue = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided' && (s.paymentType || '').toString().toUpperCase().trim() === 'CREDIT').reduce((sum, s) => {
-    const summary = getSaleSummary(s, products);
-    return sum + (summary.subtotal - summary.costOfGoodsSold);
-  }, 0);
+  const monthlyExpensesValue = useMemo(() => {
+    let sum = 0;
+    ledgerEntries.forEach(entry => {
+      if (entry.postingStatus !== 'POSTED') return;
+      const postingDate = entry.postingDate || entry.createdAt;
+      const d = new Date(postingDate);
+      if (d.getMonth() === currentMonthNum && d.getFullYear() === currentYearNum) {
+        entry.lines.forEach(line => {
+          if (line.accountCode.startsWith('61') || line.accountCode === '5200') {
+            sum += line.debit || 0;
+          }
+        });
+      }
+    });
+    return sum;
+  }, [ledgerEntries, currentMonthNum, currentYearNum]);
 
-  const salesProfitValue = cashProfitValue + creditProfitValue;
+  const todaysExpensesValue = useMemo(() => {
+    let sum = 0;
+    ledgerEntries.forEach(entry => {
+      if (entry.postingStatus !== 'POSTED') return;
+      const postingDate = entry.postingDate || entry.createdAt;
+      const datePart = postingDate.split('T')[0];
+      if (datePart === todayStr) {
+        entry.lines.forEach(line => {
+          if (line.accountCode.startsWith('61') || line.accountCode === '5200') {
+            sum += line.debit || 0;
+          }
+        });
+      }
+    });
+    return sum;
+  }, [ledgerEntries, todayStr]);
+
+  const largestExpenseValue = useMemo(() => {
+    let max = 0;
+    ledgerEntries.forEach(entry => {
+      if (entry.postingStatus !== 'POSTED') return;
+      entry.lines.forEach(line => {
+        if (line.accountCode.startsWith('61') || line.accountCode === '5200') {
+          const val = line.debit || 0;
+          if (val > max) max = val;
+        }
+      });
+    });
+    return max;
+  }, [ledgerEntries]);
+
+  // 3. Profit calculations - Ledger-Backed (Revenue minus COGS)
+  const ledgerProfitMetrics = useMemo(() => {
+    let overallRevenue = 0;
+    let overallCOGS = 0;
+    let cashRevenue = 0;
+    let cashCOGS = 0;
+    let creditRevenue = 0;
+    let creditCOGS = 0;
+
+    ledgerEntries.forEach(entry => {
+      if (entry.postingStatus !== 'POSTED') return;
+      
+      const hasRevenueLine = entry.lines.some(l => l.accountCode === '4100');
+      if (!hasRevenueLine) return;
+
+      const isCredit = entry.lines.some(l => l.accountCode === '1200');
+
+      entry.lines.forEach(line => {
+        if (line.accountCode === '4100') {
+          const rev = line.credit || 0;
+          overallRevenue += rev;
+          if (isCredit) {
+            creditRevenue += rev;
+          } else {
+            cashRevenue += rev;
+          }
+        }
+        if (line.accountCode === '5100') {
+          const cogs = line.debit || 0;
+          overallCOGS += cogs;
+          if (isCredit) {
+            creditCOGS += cogs;
+          } else {
+            cashCOGS += cogs;
+          }
+        }
+      });
+    });
+
+    return {
+      cashProfit: cashRevenue - cashCOGS,
+      creditProfit: creditRevenue - creditCOGS,
+      salesProfit: overallRevenue - overallCOGS,
+      overallSalesSubtotal: overallRevenue
+    };
+  }, [ledgerEntries]);
+
+  const cashProfitValue = ledgerProfitMetrics.cashProfit;
+  const creditProfitValue = ledgerProfitMetrics.creditProfit;
+  const salesProfitValue = ledgerProfitMetrics.salesProfit;
 
   // 4. Total Purchase (Valuation of stock currently acquired in our inventory)
   const totalPurchaseValue = products
-    .filter(p => p.status !== 'inactive')
+    .filter(p => !isInactiveStatus(p.status))
     .reduce((sum, p) => {
       return sum + (p.purchasePrice * p.currentStock);
     }, 0);
 
   // 4.1. Opening Stock Value Calculation
-  // Calculates the sum of all inventory value created through the "Add Product (Opening Stock)" process.
-  // Using the formula: initialStock = p.currentStock - totalProcured + totalSold as fallback or p.initialStock directly.
   const openingStockValueCost = products
-    .filter(p => p.status !== 'inactive')
+    .filter(p => !isInactiveStatus(p.status))
     .reduce((sum, p) => {
       const totalProcured = (purchases || [])
-        .filter(pur => pur.status !== 'VOID' && pur.status !== 'voided')
+        .filter(pur => !isVoidStatus(pur.status))
         .reduce((s, pur) => {
           const items = getNormalizedItems(pur);
           const matchedItem = items.find(item => item.productId === p.id);
           return s + (matchedItem ? matchedItem.quantity : 0);
         }, 0);
       const totalSold = (sales || [])
-        .filter(sale => sale.status !== 'VOID' && sale.status !== 'voided')
+        .filter(sale => !isVoidStatus(sale.status))
         .reduce((s, sale) => {
           const items = getNormalizedItems(sale);
           const matchedItem = items.find(item => item.productId === p.id);
@@ -410,17 +680,17 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
     }, 0);
 
   const openingStockValueRetail = products
-    .filter(p => p.status !== 'inactive')
+    .filter(p => !isInactiveStatus(p.status))
     .reduce((sum, p) => {
       const totalProcured = (purchases || [])
-        .filter(pur => pur.status !== 'VOID' && pur.status !== 'voided')
+        .filter(pur => !isVoidStatus(pur.status))
         .reduce((s, pur) => {
           const items = getNormalizedItems(pur);
           const matchedItem = items.find(item => item.productId === p.id);
           return s + (matchedItem ? matchedItem.quantity : 0);
         }, 0);
       const totalSold = (sales || [])
-        .filter(sale => sale.status !== 'VOID' && sale.status !== 'voided')
+        .filter(sale => !isVoidStatus(sale.status))
         .reduce((s, sale) => {
           const items = getNormalizedItems(sale);
           const matchedItem = items.find(item => item.productId === p.id);
@@ -433,51 +703,85 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       return sum + (openingQty * p.sellingPrice);
     }, 0);
 
-  // 5. Customer Due (Sum of receivables)
-  const totalCustomerDue = customers
-    .filter(c => c.status !== 'inactive')
-    .reduce((sum, c) => sum + (c.dueBalance || 0), 0);
+  // 5. Customer Due (Sum of receivables) - Ledger-Backed
+  const totalCustomerDue = useMemo(() => {
+    let debits = 0;
+    let credits = 0;
+    ledgerEntries.forEach(entry => {
+      if (entry.postingStatus !== 'POSTED') return;
+      entry.lines.forEach(line => {
+        if (line.accountCode === '1200') {
+          debits += line.debit || 0;
+          credits += line.credit || 0;
+        }
+      });
+    });
+    return Math.max(0, debits - credits);
+  }, [ledgerEntries]);
 
-  // 6. Supplier Due (Sum of payables)
-  const totalSupplierDue = suppliers
-    .filter(s => s.status !== 'inactive')
-    .reduce((sum, s) => sum + (s.dueBalance || 0), 0);
+  // 6. Supplier Due (Sum of payables) - Ledger-Backed
+  const totalSupplierDue = useMemo(() => {
+    let debits = 0;
+    let credits = 0;
+    ledgerEntries.forEach(entry => {
+      if (entry.postingStatus !== 'POSTED') return;
+      entry.lines.forEach(line => {
+        if (line.accountCode === '2100') {
+          debits += line.debit || 0;
+          credits += line.credit || 0;
+        }
+      });
+    });
+    return Math.max(0, credits - debits);
+  }, [ledgerEntries]);
 
   // Customer Credit (Total credit balance/prepaid balances from customers)
   const totalCustomerCredit = customers
-    .filter(c => c.status !== 'inactive')
+    .filter(c => !isInactiveStatus(c.status))
     .reduce((sum, c) => sum + (c.customerCredit || 0), 0);
 
   // Total Purchases Sum (All-time valid purchases)
   const totalPurchasesSum = purchases
-    .filter(p => p.status !== 'VOID' && p.status !== 'voided')
+    .filter(p => !isVoidStatus(p.status))
     .reduce((sum, p) => sum + p.totalAmount, 0);
 
-  // 7. Cash accounting calculations with capital support
+  // 7. Cash accounting calculations with capital support - Ledger-Backed
+  const ledgerCashMetrics = useMemo(() => {
+    let debits = 0;
+    let credits = 0;
+    ledgerEntries.forEach(entry => {
+      if (entry.postingStatus !== 'POSTED') return;
+      entry.lines.forEach(line => {
+        if (line.accountCode === '1100' || line.accountCode === '1010') {
+          debits += line.debit || 0;
+          credits += line.credit || 0;
+        }
+      });
+    });
+    return {
+      cashInHand: debits - credits,
+      totalInflow: debits,
+      totalOutflow: credits
+    };
+  }, [ledgerEntries]);
+
+  const cashInHand = ledgerCashMetrics.cashInHand;
+  const totalInflow = ledgerCashMetrics.totalInflow;
+  const totalOutflow = ledgerCashMetrics.totalOutflow;
+  const netMovement = totalInflow - totalOutflow;
   const startingCapital = capital.reduce((sum, entry) => sum + entry.amount, 0);
   const initialCapital = startingCapital;
 
-  const totalInflow = cashLedger
-    .filter(entry => entry.type === 'inflow' && entry.status !== 'voided' && entry.status !== 'VOID')
-    .reduce((sum, entry) => sum + entry.amount, 0);
-
-  const totalOutflow = cashLedger
-    .filter(entry => entry.type === 'outflow' && entry.status !== 'voided' && entry.status !== 'VOID')
-    .reduce((sum, entry) => sum + entry.amount, 0);
-
-  const cashInHand = initialCapital + totalInflow - totalOutflow;
-  const netMovement = totalInflow - totalOutflow;
-
   // 7. Low Stock Products list and count
-  const lowStockProductsList = products.filter(p => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert);
+  const lowStockProductsList = products.filter(p => !isInactiveStatus(p.status) && p.currentStock <= p.minimumStockAlert);
   const lowStockCount = lowStockProductsList.length;
 
   // Additional stats: Overall profit margin percentage (excluding tax) (excluding VOID/voided)
-  const overallSalesSubtotal = sales.filter(s => s.status !== 'VOID' && s.status !== 'voided').reduce((sum, s) => sum + getSaleSummary(s, products).subtotal, 0);
+  const overallSalesSubtotal = ledgerProfitMetrics.overallSalesSubtotal;
   const averageProfitMargin = overallSalesSubtotal > 0 ? (salesProfitValue / overallSalesSubtotal) * 100 : 0;
 
   // --- Dynamic Graph Coordinates Processing (Pure Vector Line Graphs) ---
-  // Generate beautiful line coordinates for daily sales trend
+  // Generate beautiful line coordinates for daily sales trend - Ledger-Backed
   const dailySalesTrendMap: Record<string, number> = {};
   
   // Initialize last 7 days of dates up to June 1, 2026 for a beautiful smooth trend chart
@@ -488,12 +792,17 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
     dailySalesTrendMap[dateString] = 0;
   }
 
-  // Populate sales into trend (excluding VOID/voided)
-  sales.filter(s => s.status !== 'VOID' && s.status !== 'voided').forEach(s => {
-    if (!s.saleDate) return;
-    const dateString = s.saleDate.split('T')[0];
+  // Populate sales into trend from posted ledgerEntries for account 4100 (Revenue)
+  ledgerEntries.forEach(entry => {
+    if (entry.postingStatus !== 'POSTED') return;
+    const postingDate = entry.postingDate || entry.createdAt;
+    const dateString = postingDate.split('T')[0];
     if (dailySalesTrendMap[dateString] !== undefined) {
-      dailySalesTrendMap[dateString] += s.totalAmount;
+      entry.lines.forEach(line => {
+        if (line.accountCode === '4100') {
+          dailySalesTrendMap[dateString] += line.credit || 0;
+        }
+      });
     }
   });
 
@@ -742,7 +1051,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
               <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Products</span>
             </div>
             <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1">
-              {products.filter(p => p.status !== 'inactive').length} Items
+              {products.filter(p => !isInactiveStatus(p.status)).length} Items
             </h3>
           </div>
           <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
@@ -766,7 +1075,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
               <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Customers</span>
             </div>
             <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1">
-              {customers.filter(c => c.status !== 'inactive').length} Profiles
+              {customers.filter(c => !isInactiveStatus(c.status)).length} Profiles
             </h3>
           </div>
           <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
@@ -790,7 +1099,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
               <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Suppliers</span>
             </div>
             <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1">
-              {suppliers.filter(s => s.status !== 'inactive').length} Partners
+              {suppliers.filter(s => !isInactiveStatus(s.status)).length} Partners
             </h3>
           </div>
           <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
@@ -978,122 +1287,241 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
         </motion.div>
 
         {/* CARD 11: Total Profit */}
-        <motion.div
-          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(34,197,94,0.5)" }}
-          transition={{ duration: 0.2 }}
-          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#22C55E]/30 rounded-xl sm:rounded-[1.5rem] shadow-[0_0_25px_rgba(34,197,94,0.06)] hover:shadow-[0_8px_35px_rgba(34,197,94,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] lg:col-span-2 h-full relative overflow-hidden group"
-        >
-          <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-[#22C55E]/10 to-transparent rounded-full blur-3xl pointer-events-none group-hover:scale-110 transition-transform"></div>
-          <div className="space-y-4">
-            <div className="flex items-center gap-3.5">
-              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-[#22C55E] shrink-0 ring-2 ring-white/15 shadow-[0_0_15px_rgba(34,197,94,0.4)] group-hover:scale-105 transition-transform duration-300">
-                <Sparkles className="h-5 w-5 text-white animate-pulse" />
+        {permissions?.viewProductCost !== false && (
+          <motion.div
+            whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(34,197,94,0.5)" }}
+            transition={{ duration: 0.2 }}
+            className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#22C55E]/30 rounded-xl sm:rounded-[1.5rem] shadow-[0_0_25px_rgba(34,197,94,0.06)] hover:shadow-[0_8px_35px_rgba(34,197,94,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] lg:col-span-2 h-full relative overflow-hidden group"
+          >
+            <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-[#22C55E]/10 to-transparent rounded-full blur-3xl pointer-events-none group-hover:scale-110 transition-transform"></div>
+            <div className="space-y-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-[#22C55E] shrink-0 ring-2 ring-white/15 shadow-[0_0_15px_rgba(34,197,94,0.4)] group-hover:scale-105 transition-transform duration-300">
+                  <Sparkles className="h-5 w-5 text-white animate-pulse" />
+                </div>
+                <span className="text-[10px] font-bold text-[#22C55E] uppercase tracking-widest font-sans">Total Profit</span>
               </div>
-              <span className="text-[10px] font-bold text-[#22C55E] uppercase tracking-widest font-sans">Total Profit</span>
+              
+              <div>
+                <h3 className="text-2xl xs:text-3xl sm:text-4xl font-extrabold tracking-tight text-[#22C55E] font-mono">
+                  ${salesProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </h3>
+                <p className="text-[10px] text-[#93A3B8] mt-1 font-sans font-medium tracking-wide">Gross accumulated trading profit margins</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 border-t border-[#1E2A44]/65 pt-3 w-full text-sans">
+                <div>
+                  <span className="text-[9px] font-bold text-[#93A3B8] uppercase tracking-wider block">Cash Profit</span>
+                  <span className="text-sm xs:text-base font-black text-[#22C55E] block mt-0.5 font-mono">
+                    ${cashProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="border-l border-[#1E2A44]/70 pl-4">
+                  <span className="text-[9px] font-bold text-[#93A3B8] uppercase tracking-wider block">Credit Profit</span>
+                  <span className="text-sm xs:text-base font-black text-[#4F7BFF] block mt-0.5 font-mono">
+                    ${creditProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+              </div>
             </div>
             
-            <div>
-              <h3 className="text-2xl xs:text-3xl sm:text-4xl font-extrabold tracking-tight text-[#22C55E] font-mono">
-                ${salesProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </h3>
-              <p className="text-[10px] text-[#93A3B8] mt-1 font-sans font-medium tracking-wide">Gross accumulated trading profit margins</p>
+            <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+              <span className="opacity-80">Gross trade margins</span>
+              <span className="font-bold text-white font-mono bg-[#1E2A44]/90 px-3 py-1 rounded-lg border border-[#1E2A44]/80">{averageProfitMargin.toFixed(1)}% Avg Margin</span>
             </div>
-
-            <div className="grid grid-cols-2 gap-4 border-t border-[#1E2A44]/65 pt-3 w-full text-sans">
-              <div>
-                <span className="text-[9px] font-bold text-[#93A3B8] uppercase tracking-wider block">Cash Profit</span>
-                <span className="text-sm xs:text-base font-black text-[#22C55E] block mt-0.5 font-mono">
-                  ${cashProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
-              </div>
-              <div className="border-l border-[#1E2A44]/70 pl-4">
-                <span className="text-[9px] font-bold text-[#93A3B8] uppercase tracking-wider block">Credit Profit</span>
-                <span className="text-sm xs:text-base font-black text-[#4F7BFF] block mt-0.5 font-mono">
-                  ${creditProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
-              </div>
-            </div>
-          </div>
-          
-          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
-            <span className="opacity-80">Gross trade margins</span>
-            <span className="font-bold text-white font-mono bg-[#1E2A44]/90 px-3 py-1 rounded-lg border border-[#1E2A44]/80">{averageProfitMargin.toFixed(1)}% Avg Margin</span>
-          </div>
-        </motion.div>
+          </motion.div>
+        )}
 
         {/* CARD 12: Original Opening Stock Value */}
-        <motion.div
-          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(79,123,255,0.3)" }}
-          transition={{ duration: 0.2 }}
-          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(79,123,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
-        >
-          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#4F7BFF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
-          <div className="space-y-4">
-            <div className="flex items-center gap-3.5">
-              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#4F7BFF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(79,123,255,0.35)] group-hover:scale-105 transition-transform duration-300">
-                <Archive className="h-5 w-5 text-white" />
+        {permissions?.viewProductCost !== false && (
+          <motion.div
+            whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(79,123,255,0.3)" }}
+            transition={{ duration: 0.2 }}
+            className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(79,123,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
+          >
+            <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#4F7BFF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+            <div className="space-y-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#4F7BFF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(79,123,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                  <Archive className="h-5 w-5 text-white" />
+                </div>
+                <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Opening Stock Value</span>
               </div>
-              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Opening Stock Value</span>
+
+              <div>
+                <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] font-mono">
+                  ${openingStockValueCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </h3>
+                <p className="text-[10px] text-[#93A3B8] mt-1 font-sans">Cost base setup valuation</p>
+              </div>
+
+              <div className="border-t border-[#1E2A44]/65 pt-3.5">
+                <span className="text-[9px] font-bold text-[#93A3B8] uppercase block font-sans tracking-wide">Opening Stock Retail Value</span>
+                <span className="text-xs xs:text-sm font-extrabold text-[#4F7BFF] block mt-0.5 font-mono">
+                  ${openingStockValueRetail.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
             </div>
 
-            <div>
-              <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] font-mono">
-                ${openingStockValueCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </h3>
-              <p className="text-[10px] text-[#93A3B8] mt-1 font-sans">Cost base setup valuation</p>
+            <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+              <span className="opacity-80">Setup reserve base</span>
+              <span className="text-[#00D4FF] font-mono text-[9px] font-bold tracking-wider bg-[#1E2A44] px-2 py-0.5 rounded border border-[#1E2A44]/80">INITIAL</span>
             </div>
-
-            <div className="border-t border-[#1E2A44]/65 pt-3.5">
-              <span className="text-[9px] font-bold text-[#93A3B8] uppercase block font-sans tracking-wide">Opening Stock Retail Value</span>
-              <span className="text-xs xs:text-sm font-extrabold text-[#4F7BFF] block mt-0.5 font-mono">
-                ${openingStockValueRetail.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </span>
-            </div>
-          </div>
-
-          <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
-            <span className="opacity-80">Setup reserve base</span>
-            <span className="text-[#00D4FF] font-mono text-[9px] font-bold tracking-wider bg-[#1E2A44] px-2 py-0.5 rounded border border-[#1E2A44]/80">INITIAL</span>
-          </div>
-        </motion.div>
+          </motion.div>
+        )}
 
         {/* CARD 13: Current Inventory Value */}
-        <motion.div
-          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(59,130,246,0.4)" }}
-          transition={{ duration: 0.2 }}
-          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#3B82F6]/25 rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(59,130,246,0.08)] hover:shadow-[0_8px_30px_rgba(59,130,246,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
-        >
-          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#3B82F6]/10 to-transparent rounded-full blur-2xl pointer-events-none"></div>
-          <div className="space-y-4">
-            <div className="flex items-center gap-3.5">
-              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#3B82F6] to-[#60A5FA] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(59,130,246,0.35)] group-hover:scale-105 transition-transform duration-300">
-                <Briefcase className="h-5 w-5 text-white" />
+        {permissions?.viewProductCost !== false && (
+          <motion.div
+            whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(59,130,246,0.4)" }}
+            transition={{ duration: 0.2 }}
+            className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#3B82F6]/25 rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(59,130,246,0.08)] hover:shadow-[0_8px_30px_rgba(59,130,246,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
+          >
+            <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#3B82F6]/10 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+            <div className="space-y-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#3B82F6] to-[#60A5FA] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(59,130,246,0.35)] group-hover:scale-105 transition-transform duration-300">
+                  <Briefcase className="h-5 w-5 text-white" />
+                </div>
+                <span className="text-[10px] font-bold text-[#3B82F6] uppercase tracking-widest font-sans opacity-95">Current Inventory Value</span>
               </div>
-              <span className="text-[10px] font-bold text-[#3B82F6] uppercase tracking-widest font-sans opacity-95">Current Inventory Value</span>
+
+              <div>
+                <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#3B82F6] font-mono">
+                  ${totalPurchaseValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </h3>
+                <p className="text-[10px] text-[#93A3B8] mt-1 font-sans">Active tied assets (at Cost Price)</p>
+              </div>
+
+              <div className="border-t border-[#1E2A44]/65 pt-3.5">
+                <span className="text-[9px] font-bold text-[#93A3B8] uppercase block font-sans tracking-wide">Valuation Form</span>
+                <span className="text-[10px] text-[#93A3B8] block mt-0.5">
+                  Purchase Price × Stock count
+                </span>
+              </div>
             </div>
 
-            <div>
-              <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#3B82F6] font-mono">
-                ${totalPurchaseValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </h3>
-              <p className="text-[10px] text-[#93A3B8] mt-1 font-sans">Active tied assets (at Cost Price)</p>
+            <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+              <span className="opacity-80">Inventory live capital</span>
+              <span className="text-[#3B82F6] font-mono text-[9px] font-bold tracking-wider bg-blue-950/40 px-2.5 py-1 rounded border border-[#3B82F6]/20">ASSET BASIS</span>
             </div>
-
-            <div className="border-t border-[#1E2A44]/65 pt-3.5">
-              <span className="text-[9px] font-bold text-[#93A3B8] uppercase block font-sans tracking-wide">Valuation Form</span>
-              <span className="text-[10px] text-[#93A3B8] block mt-0.5">
-                Purchase Price × Stock count
-              </span>
-            </div>
-          </div>
-
-          <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
-            <span className="opacity-80">Inventory live capital</span>
-            <span className="text-[#3B82F6] font-mono text-[9px] font-bold tracking-wider bg-blue-950/40 px-2.5 py-1 rounded border border-[#3B82F6]/20">ASSET BASIS</span>
-          </div>
-        </motion.div>
+          </motion.div>
+        )}
 
       </div>
+
+      {/* ENTERPRISE EXPENSE OPERATIONS */}
+      {permissions?.viewExpenses !== false && (
+        <div className="pt-2 border-t border-[#1E2A44]/30 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-bold text-white uppercase tracking-widest flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
+              Enterprise Expense Operations
+            </h3>
+            <span className="text-[10px] font-mono text-[#8FA2B9] bg-[#1E2A44]/40 border border-[#1E2A44] px-2.5 py-0.5 rounded-full">
+              GAAP compliant • {expenses.filter(e => !isVoidStatus(e.status)).length} Active Tx
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 sm:gap-6 sm:grid-cols-2 lg:grid-cols-4 font-sans">
+            {/* Card 1: Total Expense */}
+            <motion.div
+              whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(239,68,68,0.3)" }}
+              transition={{ duration: 0.2 }}
+              className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(239,68,68,0.08)] hover:shadow-[0_8px_30px_rgba(239,68,68,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[140px] h-full relative overflow-hidden group"
+            >
+              <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-rose-500/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-gradient-to-tr from-rose-500 to-amber-500 shrink-0 ring-1 ring-white/10 shadow-[0_0_10px_rgba(239,68,68,0.3)]">
+                    <TrendingDown className="h-4.5 w-4.5 text-white" />
+                  </div>
+                  <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Expense</span>
+                </div>
+                <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-white pt-1 font-mono">
+                  ${totalExpensesValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </h3>
+              </div>
+              <div className="mt-3 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+                <span className="truncate opacity-80">All-time active OpEx</span>
+                <span className="text-rose-400 font-bold">Ledger Match</span>
+              </div>
+            </motion.div>
+
+            {/* Card 2: Monthly Expense */}
+            <motion.div
+              whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(245,158,11,0.3)" }}
+              transition={{ duration: 0.2 }}
+              className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(245,158,11,0.08)] hover:shadow-[0_8px_30px_rgba(245,158,11,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[140px] h-full relative overflow-hidden group"
+            >
+              <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-amber-500/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-gradient-to-tr from-amber-500 to-yellow-400 shrink-0 ring-1 ring-white/10 shadow-[0_0_10px_rgba(245,158,11,0.3)]">
+                    <Calendar className="h-4.5 w-4.5 text-white" />
+                  </div>
+                  <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Monthly Expense</span>
+                </div>
+                <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-white pt-1 font-mono">
+                  ${monthlyExpensesValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </h3>
+              </div>
+              <div className="mt-3 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+                <span className="truncate opacity-80">Current Month cycle</span>
+                <span className="text-amber-400 font-bold">June 2026</span>
+              </div>
+            </motion.div>
+
+            {/* Card 3: Today's Expense */}
+            <motion.div
+              whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(59,130,246,0.3)" }}
+              transition={{ duration: 0.2 }}
+              className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(59,130,246,0.08)] hover:shadow-[0_8px_30px_rgba(59,130,246,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[140px] h-full relative overflow-hidden group"
+            >
+              <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-blue-500/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-gradient-to-tr from-[#3B82F6] to-[#60A5FA] shrink-0 ring-1 ring-white/10 shadow-[0_0_10px_rgba(59,130,246,0.3)]">
+                    <Clock className="h-4.5 w-4.5 text-white" />
+                  </div>
+                  <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Today's Expense</span>
+                </div>
+                <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-white pt-1 font-mono">
+                  ${todaysExpensesValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </h3>
+              </div>
+              <div className="mt-3 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+                <span className="truncate opacity-80">Today's operating costs</span>
+                <span className="text-blue-400 font-bold">Real-time</span>
+              </div>
+            </motion.div>
+
+            {/* Card 4: Largest Expense */}
+            <motion.div
+              whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(139,92,246,0.3)" }}
+              transition={{ duration: 0.2 }}
+              className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(139,92,246,0.08)] hover:shadow-[0_8px_30px_rgba(139,92,246,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[140px] h-full relative overflow-hidden group"
+            >
+              <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-violet-500/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-gradient-to-tr from-violet-500 to-fuchsia-500 shrink-0 ring-1 ring-white/10 shadow-[0_0_10px_rgba(139,92,246,0.3)]">
+                    <DollarSign className="h-4.5 w-4.5 text-white" />
+                  </div>
+                  <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Largest Expense</span>
+                </div>
+                <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-white pt-1 font-mono">
+                  ${largestExpenseValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </h3>
+              </div>
+              <div className="mt-3 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+                <span className="truncate opacity-80">Peak transaction record</span>
+                <span className="text-violet-400 font-bold">Highest Tx</span>
+              </div>
+            </motion.div>
+          </div>
+        </div>
+      )}
 
       {/* CHARTS CONTAINER VISUALIZERS */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">

@@ -17,6 +17,18 @@ import { db, auth, logSystemActivity } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc } from 'firebase/firestore';
 import { AppPermissions, UserRole, ROLE_PERMISSIONS_TEMPLATES } from '../hooks/usePermission';
 
+const mergePrivileges = (role: UserRole, dbPrivs?: Partial<AppPermissions>): AppPermissions => {
+  const template = ROLE_PERMISSIONS_TEMPLATES[role];
+  if (!dbPrivs) return { ...template };
+  const merged = { ...template };
+  for (const key of Object.keys(template) as Array<keyof AppPermissions>) {
+    if (dbPrivs[key] !== undefined) {
+      merged[key] = dbPrivs[key] as boolean;
+    }
+  }
+  return merged;
+};
+
 const ROLE_LABELS: Record<UserRole, string> = {
   owner: '👑 Owner / Founder',
   admin: '🔒 Administrator',
@@ -93,6 +105,12 @@ const PRIVILEGES_BY_CATEGORY: Record<string, PrivilegeMeta[]> = {
     { key: 'viewReports', label: 'Audit Stock Log Reports', description: 'Verify warehouse item histories and system logs.' },
     { key: 'viewFinancialReports', label: 'Access Balance Sheet Reports', description: 'Inspect corporate balance sheet, profit and loss, assets & liabilities.' }
   ],
+  'Expenses': [
+    { key: 'viewExpenses', label: 'View Expenses', description: 'Enable browsing and inspection of the corporate Expense list.' },
+    { key: 'createExpense', label: 'Create Expense', description: 'Register new corporate expenditures and cash ledger outflows.' },
+    { key: 'editExpense', label: 'Update Expense Details', description: 'Amend existing active expenses and category tags.' },
+    { key: 'voidExpense', label: 'Void Expense Transaction', description: 'Mark expenses as void, restoring balance sheets and cash ledger.' }
+  ],
   'User Access': [
     { key: 'viewUsers', label: 'Examine Security Directory', description: 'View current active employee credentials.' },
     { key: 'manageUsers', label: 'Manage Identity Directory', description: 'Approve profiles or trigger security checks.' },
@@ -109,7 +127,7 @@ const PRIVILEGES_BY_CATEGORY: Record<string, PrivilegeMeta[]> = {
 const TOTAL_PRIVILEGES_COUNT = Object.values(PRIVILEGES_BY_CATEGORY).reduce((sum, list) => sum + list.length, 0);
 
 interface PrivilegeMatrixProps {
-  currentUserRole: UserRole | string;
+  currentUserRole: UserRole;
 }
 
 export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProps) {
@@ -131,6 +149,7 @@ export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProp
     Sales: false,
     Procurement: false,
     Reports: false,
+    Expenses: false,
     'User Access': false,
     System: false,
   });
@@ -166,7 +185,7 @@ export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProp
     if (!selectedRole || loading) return;
 
     const data = dbRoles[selectedRole];
-    const initialPrivileges = data?.privileges || { ...ROLE_PERMISSIONS_TEMPLATES[selectedRole] };
+    const initialPrivileges = mergePrivileges(selectedRole, data?.privileges);
     setDraftPrivileges(initialPrivileges);
     setSaveStatus(null);
   }, [selectedRole, dbRoles, loading]);
@@ -211,7 +230,7 @@ export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProp
   // Highlight modified fields
   const hasUnsavedChanges = () => {
     if (!draftPrivileges) return false;
-    const original = dbRoles[selectedRole]?.privileges || ROLE_PERMISSIONS_TEMPLATES[selectedRole];
+    const original = mergePrivileges(selectedRole, dbRoles[selectedRole]?.privileges);
     
     return Object.keys(original).some(key => {
       const pKey = key as keyof AppPermissions;
@@ -238,6 +257,119 @@ export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProp
       nextStates[c] = expanded;
     });
     setExpandedCategories(nextStates);
+  };
+
+  const getBaselineStatus = (roleKey: UserRole, roleData?: any) => {
+    if (roleKey === 'owner') return 'default';
+
+    const privileges = mergePrivileges(roleKey, roleData?.privileges);
+    const baseline = mergePrivileges(roleKey, roleData?.ownerBaselinePrivileges);
+
+    // Deep compare all keys
+    const isIdentical = Object.keys(ROLE_PERMISSIONS_TEMPLATES[roleKey]).every(key => {
+      const k = key as keyof AppPermissions;
+      return privileges[k] === baseline[k];
+    });
+
+    if (isIdentical) {
+      return 'default'; // Using Company Default
+    }
+
+    const baselineTime = roleData?.baselineUpdatedTime;
+    const lastUpdateTime = roleData?.lastUpdatedTime;
+
+    if (baselineTime && lastUpdateTime && new Date(baselineTime) > new Date(lastUpdateTime)) {
+      return 'updated'; // Owner Baseline Updated
+    }
+
+    return 'customized'; // Customized
+  };
+
+  const handleSaveAsDefault = async () => {
+    if (currentUserRole !== 'owner' || selectedRole === 'owner' || saving || !draftPrivileges) return;
+    
+    setSaving(true);
+    setSaveStatus(null);
+    try {
+      const userEmail = auth.currentUser?.email || 'authorized_owner';
+      const timestamp = new Date().toISOString();
+      const docRef = doc(db, 'rolePermissions', selectedRole);
+
+      // Save draftPrivileges as both active privileges and ownerBaselinePrivileges
+      await setDoc(docRef, {
+        role: selectedRole,
+        privileges: draftPrivileges,
+        ownerBaselinePrivileges: draftPrivileges,
+        baselineUpdatedBy: userEmail,
+        baselineUpdatedTime: timestamp,
+        lastUpdatedBy: userEmail,
+        lastUpdatedTime: timestamp
+      });
+
+      await logSystemActivity(
+        'Baseline Saved',
+        `Determined official "${selectedRole.toUpperCase()}" company default baseline privileges by ${userEmail}`
+      );
+
+      setSaveStatus({ 
+        type: 'success', 
+        text: `Official Company Default Baseline for "${ROLE_LABELS[selectedRole]}" has been established and synchronized.` 
+      });
+    } catch (err: any) {
+      console.error(err);
+      setSaveStatus({ type: 'error', text: err?.message || 'Access Denied. See security permissions.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleResetToDefault = async () => {
+    if (currentUserRole !== 'owner' || selectedRole === 'owner' || saving) return;
+
+    const baseline = dbRoles[selectedRole]?.ownerBaselinePrivileges || ROLE_PERMISSIONS_TEMPLATES[selectedRole];
+    
+    const confirmReset = window.confirm(
+      `Are you sure you want to restore "${ROLE_LABELS[selectedRole]}" privileges back to Owner defaults?\nThis will revert all custom edits.`
+    );
+    if (!confirmReset) return;
+
+    setSaving(true);
+    setSaveStatus(null);
+
+    try {
+      const userEmail = auth.currentUser?.email || 'authorized_owner';
+      const timestamp = new Date().toISOString();
+      const docRef = doc(db, 'rolePermissions', selectedRole);
+
+      // Restore active privileges back to ownerBaselinePrivileges, while keeping baseline field itself unchanged
+      await setDoc(docRef, {
+        role: selectedRole,
+        privileges: baseline,
+        ownerBaselinePrivileges: baseline,
+        baselineUpdatedBy: dbRoles[selectedRole]?.baselineUpdatedBy || 'system_auto_seed',
+        baselineUpdatedTime: dbRoles[selectedRole]?.baselineUpdatedTime || timestamp,
+        lastUpdatedBy: userEmail,
+        lastUpdatedTime: timestamp
+      });
+
+      // Update local draft as well
+      setDraftPrivileges({ ...baseline });
+
+      await logSystemActivity(
+        'Baseline Reset',
+        `Restored "${selectedRole.toUpperCase()}" to Owner baseline template by ${userEmail}`
+      );
+
+      setSaveStatus({ 
+        type: 'success', 
+        text: `Successfully restored "${ROLE_LABELS[selectedRole]}" back to the configured Company Default Baseline.` 
+      });
+    } catch (err: any) {
+      console.error(err);
+      setSaveStatus({ type: 'error', text: err?.message || 'Access Denied. Revert operation aborted.' });
+    } finally {
+      setSaving(false);
+    }
   };
 
   // Save changes via standard Firebase SDK
@@ -274,7 +406,7 @@ export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProp
 
   // Reset to Loaded state
   const handleDiscard = () => {
-    const original = dbRoles[selectedRole]?.privileges || ROLE_PERMISSIONS_TEMPLATES[selectedRole];
+    const original = mergePrivileges(selectedRole, dbRoles[selectedRole]?.privileges);
     setDraftPrivileges({ ...original });
     setSaveStatus(null);
   };
@@ -335,7 +467,7 @@ export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProp
                     ? (roleKey !== 'owner' && roleKey !== 'admin')
                     : false;
 
-                const loadedPermissions = dbRoles[roleKey]?.privileges || ROLE_PERMISSIONS_TEMPLATES[roleKey];
+                const loadedPermissions = mergePrivileges(roleKey, dbRoles[roleKey]?.privileges);
                 const activeCount = Object.values(loadedPermissions).filter(val => val === true).length;
 
                 return (
@@ -367,7 +499,7 @@ export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProp
                         <p className="text-[10px] text-slate-430 mt-0.5 line-clamp-1">{ROLE_SUBTITLES[roleKey]}</p>
                       </div>
 
-                      <div className="flex flex-col items-end gap-1.5">
+                      <div className="flex flex-col items-end gap-1 flex-shrink-0">
                         <span className={`font-mono text-[9px] font-bold px-2 py-0.5 rounded-full ${
                           isActive 
                             ? 'bg-indigo-100 text-indigo-700' 
@@ -375,6 +507,31 @@ export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProp
                         }`}>
                           {activeCount}/{TOTAL_PRIVILEGES_COUNT} Actives
                         </span>
+                        
+                        {roleKey !== 'owner' && (
+                          (() => {
+                            const status = getBaselineStatus(roleKey, dbRoles[roleKey]);
+                            if (status === 'default') {
+                              return (
+                                <span className="inline-flex items-center gap-0.5 font-mono text-[8px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-100 px-1.5 py-0.2 rounded" title="Using Company Default">
+                                  🟢 DEFAULT
+                                </span>
+                              );
+                            } else if (status === 'updated') {
+                              return (
+                                <span className="inline-flex items-center gap-0.5 font-mono text-[8px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-1.5 py-0.2 rounded animate-pulse" title="Owner Baseline Updated">
+                                  🔵 UPDATED
+                                </span>
+                              );
+                            } else {
+                              return (
+                                <span className="inline-flex items-center gap-0.5 font-mono text-[8px] font-bold text-amber-600 bg-amber-50 border border-amber-100 px-1.5 py-0.2 rounded" title="Customized">
+                                  🟡 CUSTOM
+                                </span>
+                              );
+                            }
+                          })()
+                        )}
                         
                         {!editable && (
                           <span className="font-mono text-[8px] text-rose-500 bg-rose-50 px-1.5 py-0.2 rounded border border-rose-100 flex items-center gap-0.5 scale-95" title="Read Only Level">
@@ -403,7 +560,7 @@ export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProp
                 <span className="bg-indigo-600 text-white font-mono text-[9px] font-extrabold px-2.5 py-1 rounded-md tracking-widest uppercase">
                   Active Directory Configuration
                 </span>
-                <h3 className="font-sans text-base font-bold text-slate-50 flex items-center gap-1.5 mt-1">
+                <h3 className="font-sans text-base font-bold text-slate-50 flex flex-wrap items-center gap-1.5 mt-1">
                   <span>{ROLE_LABELS[selectedRole]}</span>
                   {isEditable ? (
                     <span className="font-mono text-[9px] font-bold text-emerald-400 bg-emerald-950/50 border border-emerald-900/60 rounded px-1.5 py-0.5 flex items-center gap-0.5">
@@ -415,6 +572,30 @@ export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProp
                       <Lock className="w-2.5 h-2.5" />
                       Read Only Blocked
                     </span>
+                  )}
+                  {selectedRole !== 'owner' && (
+                    (() => {
+                      const status = getBaselineStatus(selectedRole, dbRoles[selectedRole]);
+                      if (status === 'default') {
+                        return (
+                          <span className="font-mono text-[9px] font-bold text-emerald-400 bg-emerald-950/50 border border-emerald-900/60 rounded px-1.5 py-0.5 flex items-center gap-0.5" title="Using Company Default">
+                            🟢 COMPANY DEFAULT
+                          </span>
+                        );
+                      } else if (status === 'updated') {
+                        return (
+                          <span className="font-mono text-[9px] font-bold text-indigo-400 bg-indigo-950/50 border border-indigo-900/60 rounded px-1.5 py-0.5 flex items-center gap-0.5 animate-pulse" title="Owner Baseline Updated">
+                            🔵 BASELINE UPDATED
+                          </span>
+                        );
+                      } else {
+                        return (
+                          <span className="font-mono text-[9px] font-bold text-amber-400 bg-amber-950/50 border border-amber-900/60 rounded px-1.5 py-0.5 flex items-center gap-0.5" title="Customized">
+                            🟡 CUSTOM OVERRIDES
+                          </span>
+                        );
+                      }
+                    })()
                   )}
                 </h3>
                 <p className="text-[11px] text-slate-350">{ROLE_SUBTITLES[selectedRole]}</p>
@@ -431,6 +612,51 @@ export default function PrivilegeMatrix({ currentUserRole }: PrivilegeMatrixProp
                 </div>
               </div>
             </div>
+
+            {/* OWNER BASELINE CONTROL DECK */}
+            {currentUserRole === 'owner' && selectedRole !== 'owner' && (
+              <div id="owner-baseline-deck" className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-sans text-xs font-bold text-slate-800">Owner Baselines & Reverts</span>
+                    {(() => {
+                      const status = getBaselineStatus(selectedRole, dbRoles[selectedRole]);
+                      if (status === 'default') {
+                        return <span className="font-mono text-[9px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-100 rounded px-1.5 py-0.2">🟢 Synced</span>;
+                      } else if (status === 'updated') {
+                        return <span className="font-mono text-[9px] font-bold text-indigo-100 bg-indigo-50 border border-indigo-200 rounded px-1.5 py-0.2">🔵 Revert Pending</span>;
+                      } else {
+                        return <span className="font-mono text-[9px] font-bold text-amber-600 bg-amber-50 border border-amber-100 rounded px-1.5 py-0.2">🟡 Overridden</span>;
+                      }
+                    })()}
+                  </div>
+                  <p className="text-[10px] text-slate-400">Establish standard templates or instantly roll back employee group permissions.</p>
+                </div>
+                
+                <div className="flex flex-wrap items-center gap-2 self-end sm:self-center">
+                  <button
+                    id="btn-save-as-default"
+                    type="button"
+                    onClick={handleSaveAsDefault}
+                    disabled={saving}
+                    className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg px-3 py-1.5 text-[11px] font-bold shadow-2xs transition-all cursor-pointer font-sans"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>💾 Save As Company Default</span>
+                  </button>
+                  <button
+                    id="btn-reset-to-default"
+                    type="button"
+                    onClick={handleResetToDefault}
+                    disabled={saving}
+                    className="flex items-center gap-1 bg-white border border-slate-200 hover:border-slate-300 disabled:opacity-50 text-slate-700 rounded-lg px-3 py-1.5 text-[11px] font-bold shadow-2xs hover:bg-slate-50 transition-all cursor-pointer font-sans"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
+                    <span>↩️ Reset To Owner Default</span>
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* ERROR / SUCCESS Banner Notifications */}
             {saveStatus && (

@@ -19,9 +19,11 @@ export interface Supplier {
   address?: string;
   paymentType?: 'Cash' | 'Credit';
   dueBalance?: number;
+  supplierAdvance?: number;
   createdDate?: string;
   status?: 'active' | 'inactive';
   vatNumber?: string;
+  updatedAt?: string;
 }
 
 export interface Customer {
@@ -36,6 +38,7 @@ export interface Customer {
   status?: 'active' | 'inactive';
   vatNumber?: string;
   email?: string;
+  updatedAt?: string;
 }
 
 export interface Product {
@@ -56,6 +59,38 @@ export interface Product {
   initialStock?: number;
 }
 
+export interface CustomerSnapshot {
+  id: string;
+  name: string;
+  phone: string;
+  address: string;
+  customerType: 'Cash' | 'Credit';
+  vatNumber?: string;
+  email?: string;
+}
+
+export interface CompanySnapshot {
+  name: string;
+  tradeName?: string;
+  ownerName?: string;
+  taxRegistrationId: string;
+  crNumber?: string;
+  address: string;
+  phone: string;
+  email?: string;
+  website?: string;
+  logo?: string;
+  taxRatePercent: number;
+}
+
+export interface ProductSnapshot {
+  id: string;
+  name: string;
+  sku: string;
+  category: string;
+  description?: string;
+}
+
 export interface LineItem {
   productId: string;
   productName: string;
@@ -65,6 +100,10 @@ export interface LineItem {
   taxRatePercent?: number;
   taxAmount?: number;
   totalAmount: number;
+  purchasePriceAtSale?: number;
+  costOfGoodsSold?: number;
+  grossProfit?: number;
+  productSnapshot?: ProductSnapshot;
 }
 
 export interface Sale {
@@ -88,6 +127,10 @@ export interface Sale {
   costOfGoodsSold?: number;
   grossProfit?: number;
   items?: LineItem[];
+  status?: string;
+  customerSnapshot?: CustomerSnapshot;
+  companySnapshot?: CompanySnapshot;
+  invoiceNumber?: string;
 }
 
 export interface Purchase {
@@ -102,6 +145,13 @@ export interface Purchase {
   paymentType: 'Cash' | 'Credit';
   purchaseDate: string;
   items?: LineItem[];
+  status?: string;
+  invoiceNumber?: string;
+  vatAmount?: number;
+  discountAmount?: number;
+  supplierSnapshot?: any;
+  productSnapshot?: any;
+  companySnapshot?: CompanySnapshot;
 }
 
 export function calculateLineTotals(
@@ -237,7 +287,14 @@ export interface CustomerPayment {
   previousDue: number;
   remainingDue: number;
   paymentDate: string;
+  receiptNumber: string;
+  receiptDate: string;
+  receivedBy: string;
+  referenceNumber?: string;
+  chequeOrBankRef?: string;
   notes: string;
+  status?: string;
+  updatedAt?: string;
 }
 
 export interface SupplierPayment {
@@ -248,17 +305,45 @@ export interface SupplierPayment {
   previousDue: number;
   remainingDue: number;
   paymentDate: string;
+  voucherNumber: string;
+  paidBy: string;
+  referenceNumber?: string;
+  chequeOrBankRef?: string;
   notes: string;
+  status?: string;
+  updatedAt?: string;
 }
 
 export interface CashLedgerEntry {
   id: string;
   type: 'inflow' | 'outflow';
-  source: 'sale' | 'purchase' | 'payment' | 'manual';
+  source: 'sale' | 'purchase' | 'payment' | 'manual' | 'expense';
   amount: number;
   referenceId?: string;
   description: string;
   timestamp: string;
+}
+
+export interface Expense {
+  id: string;
+  expenseNumber: string;
+  expenseDate: string;
+  category: string;
+  vendor: string;
+  description: string;
+  amount: number;
+  paymentMethod: string;
+  referenceNumber: string;
+  status: 'active' | 'void';
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  notes?: string;
+}
+
+export interface ExpenseCategory {
+  id: string;
+  name: string;
 }
 
 export interface Capital {
@@ -268,5 +353,56 @@ export interface Capital {
   note?: string;
   createdBy: string;
 }
+
+export interface ChartOfAccount {
+  id: string;
+  code: string;
+  name: string;
+  type: 'Asset' | 'Liability' | 'Equity' | 'Revenue' | 'Expense';
+  subType?: string;
+  parentAccount?: string;
+  description?: string;
+  normalBalance: 'Debit' | 'Credit';
+  status: 'active' | 'inactive';
+  isSystem: boolean;
+  editable: boolean;
+  systemRole?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface LedgerEntryLine {
+  accountId: string;
+  accountCode: string;
+  accountName: string;
+  debit: number;
+  credit: number;
+  baseCurrencyDebit: number;
+  baseCurrencyCredit: number;
+}
+
+export interface LedgerEntry {
+  id: string;
+  postingNumber: string;
+  companyId: string;
+  branchId: string;
+  fiscalYear: number;
+  accountingPeriod: string;
+  sourceModule: 'SALES' | 'PROCUREMENT' | 'EXPENSE' | 'CUSTOMER_PAYMENT' | 'SUPPLIER_PAYMENT' | 'CAPITAL' | 'OPENING_BALANCE' | 'STOCK_ADJUSTMENT' | 'MANUAL_JOURNAL' | 'YEAR_CLOSING' | 'SYSTEM';
+  postingStatus: 'POSTED' | 'REVERSED' | 'PENDING' | 'FAILED' | 'LOCKED';
+  currency: string;
+  exchangeRate: number;
+  baseCurrencyCode: string;
+  version: number;
+  narration: string;
+  createdFrom: string;
+  approvalStatus: 'PENDING' | 'APPROVED' | 'REJECTED';
+  postingDate: string;
+  createdAt: string;
+  createdBy: string;
+  lines: LedgerEntryLine[];
+  originalEntryId?: string;
+}
+
 
 

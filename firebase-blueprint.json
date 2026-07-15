@@ -144,7 +144,10 @@
         "productPurchasePriceAtSale": { "type": "number" },
         "productSellingPriceAtSale": { "type": "number" },
         "costOfGoodsSold": { "type": "number" },
-        "grossProfit": { "type": "number" }
+        "grossProfit": { "type": "number" },
+        "invoiceNumber": { "type": "string" },
+        "customerSnapshot": { "type": "object" },
+        "companySnapshot": { "type": "object" }
       },
       "required": ["id", "customerId", "customerName", "productId", "productName", "quantity", "sellingPrice", "unitPrice", "subtotal", "taxRatePercent", "taxAmount", "totalAmount", "paymentType", "saleDate", "timestamp"]
     },
@@ -178,9 +181,16 @@
         "previousDue": { "type": "number" },
         "remainingDue": { "type": "number" },
         "paymentDate": { "type": "string" },
-        "notes": { "type": "string" }
+        "receiptNumber": { "type": "string" },
+        "receiptDate": { "type": "string" },
+        "receivedBy": { "type": "string" },
+        "referenceNumber": { "type": "string" },
+        "chequeOrBankRef": { "type": "string" },
+        "notes": { "type": "string" },
+        "status": { "type": "string" },
+        "updatedAt": { "type": "string" }
       },
-      "required": ["id", "customerId", "amountPaid", "previousDue", "remainingDue", "paymentDate"]
+      "required": ["id", "customerId", "amountPaid", "previousDue", "remainingDue", "paymentDate", "receiptNumber", "receiptDate", "receivedBy"]
     },
     "SupplierPayment": {
       "title": "SupplierPayment",
@@ -194,9 +204,15 @@
         "previousDue": { "type": "number" },
         "remainingDue": { "type": "number" },
         "paymentDate": { "type": "string" },
-        "notes": { "type": "string" }
+        "voucherNumber": { "type": "string" },
+        "paidBy": { "type": "string" },
+        "referenceNumber": { "type": "string" },
+        "chequeOrBankRef": { "type": "string" },
+        "notes": { "type": "string" },
+        "status": { "type": "string" },
+        "updatedAt": { "type": "string" }
       },
-      "required": ["id", "supplierId", "amountPaid", "previousDue", "remainingDue", "paymentDate"]
+      "required": ["id", "supplierId", "amountPaid", "previousDue", "remainingDue", "paymentDate", "voucherNumber", "paidBy"]
     },
     "CashLedgerEntry": {
       "title": "CashLedgerEntry",
@@ -252,6 +268,131 @@
         "lastUpdatedTime": { "type": "string" }
       },
       "required": ["role", "privileges", "lastUpdatedBy", "lastUpdatedTime"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "An expense recorded in the system.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "expenseNumber": { "type": "string" },
+        "expenseDate": { "type": "string" },
+        "category": { "type": "string" },
+        "vendor": { "type": "string" },
+        "description": { "type": "string" },
+        "amount": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "referenceNumber": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "void"] },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "required": ["id", "expenseNumber", "expenseDate", "category", "vendor", "description", "amount", "paymentMethod", "referenceNumber", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "ExpenseCategory": {
+      "title": "ExpenseCategory",
+      "description": "A custom expense category.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "FinancialLog": {
+      "title": "FinancialLog",
+      "description": "A financial transaction or audit log entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "action": { "type": "string" },
+        "entityType": { "type": "string" },
+        "entityId": { "type": "string" },
+        "referenceId": { "type": "string" },
+        "performedBy": { "type": "string" },
+        "userRole": { "type": "string" },
+        "customerId": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "productId": { "type": "string" },
+        "amount": { "type": "number" },
+        "paymentType": { "type": "string" },
+        "previousState": { "type": "string" },
+        "newState": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "required": ["id", "timestamp", "action", "entityType", "entityId", "performedBy", "userRole", "amount", "previousState", "newState"]
+    },
+    "ChartOfAccount": {
+      "title": "ChartOfAccount",
+      "description": "An account definition in the Chart of Accounts.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "code": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "type": "string", "enum": ["Asset", "Liability", "Equity", "Revenue", "Expense"] },
+        "subType": { "type": "string" },
+        "parentAccount": { "type": "string" },
+        "description": { "type": "string" },
+        "normalBalance": { "type": "string", "enum": ["Debit", "Credit"] },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "isSystem": { "type": "boolean" },
+        "editable": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "code", "name", "type", "normalBalance", "status", "isSystem", "editable"]
+    },
+    "LedgerEntryLine": {
+      "title": "LedgerEntryLine",
+      "description": "An individual debit or credit line in a ledger entry.",
+      "type": "object",
+      "properties": {
+        "accountId": { "type": "string" },
+        "accountCode": { "type": "string" },
+        "accountName": { "type": "string" },
+        "debit": { "type": "number" },
+        "credit": { "type": "number" },
+        "baseCurrencyDebit": { "type": "number" },
+        "baseCurrencyCredit": { "type": "number" }
+      },
+      "required": ["accountId", "accountCode", "accountName", "debit", "credit", "baseCurrencyDebit", "baseCurrencyCredit"]
+    },
+    "LedgerEntry": {
+      "title": "LedgerEntry",
+      "description": "An immutable double-entry ledger entry header with lines.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "postingNumber": { "type": "string" },
+        "companyId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "fiscalYear": { "type": "integer" },
+        "accountingPeriod": { "type": "string" },
+        "sourceModule": { "type": "string", "enum": ["SALES", "PROCUREMENT", "EXPENSE", "CUSTOMER_PAYMENT", "SUPPLIER_PAYMENT", "CAPITAL", "OPENING_BALANCE", "STOCK_ADJUSTMENT", "MANUAL_JOURNAL", "YEAR_CLOSING", "SYSTEM"] },
+        "postingStatus": { "type": "string", "enum": ["POSTED", "REVERSED", "PENDING", "FAILED", "LOCKED"] },
+        "currency": { "type": "string" },
+        "exchangeRate": { "type": "number" },
+        "baseCurrencyCode": { "type": "string" },
+        "version": { "type": "integer" },
+        "narration": { "type": "string" },
+        "createdFrom": { "type": "string" },
+        "approvalStatus": { "type": "string", "enum": ["PENDING", "APPROVED", "REJECTED"] },
+        "postingDate": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "originalEntryId": { "type": "string" },
+        "lines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/entities/LedgerEntryLine"
+          }
+        }
+      },
+      "required": ["id", "postingNumber", "companyId", "branchId", "fiscalYear", "accountingPeriod", "sourceModule", "postingStatus", "currency", "exchangeRate", "baseCurrencyCode", "version", "narration", "createdFrom", "approvalStatus", "postingDate", "createdAt", "createdBy", "lines"]
     }
   },
   "firestore": {
@@ -314,6 +455,26 @@
     "rolePermissions": {
       "schema": "RolePermission",
       "description": "Dynamic privileges associated with each role."
+    },
+    "expenses": {
+      "schema": "Expense",
+      "description": "Store financial expenditures and corporate receipts."
+    },
+    "expenseCategories": {
+      "schema": "ExpenseCategory",
+      "description": "Store custom business expense categories."
+    },
+    "financialLogs": {
+      "schema": "FinancialLog",
+      "description": "Store financial transaction and change history logs."
+    },
+    "chartOfAccounts": {
+      "schema": "ChartOfAccount",
+      "description": "Store account definitions for the Chart of Accounts."
+    },
+    "ledgerEntries": {
+      "schema": "LedgerEntry",
+      "description": "Store immutable double-entry accounting ledger records."
     }
   }
 }

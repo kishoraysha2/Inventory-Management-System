@@ -25,7 +25,8 @@ import {
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { Product } from '../types';
-import { usePermission } from '../hooks/usePermission';
+import { isInactiveStatus } from '../lib/utils';
+import { usePermission, UserRole } from '../hooks/usePermission';
 
 export const INITIAL_PRODUCTS: Product[] = [
   {
@@ -85,7 +86,7 @@ export const INITIAL_PRODUCTS: Product[] = [
   }
 ];
 
-export default function ProductManagement({ userRole = 'admin' }: { userRole?: string }) {
+export default function ProductManagement({ userRole = 'admin' }: { userRole?: UserRole }) {
   const { permissions } = usePermission({ role: userRole });
 
   // --- States ---
@@ -132,7 +133,11 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: s
     const unsub = onSnapshot(collection(db, 'products'), (snapshot) => {
       const productList: Product[] = [];
       snapshot.forEach((docSnap) => {
-        productList.push(docSnap.data() as Product);
+        const data = docSnap.data() as Product;
+        productList.push({
+          ...data,
+          id: data.id || docSnap.id
+        });
       });
 
       if (productList.length > 0) {
@@ -332,7 +337,11 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: s
       const productsRef = collection(db, 'products');
       const q = query(productsRef, where('sku', '==', finalizedData.sku));
       const querySnapshot = await getDocs(q);
-      const isSkuDuplicate = querySnapshot.docs.some(docSnap => docSnap.id !== productId);
+      const isSkuDuplicate = querySnapshot.docs.some(docSnap => {
+        const docData = docSnap.data();
+        const resolvedId = docData?.id || docSnap.id;
+        return resolvedId !== productId;
+      });
 
       if (isSkuDuplicate) {
         setErrors(prev => ({ ...prev, sku: 'SKU already exists. SKU must be unique.' }));
@@ -343,7 +352,8 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: s
       // 2. Prevent duplicate product names with same SKU (strictly enforced)
       const isNameWithSameSkuDuplicate = querySnapshot.docs.some(docSnap => {
         const prod = docSnap.data() as Product;
-        return prod.id !== productId && prod.name.trim().toLowerCase() === finalizedData.name.toLowerCase();
+        const resolvedId = prod?.id || docSnap.id;
+        return resolvedId !== productId && prod.name.trim().toLowerCase() === finalizedData.name.toLowerCase();
       });
 
       if (isNameWithSameSkuDuplicate) {
@@ -468,7 +478,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: s
   // --- Filter and Search logic ---
   const filteredProducts = products.filter((prod) => {
     // Hide inactive/retired products from standard lists
-    if (prod.status === 'inactive') return false;
+    if (isInactiveStatus(prod.status)) return false;
 
     const matchesSearch = 
       prod.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -488,10 +498,11 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: s
   });
 
   // --- Dashboard Calculation Metrics ---
-  const totalsCount = products.length;
-  const criticalAlertsCount = products.filter(p => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert).length;
-  const totalValuationPurchase = products.reduce((sum, p) => sum + (p.purchasePrice * p.currentStock), 0);
-  const potentialRevenueValue = products.reduce((sum, p) => sum + (p.sellingPrice * p.currentStock), 0);
+  const activeProductsForTotals = products.filter(p => !isInactiveStatus(p.status));
+  const totalsCount = activeProductsForTotals.length;
+  const criticalAlertsCount = activeProductsForTotals.filter(p => p.currentStock <= p.minimumStockAlert).length;
+  const totalValuationPurchase = activeProductsForTotals.reduce((sum, p) => sum + (p.purchasePrice * p.currentStock), 0);
+  const potentialRevenueValue = activeProductsForTotals.reduce((sum, p) => sum + (p.sellingPrice * p.currentStock), 0);
   const potentialProfitValue = potentialRevenueValue - totalValuationPurchase;
 
   return (
@@ -613,7 +624,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: s
                 </p>
               </div>
 
-              {userRole === 'admin' && (
+              {permissions.createProduct && (
                 <button
                   type="button"
                   onClick={() => openForm()}
@@ -770,13 +781,13 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: s
                           <th className="py-4 px-5 text-center">Warehouse Stock</th>
                           <th className="py-4 px-5 text-center">Min Alert</th>
                           <th className="py-4 px-5 text-center">Status</th>
-                          {userRole === 'admin' && <th className="py-4 px-6 text-center">Actions</th>}
+                          {(permissions.editProduct || permissions.deleteProduct) && <th className="py-4 px-6 text-center">Actions</th>}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
                         {filteredProducts.map((product) => {
                           const isLowStock = product.currentStock <= product.minimumStockAlert;
-                          const isInactive = product.status === 'inactive';
+                          const isInactive = isInactiveStatus(product.status);
                           return (
                             <tr 
                               key={product.id} 
@@ -839,25 +850,29 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: s
                                   </span>
                                 )}
                               </td>
-                              {userRole === 'admin' && (
+                              {(permissions.editProduct || permissions.deleteProduct) && (
                                 <td className="py-4 px-6 text-center whitespace-nowrap">
                                   <div className="flex items-center justify-center gap-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={() => openForm(product)}
-                                      className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition"
-                                      title="Edit product parameters"
-                                    >
-                                      <Edit2 className="h-4 w-4" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleDeleteTrigger(product)}
-                                      className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition"
-                                      title="Permanently delete product description"
-                                    >
-                                      <Trash2 className="h-4 w-4" />
-                                    </button>
+                                    {permissions.editProduct && (
+                                      <button
+                                        type="button"
+                                        onClick={() => openForm(product)}
+                                        className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition"
+                                        title="Edit product parameters"
+                                      >
+                                        <Edit2 className="h-4 w-4" />
+                                      </button>
+                                    )}
+                                    {permissions.deleteProduct && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteTrigger(product)}
+                                        className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition"
+                                        title="Permanently delete product description"
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </button>
+                                    )}
                                   </div>
                                 </td>
                               )}
@@ -885,13 +900,13 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: s
             </div>
 
             <div className="space-y-3">
-              {products.filter(p => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert).length === 0 ? (
+              {products.filter(p => !isInactiveStatus(p.status) && p.currentStock <= p.minimumStockAlert).length === 0 ? (
                 <div className="text-center py-6 text-slate-400">
                   <p className="text-xs font-semibold text-slate-500">Systems Safe</p>
                   <p className="text-[11px] text-slate-400 mt-0.5">All item levels exceed alert trigger settings</p>
                 </div>
               ) : (
-                products.filter(p => p.status !== 'inactive' && p.currentStock <= p.minimumStockAlert).slice(0, 4).map((prod) => (
+                products.filter(p => !isInactiveStatus(p.status) && p.currentStock <= p.minimumStockAlert).slice(0, 4).map((prod) => (
                   <div key={prod.id} className="p-3 bg-amber-50 rounded-xl border border-amber-100 flex items-center justify-between gap-2.5">
                     <div className="min-w-0">
                       <p className="text-xs font-bold text-amber-900 truncate">{prod.name}</p>

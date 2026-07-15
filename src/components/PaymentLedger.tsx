@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { calculateCustomerLedger } from '../lib/utils';
+import { jsPDF } from 'jspdf';
+import { calculateCustomerLedger, isVoidStatus, isInactiveStatus } from '../lib/utils';
 import {
   DollarSign,
   Calendar,
@@ -21,13 +22,94 @@ import {
   Trash2,
   TrendingUp,
   RotateCcw,
-  Phone
+  Phone,
+  Printer,
+  Download,
+  QrCode,
+  FileSpreadsheet
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity, logFinancialAudit } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, runTransaction } from 'firebase/firestore';
 import { Customer, Supplier, CustomerPayment, SupplierPayment } from '../types';
+import { usePermission, UserRole } from '../hooks/usePermission';
+import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveSystemAccount } from '../lib/postingEngine';
 
-export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admin' | 'accountant' | 'cashier' | 'viewer' }) {
+function getNextReceiptNumber(payments: CustomerPayment[]): string {
+  const rcNums = payments
+    .map(p => p.receiptNumber || '')
+    .filter(num => num.startsWith('RC-'))
+    .map(num => parseInt(num.replace('RC-', ''), 10))
+    .filter(val => !isNaN(val));
+  const maxNum = rcNums.length > 0 ? Math.max(...rcNums) : 4586;
+  return `RC-${maxNum + 1}`;
+}
+
+function getNextVoucherNumber(payments: SupplierPayment[]): string {
+  const pvNums = payments
+    .map(p => p.voucherNumber || '')
+    .filter(num => num.startsWith('PV-'))
+    .map(num => parseInt(num.replace('PV-', ''), 10))
+    .filter(val => !isNaN(val));
+  const maxVal = pvNums.length > 0 ? Math.max(...pvNums) : 0;
+  return `PV-${(maxVal + 1).toString().padStart(6, '0')}`;
+}
+
+function numberToWords(num: number): string {
+  const ones = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+  const tens = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+  const scales = ['', 'thousand', 'million', 'billion'];
+
+  if (num === 0) return 'zero dollars';
+
+  const parts = num.toFixed(2).split('.');
+  const dollars = parseInt(parts[0], 10);
+  const cents = parts[1] ? parseInt(parts[1].substring(0, 2).padEnd(2, '0'), 10) : 0;
+
+  function convertSection(n: number): string {
+    let str = '';
+    if (n >= 100) {
+      str += ones[Math.floor(n / 100)] + ' hundred ';
+      n %= 100;
+    }
+    if (n >= 20) {
+      str += tens[Math.floor(n / 10)] + ' ';
+      n %= 10;
+    }
+    if (n > 0) {
+      str += ones[n] + ' ';
+    }
+    return str.trim();
+  }
+
+  let dollarStr = '';
+  let tempDollars = dollars;
+  let scaleIdx = 0;
+
+  while (tempDollars > 0) {
+    const chunk = tempDollars % 1000;
+    if (chunk > 0) {
+      const chunkStr = convertSection(chunk);
+      dollarStr = chunkStr + (scales[scaleIdx] ? ' ' + scales[scaleIdx] : '') + (dollarStr ? ', ' + dollarStr : '');
+    }
+    tempDollars = Math.floor(tempDollars / 1000);
+    scaleIdx++;
+  }
+
+  dollarStr = dollarStr.trim() || 'zero';
+  dollarStr += ' dollar' + (dollars === 1 ? '' : 's');
+
+  let centStr = '';
+  if (cents > 0) {
+    const centWords = convertSection(cents);
+    centStr = ' and ' + centWords + ' cent' + (cents === 1 ? '' : 's');
+  }
+
+  return (dollarStr + centStr).toUpperCase();
+}
+
+export default function PaymentLedger({ userRole = 'admin' }: { userRole?: UserRole }) {
+  const { permissions } = usePermission({ role: userRole });
+
   // --- Core State ---
   const [activeSegment, setActiveSegment] = useState<'customers' | 'suppliers'>('customers');
   const [customersState, setCustomersState] = useState<Customer[]>([]);
@@ -38,7 +120,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
 
   const customers = useMemo(() => {
     return customersState.map(c => {
-      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id);
+      const rawDue = calculateCustomerLedger(sales, customerPayments, c.id, c.dueBalance);
       return {
         ...c,
         dueBalance: Math.max(0, rawDue),
@@ -48,6 +130,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
   }, [customersState, sales, customerPayments]);
 
   const [loading, setLoading] = useState(true);
+  const [coa, setCoa] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -69,16 +152,19 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
     console.log("handleVoidPayment direct invocation for:", payment.id);
     setFeedback(null);
     setIsSaving(true);
+    const isCustomerPayment = 'customerId' in payment;
     try {
       if (!auth.currentUser) {
         // Local Voiding Fallback
-        if (activeSegment === 'customers') {
+        if (isCustomerPayment) {
           const cp = payment as CustomerPayment;
           
           // Update Customers list
           const savedCustomers = localStorage.getItem('inventory_customers') || '[]';
           let customersList = JSON.parse(savedCustomers);
-          customersList = customersList.map((c: any) => c.id === cp.customerId ? { ...c, dueBalance: (c.dueBalance ?? 0) + cp.amountPaid } : c);
+          // When a payment is voided, we do not mutate the customer's Opening Balance (dueBalance).
+          // The dynamic ledger recalculation will automatically reflect the change.
+          customersList = customersList.map((c: any) => c.id === cp.customerId ? { ...c } : c);
           localStorage.setItem('inventory_customers', JSON.stringify(customersList));
           setCustomersState(customersList);
 
@@ -128,23 +214,90 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
       }
 
       await runTransaction(db, async (transaction) => {
-        if (activeSegment === 'customers') {
+        if (isCustomerPayment) {
           const cp = payment as CustomerPayment;
           const customerRef = doc(db, 'customers', cp.customerId);
           const customerSnap = await transaction.get(customerRef);
 
-          if (customerSnap.exists()) {
-            const customerData = customerSnap.data() as Customer;
-            transaction.update(customerRef, {
-              dueBalance: (customerData.dueBalance ?? 0) + cp.amountPaid
-            });
-          }
+          // --- REVERSAL LEDGER POSTING (JV) ---
+          const cpDate = cp.paymentDate || new Date().toISOString().split('T')[0];
+          const cpYear = new Date(cpDate).getFullYear() || 2026;
+          const { postingNumber: jvPostingNumber, nextVal: jvNextVal } = await getNextPostingNumber(transaction, 'JV', cpYear);
+
+          // When a payment is voided, we do not mutate the customer's Opening Balance (dueBalance).
+          // The dynamic ledger recalculation will automatically reflect the change.
 
           const paymentRef = doc(db, 'customerPayments', cp.id);
           transaction.update(paymentRef, { status: 'VOID' });
 
           const cashLedgerRef = doc(db, 'cashLedger', `cl-${cp.id}`);
           transaction.update(cashLedgerRef, { status: 'VOID' });
+
+          const cashAcc = resolveSystemAccount('CASH', coa);
+          const arAcc = resolveSystemAccount('ACCOUNTS_RECEIVABLE', coa);
+
+          const lines = [
+            // Debit: Accounts Receivable (1200)
+            {
+              accountId: arAcc.id,
+              accountCode: arAcc.code,
+              accountName: arAcc.name,
+              debit: cp.amountPaid,
+              credit: 0,
+              baseCurrencyDebit: cp.amountPaid,
+              baseCurrencyCredit: 0
+            },
+            // Credit: Cash in Hand (1100)
+            {
+              accountId: cashAcc.id,
+              accountCode: cashAcc.code,
+              accountName: cashAcc.name,
+              debit: 0,
+              credit: cp.amountPaid,
+              baseCurrencyDebit: 0,
+              baseCurrencyCredit: cp.amountPaid
+            }
+          ];
+
+          // Validate Debit == Credit
+          const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
+          const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
+          if (Math.abs(totalDebits - totalCredits) > 0.01) {
+            throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
+          }
+
+          const periodMonth = String(new Date(cpDate).getMonth() + 1).padStart(2, '0');
+          const accountingPeriod = `${cpYear}-${periodMonth}`;
+          const entryId = `le-void-payment-${cp.id}`;
+
+          const ledgerEntry = {
+            id: entryId,
+            postingNumber: jvPostingNumber,
+            companyId: 'comp-default',
+            branchId: 'branch-main',
+            fiscalYear: cpYear,
+            accountingPeriod,
+            sourceModule: 'CUSTOMER_PAYMENT' as const,
+            postingStatus: 'REVERSED' as const,
+            currency: 'USD',
+            exchangeRate: 1,
+            baseCurrencyCode: 'USD',
+            version: 1,
+            narration: `Reversal of Customer Payment from "${cp.customerName || 'Customer'}". Receipt: ${cp.receiptNumber || cp.id}`,
+            createdFrom: cp.id,
+            approvalStatus: 'APPROVED' as const,
+            postingDate: new Date().toISOString(),
+            createdAt: new Date().toISOString(),
+            createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+            lines,
+            originalEntryId: `le-payment-${cp.id}`
+          };
+
+          const ledgerRef = doc(db, 'ledgerEntries', entryId);
+          transaction.set(ledgerRef, ledgerEntry);
+
+          // Commit sequence
+          commitNextPostingNumber(transaction, 'JV', jvNextVal);
         } else {
           const sp = payment as SupplierPayment;
           const supplierRef = doc(db, 'suppliers', sp.supplierId);
@@ -166,17 +319,21 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
       });
 
       // Log financial Audit
-      await logFinancialAudit(
-        'VOID',
-        payment.id,
-        payment,
-        { ...payment, status: 'VOID' },
-        {
-          cash: activeSegment === 'customers' ? -payment.amountPaid : payment.amountPaid, // Reversing previous cash flow
-          stock: 0,
-          due: payment.amountPaid
-        }
-      );
+      await logFinancialAudit({
+        action: isCustomerPayment ? 'VOID_CUSTOMER_PAYMENT' : 'VOID_SUPPLIER_PAYMENT',
+        entityType: 'payment',
+        entityId: payment.id,
+        referenceId: `cl-${payment.id}`,
+        customerId: isCustomerPayment ? (payment as CustomerPayment).customerId : null,
+        supplierId: !isCustomerPayment ? (payment as SupplierPayment).supplierId : null,
+        productId: null,
+        amount: payment.amountPaid,
+        paymentType: 'Cash',
+        previousState: payment,
+        newState: { ...payment, status: 'VOID' },
+        notes: `Voided ${isCustomerPayment ? 'customer' : 'supplier'} payment ID: ${payment.id}`,
+        userRole: userRole
+      });
 
       // Log system activity
       await logSystemActivity(
@@ -192,7 +349,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
       console.error('Void payment error:', err);
       let errMsg = 'Failed to void the payment record.';
       try {
-        handleFirestoreError(err, OperationType.UPDATE, `${activeSegment}Payments/${payment.id}`);
+        handleFirestoreError(err, OperationType.UPDATE, `${isCustomerPayment ? 'customer' : 'supplier'}Payments/${payment.id}`);
       } catch (dbErr: any) {
         errMsg = dbErr.message;
       }
@@ -206,6 +363,28 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
   const [personFilter, setPersonFilter] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // --- Company Settings State ---
+  const [companyProfile] = useState<any>(() => {
+    const saved = localStorage.getItem('invoice_company_profile');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) {}
+    }
+    return {
+      name: 'NEXUS ENTERPRISE ERP',
+      address: '100 Industrial Parkway, Sector 4',
+      phone: '+1 (555) 019-2831',
+      email: 'finance@nexus-erp.corp',
+      website: 'www.nexus-erp.corp',
+      taxRegistrationId: 'TX-9988221-A',
+      taxRatePercent: 15
+    };
+  });
+
+  // --- Selected Payment for Receipt Viewer Modal ---
+  const [selectedPayment, setSelectedPayment] = useState<CustomerPayment | null>(null);
+  const [selectedSupplierPayment, setSelectedSupplierPayment] = useState<SupplierPayment | null>(null);
 
   // --- Form Modal State ---
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -213,9 +392,446 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
     personId: '',
     amountPaid: '',
     paymentDate: new Date().toISOString().split('T')[0],
-    notes: ''
+    receiptNumber: '',
+    receiptDate: new Date().toISOString().split('T')[0],
+    receivedBy: '',
+    referenceNumber: '',
+    chequeOrBankRef: '',
+    notes: '',
+    voucherNumber: '',
+    paidBy: ''
   });
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+
+  // FIFO allocation utility for the selected payment receipt
+  const getFIFOAllocationForSelected = () => {
+    if (!selectedPayment) return [];
+    
+    // 1. Get all credit sales for the customer, sorted oldest first
+    const custSales = sales
+      .filter(s => s.customerId === selectedPayment.customerId && s.paymentType?.toLowerCase() === 'credit' && !isVoidStatus(s.status))
+      .sort((a, b) => new Date(a.saleDate).getTime() - new Date(b.saleDate).getTime())
+      .map(s => ({
+        id: s.id,
+        invoiceNumber: s.invoiceNumber || s.id,
+        saleDate: s.saleDate,
+        totalAmount: s.totalAmount,
+        remaining: s.totalAmount
+      }));
+
+    // 2. Get all payments for this customer sorted by date up to and including the target payment
+    const activePayments = customerPayments
+      .filter(p => p.customerId === selectedPayment.customerId && !isVoidStatus(p.status))
+      .sort((a, b) => new Date(a.paymentDate).getTime() - new Date(b.paymentDate).getTime());
+
+    // 3. For each payment chronologically, allocate its amountPaid to the oldest invoices
+    let targetAllocations: Array<{
+      invoiceId: string;
+      invoiceNumber: string;
+      saleDate: string;
+      totalAmount: number;
+      allocatedAmount: number;
+      remainingAmount: number;
+      status: string;
+    }> = [];
+
+    for (const pay of activePayments) {
+      let unallocated = pay.amountPaid;
+      const currentPayAllocations: typeof targetAllocations = [];
+
+      for (const sale of custSales) {
+        if (sale.remaining <= 0) continue;
+        if (unallocated <= 0) break;
+
+        const allocate = Math.min(sale.remaining, unallocated);
+        sale.remaining -= allocate;
+        unallocated -= allocate;
+
+        currentPayAllocations.push({
+          invoiceId: sale.id,
+          invoiceNumber: sale.invoiceNumber,
+          saleDate: sale.saleDate,
+          totalAmount: sale.totalAmount,
+          allocatedAmount: allocate,
+          remainingAmount: sale.remaining,
+          status: sale.remaining === 0 ? 'Fully Paid' : 'Partially Paid'
+        });
+      }
+
+      // If this is the selected payment, we extract its allocations
+      if (pay.id === selectedPayment.id) {
+        targetAllocations = currentPayAllocations;
+        break;
+      }
+    }
+
+    // Check if there is still unallocated amount left from this payment
+    let totalAllocatedSum = targetAllocations.reduce((sum, item) => sum + item.allocatedAmount, 0);
+    let unallocatedRemainder = selectedPayment.amountPaid - totalAllocatedSum;
+    if (unallocatedRemainder > 0.005) {
+      targetAllocations.push({
+        invoiceId: 'CREDIT_POOL',
+        invoiceNumber: 'Customer Credit Account Pool',
+        saleDate: selectedPayment.paymentDate,
+        totalAmount: unallocatedRemainder,
+        allocatedAmount: unallocatedRemainder,
+        remainingAmount: 0,
+        status: 'Unallocated Future Credit'
+      });
+    }
+
+    return targetAllocations;
+  };
+
+  const handlePrintReceiptPDF = (pay: CustomerPayment) => {
+    try {
+      const doc = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4'
+      });
+
+      const primaryColor = [15, 23, 42]; // Slate 900
+      const accentColor = [79, 70, 229]; // Indigo 600
+      const textColor = [51, 65, 85]; // Slate 700
+      const borderColor = [226, 232, 240]; // Slate 200
+      const lightBg = [248, 250, 252]; // Slate 50
+
+      const pageWidth = 210;
+      const margin = 20;
+      let currentY = 20;
+
+      // Header top line bar
+      doc.setFillColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.rect(0, 0, pageWidth, 12, 'F');
+
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.text('NEXUS ERP  |  OFFICIAL SALES AUDIT TRANS-RECEIPT', margin, 8);
+
+      currentY += 10;
+
+      doc.setFontSize(22);
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text('NEXUS ERP INC.', margin, currentY + 10);
+
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+      doc.text('Global Financial Registry: NF-8902-X', margin, currentY + 15);
+      doc.text('support@nexus-erp.enterprise.com', margin, currentY + 19);
+
+      const rightColX = 130;
+      doc.setFillColor(lightBg[0], lightBg[1], lightBg[2]);
+      doc.roundedRect(rightColX, currentY + 2, 60, 24, 2, 2, 'FD');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(accentColor[0], accentColor[1], accentColor[2]);
+      doc.text('RECEIPT VOUCHER', rightColX + 5, currentY + 8);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+      doc.text(`Receipt #: ${pay.receiptNumber || 'N/A'}`, rightColX + 5, currentY + 14);
+      doc.text(`Date: ${pay.paymentDate}`, rightColX + 5, currentY + 19);
+      doc.text(`Status: ${pay.status?.toUpperCase() || 'SUCCESS'}`, rightColX + 5, currentY + 24);
+
+      currentY += 34;
+
+      doc.setDrawColor(borderColor[0], borderColor[1], borderColor[2]);
+      doc.setLineWidth(0.5);
+      doc.line(margin, currentY, pageWidth - margin, currentY);
+
+      currentY += 8;
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text('1. RECEIPT PARTICULARS', margin, currentY);
+
+      currentY += 4;
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+      doc.text('Customer Account Name:', margin, currentY + 4);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.customerName || 'N/A', margin + 40, currentY + 4);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Customer System ID:', margin, currentY + 9);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.customerId || 'N/A', margin + 40, currentY + 9);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Account Prev. Due:', margin, currentY + 14);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`$${(pay.previousDue ?? 0).toFixed(2)}`, margin + 40, currentY + 14);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Account Remaining Due:', margin, currentY + 19);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`$${(pay.remainingDue ?? 0).toFixed(2)}`, margin + 40, currentY + 19);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Received By Agent:', rightColX, currentY + 4);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.receivedBy || 'System Admin', rightColX + 35, currentY + 4);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Receipt Date:', rightColX, currentY + 9);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.receiptDate || pay.paymentDate, rightColX + 35, currentY + 9);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Reference Number:', rightColX, currentY + 14);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.referenceNumber || 'N/A', rightColX + 35, currentY + 14);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Cheque / Bank Ref:', rightColX, currentY + 19);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.chequeOrBankRef || 'N/A', rightColX + 35, currentY + 19);
+
+      currentY += 28;
+
+      doc.setFillColor(lightBg[0], lightBg[1], lightBg[2]);
+      doc.roundedRect(margin, currentY, pageWidth - (margin * 2), 22, 2, 2, 'FD');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.setTextColor(accentColor[0], accentColor[1], accentColor[2]);
+      doc.text('TOTAL AMOUNT RECEIVED', margin + 6, currentY + 7);
+
+      doc.setFontSize(16);
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text(`$${pay.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, pageWidth - margin - 50, currentY + 9);
+
+      const words = numberToWords(pay.amountPaid);
+      doc.setFont('helvetica', 'oblique');
+      doc.setFontSize(8.5);
+      doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+      doc.text(`Amount in Words: ${words} Dollars and Zero Cents Only`, margin + 6, currentY + 15, { maxWidth: 160 });
+
+      currentY += 30;
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text('2. CHRONOLOGICAL INVOICE ALLOCATION (FIFO ENGINE)', margin, currentY);
+
+      currentY += 4;
+
+      doc.setFillColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.rect(margin, currentY, pageWidth - (margin * 2), 7, 'F');
+
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.text('INVOICE / ID', margin + 4, currentY + 5);
+      doc.text('DATE', margin + 55, currentY + 5);
+      doc.text('TOTAL VAL', margin + 85, currentY + 5);
+      doc.text('ALLOCATED', margin + 115, currentY + 5);
+      doc.text('REM BALANCE', margin + 145, currentY + 5);
+
+      currentY += 7;
+
+      const allocs = getFIFOAllocationForSelected();
+
+      if (allocs.length === 0) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8);
+        doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+        doc.text('No active credit invoices found. Entire amount allocated to Customer Credit Account Balance.', margin + 4, currentY + 6);
+        currentY += 10;
+      } else {
+        allocs.forEach((item, index) => {
+          doc.setFillColor(index % 2 === 0 ? 255 : lightBg[0], index % 2 === 0 ? 255 : lightBg[1], index % 2 === 0 ? 255 : lightBg[2]);
+          doc.rect(margin, currentY, pageWidth - (margin * 2), 8, 'F');
+
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8);
+          doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+          doc.text(item.invoiceNumber, margin + 4, currentY + 5.5);
+          doc.text(item.saleDate, margin + 55, currentY + 5.5);
+          doc.text(`$${item.totalAmount.toFixed(2)}`, margin + 85, currentY + 5.5);
+          doc.text(`$${item.allocatedAmount.toFixed(2)}`, margin + 115, currentY + 5.5);
+          doc.text(`$${item.remainingAmount.toFixed(2)}`, margin + 145, currentY + 5.5);
+
+          currentY += 8;
+        });
+      }
+
+      currentY += 15;
+
+      doc.setDrawColor(borderColor[0], borderColor[1], borderColor[2]);
+      doc.line(margin, currentY, margin + 60, currentY);
+      doc.line(pageWidth - margin - 60, currentY, pageWidth - margin, currentY);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+      doc.text('Authorized Representative Signature', margin + 5, currentY + 4);
+      doc.text('Customer Acknowledgement Signature', pageWidth - margin - 55, currentY + 4);
+
+      doc.save(`NEXUS-RECEIPT-${pay.receiptNumber || pay.id}.pdf`);
+    } catch (e: any) {
+      console.error('Error generating receipt PDF:', e);
+      alert('Error printing receipt: ' + e.message);
+    }
+  };
+
+  const handlePrintVoucherPDF = (pay: SupplierPayment) => {
+    try {
+      const doc = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4'
+      });
+
+      const primaryColor = [15, 23, 42]; // Slate 900
+      const accentColor = [194, 65, 12]; // Orange 700 / Dark Red for AP
+      const textColor = [51, 65, 85]; // Slate 700
+      const borderColor = [226, 232, 240]; // Slate 200
+      const lightBg = [248, 250, 252]; // Slate 50
+
+      const pageWidth = 210;
+      const margin = 20;
+      let currentY = 20;
+
+      // Header top line bar
+      doc.setFillColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.rect(0, 0, pageWidth, 12, 'F');
+
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.text('NEXUS ERP  |  OFFICIAL ACCOUNTS PAYABLE TRANS-VOUCHER', margin, 8);
+
+      currentY += 10;
+
+      doc.setFontSize(22);
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text('NEXUS ERP INC.', margin, currentY + 10);
+
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+      doc.text('Global Financial Registry: NF-8902-X', margin, currentY + 15);
+      doc.text('support@nexus-erp.enterprise.com', margin, currentY + 19);
+
+      const rightColX = 130;
+      doc.setFillColor(lightBg[0], lightBg[1], lightBg[2]);
+      doc.roundedRect(rightColX, currentY + 2, 60, 24, 2, 2, 'FD');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(accentColor[0], accentColor[1], accentColor[2]);
+      doc.text('PAYMENT VOUCHER', rightColX + 5, currentY + 8);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+      doc.text(`Voucher #: ${pay.voucherNumber || 'N/A'}`, rightColX + 5, currentY + 14);
+      doc.text(`Date: ${pay.paymentDate}`, rightColX + 5, currentY + 19);
+      doc.text(`Status: ${pay.status?.toUpperCase() || 'SUCCESS'}`, rightColX + 5, currentY + 24);
+
+      currentY += 34;
+
+      doc.setDrawColor(borderColor[0], borderColor[1], borderColor[2]);
+      doc.setLineWidth(0.5);
+      doc.line(margin, currentY, pageWidth - margin, currentY);
+
+      currentY += 8;
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text('1. VOUCHER PARTICULARS', margin, currentY);
+
+      currentY += 4;
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+      doc.text('Supplier Account Name:', margin, currentY + 4);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.supplierName || 'N/A', margin + 40, currentY + 4);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Supplier System ID:', margin, currentY + 9);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.supplierId || 'N/A', margin + 40, currentY + 9);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Account Prev. Due:', margin, currentY + 14);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`$${(pay.previousDue ?? 0).toFixed(2)}`, margin + 40, currentY + 14);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Account Remaining Due:', margin, currentY + 19);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`$${(pay.remainingDue ?? 0).toFixed(2)}`, margin + 40, currentY + 19);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Disbursed By Agent:', rightColX, currentY + 4);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.paidBy || 'System Admin', rightColX + 35, currentY + 4);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Voucher Date:', rightColX, currentY + 9);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.paymentDate, rightColX + 35, currentY + 9);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Reference Number:', rightColX, currentY + 14);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.referenceNumber || 'N/A', rightColX + 35, currentY + 14);
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('Cheque / Bank Ref:', rightColX, currentY + 19);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pay.chequeOrBankRef || 'N/A', rightColX + 35, currentY + 19);
+
+      currentY += 28;
+
+      doc.setFillColor(lightBg[0], lightBg[1], lightBg[2]);
+      doc.roundedRect(margin, currentY, pageWidth - (margin * 2), 22, 2, 2, 'FD');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.setTextColor(accentColor[0], accentColor[1], accentColor[2]);
+      doc.text('TOTAL AMOUNT DISBURSED', margin + 6, currentY + 7);
+
+      doc.setFontSize(16);
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text(`$${pay.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, pageWidth - margin - 50, currentY + 9);
+
+      const words = numberToWords(pay.amountPaid);
+      doc.setFont('helvetica', 'oblique');
+      doc.setFontSize(8.5);
+      doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+      doc.text(`Amount in Words: ${words} Dollars and Zero Cents Only`, margin + 6, currentY + 15, { maxWidth: 160 });
+
+      currentY += 30;
+
+      // Signature / Footer
+      doc.setDrawColor(borderColor[0], borderColor[1], borderColor[2]);
+      doc.line(margin, currentY, pageWidth - margin, currentY);
+
+      currentY += 8;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.text('Generated by Nexus Enterprise Accounts Payable Engine. Authenticated via SECURE FINANCIAL LOGS.', margin, currentY);
+
+      doc.save(`Voucher_${pay.voucherNumber || pay.id}.pdf`);
+    } catch (err: any) {
+      console.error('Failed to generate AP Voucher PDF:', err);
+      alert('Error printing voucher: ' + err.message);
+    }
+  };
 
   // --- Real-time Firestore Sync ---
   useEffect(() => {
@@ -235,6 +851,9 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
 
       const savedSupplierPayments = localStorage.getItem('inventory_supplier_payments');
       setSupplierPayments(savedSupplierPayments ? JSON.parse(savedSupplierPayments) : []);
+
+      const savedCOA = localStorage.getItem('nexus_chart_of_accounts');
+      setCoa(savedCOA ? JSON.parse(savedCOA) : []);
 
       setLoading(false);
       return;
@@ -286,12 +905,20 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
       setSales(salesList);
     }, (err) => console.error(err));
 
+    // 6. Chart of Accounts Sync
+    const unsubCOA = onSnapshot(collection(db, 'chartOfAccounts'), (snapshot) => {
+      const coaList: any[] = [];
+      snapshot.forEach((d) => coaList.push(d.data()));
+      setCoa(coaList);
+    }, (err) => console.error(err));
+
     return () => {
       unsubCustomers();
       unsubSuppliers();
       unsubCustomerPayments();
       unsubSupplierPayments();
       unsubSales();
+      unsubCOA();
     };
   }, []);
 
@@ -319,15 +946,25 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
     setPersonFilter('');
     setStartDate('');
     setEndDate('');
+    setSearchQuery('');
   };
 
   // --- Record Payment Open Action ---
   const handleOpenRecordModal = (initialPersonId: string = '') => {
+    const nextRcNum = activeSegment === 'customers' ? getNextReceiptNumber(customerPayments) : '';
+    const nextPvNum = activeSegment === 'suppliers' ? getNextVoucherNumber(supplierPayments) : '';
     setFormData({
       personId: initialPersonId,
       amountPaid: '',
       paymentDate: new Date().toISOString().split('T')[0],
-      notes: ''
+      receiptNumber: nextRcNum,
+      receiptDate: new Date().toISOString().split('T')[0],
+      receivedBy: auth.currentUser?.email || 'Cashier',
+      referenceNumber: '',
+      chequeOrBankRef: '',
+      notes: '',
+      voucherNumber: nextPvNum,
+      paidBy: auth.currentUser?.email || 'Cashier'
     });
     setFormErrors({});
     setIsFormOpen(true);
@@ -349,16 +986,43 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
       if (activeSegment === 'customers') {
         // Customer overpayment is allowed, and stored as credit.
       } else {
-        const supp = suppliers.find((s) => s.id === formData.personId);
-        const outstanding = supp?.dueBalance ?? 0;
-        if (payVal > outstanding) {
-          errs.amountPaid = `Cannot record payment of $${payVal.toFixed(2)} that exceeds outstanding supplier payable balance of $${outstanding.toFixed(2)}`;
-        }
+        // Supplier overpayment is allowed, and stored as Supplier Advance.
       }
     }
 
     if (!formData.paymentDate) {
       errs.paymentDate = 'Please specify a transaction date';
+    }
+
+    if (activeSegment === 'customers') {
+      const rcNum = formData.receiptNumber.trim();
+      if (!rcNum) {
+        errs.receiptNumber = 'Receipt number is required';
+      } else {
+        const dup = customerPayments.some(
+          (p) => p.receiptNumber?.toUpperCase() === rcNum.toUpperCase() && !isVoidStatus(p.status)
+        );
+        if (dup) {
+          errs.receiptNumber = 'Receipt Number already exists.';
+        }
+      }
+    }
+
+    if (activeSegment === 'suppliers') {
+      const pvNum = formData.voucherNumber.trim();
+      if (!pvNum) {
+        errs.voucherNumber = 'Voucher number is required';
+      } else {
+        const dup = supplierPayments.some(
+          (p) => p.voucherNumber?.toUpperCase() === pvNum.toUpperCase() && !isVoidStatus(p.status)
+        );
+        if (dup) {
+          errs.voucherNumber = 'Voucher Number already exists.';
+        }
+      }
+      if (!formData.paidBy.trim()) {
+        errs.paidBy = 'Paid By is required';
+      }
     }
 
     setFormErrors(errs);
@@ -399,7 +1063,13 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
             previousDue: prevDue,
             remainingDue: remDue,
             paymentDate: transDate,
-            notes: transNotes
+            receiptNumber: formData.receiptNumber.trim(),
+            receiptDate: formData.receiptDate,
+            receivedBy: formData.receivedBy || 'Cashier',
+            referenceNumber: formData.referenceNumber.trim(),
+            chequeOrBankRef: formData.chequeOrBankRef.trim(),
+            notes: transNotes,
+            status: 'success'
           };
 
           // Update Customer Payment list
@@ -412,7 +1082,13 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
           // Update Customers list
           const savedCustomers = localStorage.getItem('inventory_customers') || '[]';
           let customersList = JSON.parse(savedCustomers);
-          customersList = customersList.map((c: any) => c.id === targetCust.id ? { ...c, dueBalance: remDue, customerCredit: newCredit } : c);
+          
+          // Keep the original opening balance unchanged in the database/localStorage
+          const origCust = customersList.find((c: any) => c.id === targetCust.id);
+          const originalDue = origCust ? origCust.dueBalance : targetCust.dueBalance;
+          const originalCredit = origCust ? (origCust.customerCredit || 0) : 0;
+          customersList = customersList.map((c: any) => c.id === targetCust.id ? { ...c, dueBalance: originalDue, customerCredit: originalCredit } : c);
+          
           localStorage.setItem('inventory_customers', JSON.stringify(customersList));
           setCustomersState(customersList);
 
@@ -426,7 +1102,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
             source: 'payment',
             amount: amountVal,
             referenceId: paymentId,
-            description: `Collected customer payment from "${targetCust.name}"`,
+            description: `Collected customer payment from "${targetCust.name}" - Receipt: ${formData.receiptNumber.trim()}`,
             timestamp: new Date().toISOString()
           });
           localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
@@ -438,7 +1114,16 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
         } else {
           const targetSupp = suppliers.find((s) => s.id === formData.personId)!;
           const prevDue = targetSupp.dueBalance ?? 0;
-          const remDue = Math.max(0, prevDue - amountVal);
+          const prevAdvance = targetSupp.supplierAdvance ?? 0;
+
+          let remDue = 0;
+          let newAdvance = prevAdvance;
+          if (amountVal > prevDue) {
+            remDue = 0;
+            newAdvance += (amountVal - prevDue);
+          } else {
+            remDue = prevDue - amountVal;
+          }
 
           const paymentId = `sp-${Date.now()}`;
           const newPayment: SupplierPayment = {
@@ -449,7 +1134,12 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
             previousDue: prevDue,
             remainingDue: remDue,
             paymentDate: transDate,
-            notes: transNotes
+            voucherNumber: formData.voucherNumber.trim(),
+            paidBy: formData.paidBy || 'Cashier',
+            referenceNumber: formData.referenceNumber.trim() || undefined,
+            chequeOrBankRef: formData.chequeOrBankRef.trim() || undefined,
+            notes: transNotes,
+            status: 'success'
           };
 
           // Update Supplier Payment list
@@ -462,7 +1152,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
           // Update Suppliers list
           const savedSuppliers = localStorage.getItem('inventory_suppliers') || '[]';
           let suppliersList = JSON.parse(savedSuppliers);
-          suppliersList = suppliersList.map((s: any) => s.id === targetSupp.id ? { ...s, dueBalance: remDue } : s);
+          suppliersList = suppliersList.map((s: any) => s.id === targetSupp.id ? { ...s, dueBalance: remDue, supplierAdvance: newAdvance } : s);
           localStorage.setItem('inventory_suppliers', JSON.stringify(suppliersList));
           setSuppliers(suppliersList);
 
@@ -476,13 +1166,13 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
             source: 'payment',
             amount: amountVal,
             referenceId: paymentId,
-            description: `Paid supplier payment to "${targetSupp.name}"`,
+            description: `Paid supplier payment voucher ${formData.voucherNumber.trim()} to "${targetSupp.name}"`,
             timestamp: new Date().toISOString()
           });
           localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
 
           setFeedback({
-            message: `Recorded supplier payment of $${amountVal.toFixed(2)} for "${targetSupp.name}" locally`,
+            message: `Recorded supplier payment voucher ${formData.voucherNumber.trim()} of $${amountVal.toFixed(2)} for "${targetSupp.name}" locally`,
             type: 'success'
           });
         }
@@ -492,112 +1182,413 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
       }
 
       if (activeSegment === 'customers') {
-        const targetCust = customers.find((c) => c.id === formData.personId)!;
-        const prevDue = targetCust.dueBalance;
-        const prevCredit = targetCust.customerCredit ?? 0;
-
-        let remDue = 0;
-        let newCredit = prevCredit;
-
-        if (amountVal > prevDue) {
-          remDue = 0;
-          newCredit += (amountVal - prevDue);
-        } else {
-          remDue = prevDue - amountVal;
-        }
-
         const paymentId = `cp-${Date.now()}`;
-        const newPayment: CustomerPayment = {
-          id: paymentId,
-          customerId: targetCust.id,
-          customerName: targetCust.name,
-          amountPaid: amountVal,
-          previousDue: prevDue,
-          remainingDue: remDue,
-          paymentDate: transDate,
-          notes: transNotes
-        };
+        let finalPrevDue = 0;
+        let finalRemDue = 0;
+        let finalPrevCredit = 0;
+        let finalNewCredit = 0;
+        let targetCustName = "";
 
-        // Write Payment Record
-        await setDoc(doc(db, 'customerPayments', paymentId), newPayment);
+        await runTransaction(db, async (transaction) => {
+          const customerRef = doc(db, 'customers', formData.personId);
+          const customerSnap = await transaction.get(customerRef);
+          if (!customerSnap.exists()) {
+            throw new Error(`Customer with ID ${formData.personId} does not exist.`);
+          }
+          const targetCust = customerSnap.data() as Customer;
+          targetCustName = targetCust.name;
+          const prevDue = targetCust.dueBalance;
+          const prevCredit = targetCust.customerCredit ?? 0;
 
-        // Update Customer Record
-        const updatedCustomer: Customer = {
-          ...targetCust,
-          dueBalance: remDue,
-          customerCredit: newCredit
-        };
-        await setDoc(doc(db, 'customers', targetCust.id), updatedCustomer);
+          finalPrevDue = prevDue;
+          finalPrevCredit = prevCredit;
 
-        // Link with Cash / Capital Accounting Layer
-        const cashLedgerId = `cl-${paymentId}`;
-        await setDoc(doc(db, 'cashLedger', cashLedgerId), {
-          id: cashLedgerId,
-          type: 'inflow',
-          source: 'payment',
+          let remDue = 0;
+          let newCredit = prevCredit;
+
+          if (amountVal > prevDue) {
+            remDue = 0;
+            newCredit += (amountVal - prevDue);
+          } else {
+            remDue = prevDue - amountVal;
+          }
+
+          finalRemDue = remDue;
+          finalNewCredit = newCredit;
+
+          // --- AUTOMATIC LEDGER POSTING (RV) ---
+          const transDateYear = new Date(transDate).getFullYear() || 2026;
+          const { postingNumber, nextVal } = await getNextPostingNumber(transaction, 'RV', transDateYear);
+
+          const newPayment: CustomerPayment = {
+            id: paymentId,
+            customerId: targetCust.id,
+            customerName: targetCust.name,
+            amountPaid: amountVal,
+            previousDue: prevDue,
+            remainingDue: remDue,
+            paymentDate: transDate,
+            receiptNumber: formData.receiptNumber.trim(),
+            receiptDate: formData.receiptDate,
+            receivedBy: formData.receivedBy || 'Cashier',
+            referenceNumber: formData.referenceNumber.trim(),
+            chequeOrBankRef: formData.chequeOrBankRef.trim(),
+            notes: transNotes,
+            status: 'success'
+          };
+
+          // 1. Create customerPayments document
+          const paymentRef = doc(db, 'customerPayments', paymentId);
+          const cleanPayment: any = {};
+          const allowedPaymentKeys = [
+            'id', 'customerId', 'customerName', 'amountPaid', 'previousDue', 'remainingDue', 
+            'paymentDate', 'receiptNumber', 'receiptDate', 'receivedBy', 'referenceNumber', 
+            'chequeOrBankRef', 'notes', 'status'
+          ];
+          allowedPaymentKeys.forEach(key => {
+            if ((newPayment as any)[key] !== undefined) {
+              cleanPayment[key] = (newPayment as any)[key];
+            }
+          });
+          transaction.set(paymentRef, cleanPayment);
+
+          // 2. Update Customer balances & audit timestamps
+          const updatedCustomer: Customer = {
+            ...targetCust,
+            dueBalance: prevDue, // preserve opening balance in dueBalance
+            customerCredit: prevCredit // preserve credit
+          };
+          const cleanCustomer: any = {};
+          const allowedCustKeys = ['id', 'name', 'phone', 'address', 'customerType', 'dueBalance', 'customerCredit', 'createdDate', 'status', 'vatNumber', 'email'];
+          allowedCustKeys.forEach(key => {
+            if ((updatedCustomer as any)[key] !== undefined) {
+              cleanCustomer[key] = (updatedCustomer as any)[key];
+            }
+          });
+          transaction.set(customerRef, cleanCustomer);
+
+          // 3. Create cashLedger entry
+          const cashLedgerId = `cl-${paymentId}`;
+          const cashLedgerRef = doc(db, 'cashLedger', cashLedgerId);
+          transaction.set(cashLedgerRef, {
+            id: cashLedgerId,
+            type: 'inflow',
+            source: 'payment',
+            amount: amountVal,
+            referenceId: paymentId,
+            description: `Collected customer payment from "${targetCust.name}" - Receipt: ${formData.receiptNumber.trim()}`,
+            timestamp: new Date().toISOString()
+          });
+
+          const cashAcc = resolveSystemAccount('CASH', coa);
+          const arAcc = resolveSystemAccount('ACCOUNTS_RECEIVABLE', coa);
+
+          const lines = [
+            // Debit: Cash in Hand (1100)
+            {
+              accountId: cashAcc.id,
+              accountCode: cashAcc.code,
+              accountName: cashAcc.name,
+              debit: amountVal,
+              credit: 0,
+              baseCurrencyDebit: amountVal,
+              baseCurrencyCredit: 0
+            },
+            // Credit: Accounts Receivable (1200)
+            {
+              accountId: arAcc.id,
+              accountCode: arAcc.code,
+              accountName: arAcc.name,
+              debit: 0,
+              credit: amountVal,
+              baseCurrencyDebit: 0,
+              baseCurrencyCredit: amountVal
+            }
+          ];
+
+          // Validate Debit == Credit
+          const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
+          const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
+          if (Math.abs(totalDebits - totalCredits) > 0.01) {
+            throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
+          }
+
+          const periodMonth = String(new Date(transDate).getMonth() + 1).padStart(2, '0');
+          const accountingPeriod = `${transDateYear}-${periodMonth}`;
+          const entryId = `le-payment-${paymentId}`;
+
+          const ledgerEntry = {
+            id: entryId,
+            postingNumber,
+            companyId: 'comp-default',
+            branchId: 'branch-main',
+            fiscalYear: transDateYear,
+            accountingPeriod,
+            sourceModule: 'CUSTOMER_PAYMENT' as const,
+            postingStatus: 'POSTED' as const,
+            currency: 'USD',
+            exchangeRate: 1,
+            baseCurrencyCode: 'USD',
+            version: 1,
+            narration: `Customer Payment Received from "${targetCust.name}". Receipt: ${formData.receiptNumber.trim()}`,
+            createdFrom: paymentId,
+            approvalStatus: 'APPROVED' as const,
+            postingDate: new Date(transDate + 'T12:00:00Z').toISOString(),
+            createdAt: new Date().toISOString(),
+            createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+            lines
+          };
+
+          const ledgerRef = doc(db, 'ledgerEntries', entryId);
+          transaction.set(ledgerRef, ledgerEntry);
+
+          // Commit next sequence number
+          commitNextPostingNumber(transaction, 'RV', nextVal);
+
+          // Ensure default system accounts exist
+          const currentCoaIds = coa.map(c => c.id);
+          await ensureSystemAccountsExist(transaction, currentCoaIds);
+        });
+
+        // Log financial Audit
+        await logFinancialAudit({
+          action: 'CUSTOMER_PAYMENT',
+          entityType: 'payment',
+          entityId: paymentId,
+          referenceId: `cl-${paymentId}`,
+          customerId: formData.personId,
+          supplierId: null,
+          productId: null,
           amount: amountVal,
-          referenceId: paymentId,
-          description: `Collected customer payment from "${targetCust.name}"`,
-          timestamp: new Date().toISOString()
+          paymentType: 'Cash',
+          previousState: {},
+          newState: {
+            id: paymentId,
+            customerId: formData.personId,
+            customerName: targetCustName,
+            amountPaid: amountVal,
+            paymentDate: transDate,
+            receiptNumber: formData.receiptNumber.trim(),
+            receiptDate: formData.receiptDate,
+            receivedBy: formData.receivedBy || 'Cashier',
+            referenceNumber: formData.referenceNumber.trim(),
+            chequeOrBankRef: formData.chequeOrBankRef.trim(),
+            notes: transNotes,
+            status: 'success'
+          },
+          notes: `Recorded customer payment from "${targetCustName}" - Receipt Number: ${formData.receiptNumber.trim()}`,
+          userRole: userRole
         });
 
         // System Log
         await logSystemActivity(
           "Customer payment",
-          `Recorded customer payment of $${amountVal.toFixed(2)} from "${targetCust.name}". Due balance updated from $${prevDue.toFixed(2)} to $${remDue.toFixed(2)}${newCredit > prevCredit ? `, Customer Credit updated from $${prevCredit.toFixed(2)} to $${newCredit.toFixed(2)}` : ''}.`
+          `Recorded customer payment of $${amountVal.toFixed(2)} from "${targetCustName}" under Receipt Number: ${formData.receiptNumber.trim()}.`
         );
 
         setFeedback({
-          message: `Successfully recorded customer payment of $${amountVal.toFixed(2)} for "${targetCust.name}"`,
+          message: `Successfully recorded customer payment of $${amountVal.toFixed(2)} for "${targetCustName}"`,
           type: 'success'
         });
       } else {
-        const targetSupp = suppliers.find((s) => s.id === formData.personId)!;
-        const prevDue = targetSupp.dueBalance ?? 0;
-        const remDue = Math.max(0, prevDue - amountVal);
-
         const paymentId = `sp-${Date.now()}`;
-        const newPayment: SupplierPayment = {
-          id: paymentId,
-          supplierId: targetSupp.id,
-          supplierName: targetSupp.name,
-          amountPaid: amountVal,
-          previousDue: prevDue,
-          remainingDue: remDue,
-          paymentDate: transDate,
-          notes: transNotes
-        };
+        let finalPrevDue = 0;
+        let finalRemDue = 0;
+        let targetSuppName = "";
 
-        // Write Payment Record
-        await setDoc(doc(db, 'supplierPayments', paymentId), newPayment);
+        await runTransaction(db, async (transaction) => {
+          const supplierRef = doc(db, 'suppliers', formData.personId);
+          const supplierSnap = await transaction.get(supplierRef);
+          if (!supplierSnap.exists()) {
+            throw new Error(`Supplier with ID ${formData.personId} does not exist.`);
+          }
+          const targetSupp = supplierSnap.data() as Supplier;
+          targetSuppName = targetSupp.name;
+          const prevDue = targetSupp.dueBalance ?? 0;
+          const prevAdvance = targetSupp.supplierAdvance ?? 0;
 
-        // Update Supplier Record
-        const updatedSupplier: Supplier = {
-          ...targetSupp,
-          dueBalance: remDue
-        };
-        await setDoc(doc(db, 'suppliers', targetSupp.id), updatedSupplier);
+          // --- AUTOMATIC LEDGER POSTING (PV) ---
+          const transDateYear = new Date(transDate).getFullYear() || 2026;
+          const { postingNumber, nextVal } = await getNextPostingNumber(transaction, 'PV', transDateYear);
 
-        // Link with Cash / Capital Accounting Layer
-        const cashLedgerId = `cl-${paymentId}`;
-        await setDoc(doc(db, 'cashLedger', cashLedgerId), {
-          id: cashLedgerId,
-          type: 'outflow',
-          source: 'payment',
+          let remDue = 0;
+          let newAdvance = prevAdvance;
+          if (amountVal > prevDue) {
+            remDue = 0;
+            newAdvance += (amountVal - prevDue);
+          } else {
+            remDue = prevDue - amountVal;
+          }
+
+          finalPrevDue = prevDue;
+          finalRemDue = remDue;
+
+          const newPayment: SupplierPayment = {
+            id: paymentId,
+            supplierId: targetSupp.id,
+            supplierName: targetSupp.name,
+            amountPaid: amountVal,
+            previousDue: prevDue,
+            remainingDue: remDue,
+            paymentDate: transDate,
+            voucherNumber: formData.voucherNumber.trim(),
+            paidBy: formData.paidBy || 'Cashier',
+            referenceNumber: formData.referenceNumber.trim() || undefined,
+            chequeOrBankRef: formData.chequeOrBankRef.trim() || undefined,
+            notes: transNotes,
+            status: 'success'
+          };
+
+          // 1. Create supplierPayments document
+          const paymentRef = doc(db, 'supplierPayments', paymentId);
+          const cleanPayment: any = {};
+          const allowedPaymentKeys = [
+            'id', 'supplierId', 'supplierName', 'amountPaid', 'previousDue', 'remainingDue',
+            'paymentDate', 'notes', 'status', 'voucherNumber', 'paidBy', 'referenceNumber', 'chequeOrBankRef', 'updatedAt'
+          ];
+          allowedPaymentKeys.forEach(key => {
+            if ((newPayment as any)[key] !== undefined) {
+              cleanPayment[key] = (newPayment as any)[key];
+            }
+          });
+          transaction.set(paymentRef, cleanPayment);
+
+          // 2. Update Supplier balances & audit timestamps
+          const updatedSupplier: Supplier = {
+            ...targetSupp,
+            dueBalance: remDue,
+            supplierAdvance: newAdvance
+          };
+          const cleanSupplier: any = {};
+          const allowedSupplierKeys = ['id', 'name', 'phone', 'contactPerson', 'email', 'category', 'address', 'paymentType', 'dueBalance', 'supplierAdvance', 'createdDate', 'status', 'vatNumber', 'updatedAt'];
+          allowedSupplierKeys.forEach(key => {
+            if ((updatedSupplier as any)[key] !== undefined) {
+              cleanSupplier[key] = (updatedSupplier as any)[key];
+            }
+          });
+          transaction.set(supplierRef, cleanSupplier);
+
+          // 3. Create cashLedger entry
+          const cashLedgerId = `cl-${paymentId}`;
+          const cashLedgerRef = doc(db, 'cashLedger', cashLedgerId);
+          transaction.set(cashLedgerRef, {
+            id: cashLedgerId,
+            type: 'outflow',
+            source: 'payment',
+            amount: amountVal,
+            referenceId: paymentId,
+            description: `Disbursed supplier payment voucher ${formData.voucherNumber.trim()} to "${targetSupp.name}"`,
+            timestamp: new Date().toISOString()
+          });
+
+          // 4. Create Ledger Entry for Double-Entry bookkeeping (Debit: AP, Credit: Cash)
+          const apAcc = resolveSystemAccount('ACCOUNTS_PAYABLE', coa);
+          const cashAcc = resolveSystemAccount('CASH', coa);
+
+          const lines = [
+            // Debit: Accounts Payable (2100)
+            {
+              accountId: apAcc.id,
+              accountCode: apAcc.code,
+              accountName: apAcc.name,
+              debit: amountVal,
+              credit: 0,
+              baseCurrencyDebit: amountVal,
+              baseCurrencyCredit: 0
+            },
+            // Credit: Cash in Hand (1100)
+            {
+              accountId: cashAcc.id,
+              accountCode: cashAcc.code,
+              accountName: cashAcc.name,
+              debit: 0,
+              credit: amountVal,
+              baseCurrencyDebit: 0,
+              baseCurrencyCredit: amountVal
+            }
+          ];
+
+          // Validate Debit == Credit
+          const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
+          const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
+          if (Math.abs(totalDebits - totalCredits) > 0.01) {
+            throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
+          }
+
+          const periodMonth = String(new Date(transDate).getMonth() + 1).padStart(2, '0');
+          const accountingPeriod = `${transDateYear}-${periodMonth}`;
+          const entryId = `le-payment-${paymentId}`;
+
+          const ledgerEntry = {
+            id: entryId,
+            postingNumber,
+            companyId: 'comp-default',
+            branchId: 'branch-main',
+            fiscalYear: transDateYear,
+            accountingPeriod,
+            sourceModule: 'SUPPLIER_PAYMENT' as const,
+            postingStatus: 'POSTED' as const,
+            currency: 'USD',
+            exchangeRate: 1,
+            baseCurrencyCode: 'USD',
+            version: 1,
+            narration: `Supplier Payment voucher ${formData.voucherNumber.trim()} to "${targetSuppName}". Reference: ${formData.referenceNumber.trim() || 'N/A'}`,
+            createdFrom: paymentId,
+            approvalStatus: 'APPROVED' as const,
+            postingDate: new Date(transDate + 'T12:00:00Z').toISOString(),
+            createdAt: new Date().toISOString(),
+            createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+            lines
+          };
+
+          const ledgerRef = doc(db, 'ledgerEntries', entryId);
+          transaction.set(ledgerRef, ledgerEntry);
+
+          // Commit sequence number
+          commitNextPostingNumber(transaction, 'PV', nextVal);
+
+          // Ensure default system accounts exist
+          const currentCoaIds = coa.map(c => c.id);
+          await ensureSystemAccountsExist(transaction, currentCoaIds);
+        });
+
+        // Log financial Audit
+        await logFinancialAudit({
+          action: 'SUPPLIER_PAYMENT',
+          entityType: 'payment',
+          entityId: paymentId,
+          referenceId: `cl-${paymentId}`,
+          customerId: null,
+          supplierId: formData.personId,
+          productId: null,
           amount: amountVal,
-          referenceId: paymentId,
-          description: `Disbursed supplier payment to "${targetSupp.name}"`,
-          timestamp: new Date().toISOString()
+          paymentType: 'Cash',
+          previousState: {},
+          newState: {
+            id: paymentId,
+            supplierId: formData.personId,
+            supplierName: targetSuppName,
+            amountPaid: amountVal,
+            paymentDate: transDate,
+            voucherNumber: formData.voucherNumber.trim(),
+            paidBy: formData.paidBy || 'Cashier',
+            referenceNumber: formData.referenceNumber.trim() || undefined,
+            chequeOrBankRef: formData.chequeOrBankRef.trim() || undefined,
+            notes: transNotes,
+            status: 'success'
+          },
+          notes: `Recorded supplier payment voucher ${formData.voucherNumber.trim()} to "${targetSuppName}"`,
+          userRole: userRole
         });
 
         // System Log
         await logSystemActivity(
           "Supplier payment",
-          `Recorded supplier layout of $${amountVal.toFixed(2)} to "${targetSupp.name}". Owed balance updated from $${prevDue.toFixed(2)} to $${remDue.toFixed(2)}.`
-         );
+          `Recorded supplier layout of $${amountVal.toFixed(2)} to "${targetSuppName}". Owed balance updated from $${finalPrevDue.toFixed(2)} to $${finalRemDue.toFixed(2)}.`
+        );
 
         setFeedback({
-          message: `Successfully recorded supplier payment of $${amountVal.toFixed(2)} to "${targetSupp.name}"`,
+          message: `Successfully recorded supplier payment of $${amountVal.toFixed(2)} to "${targetSuppName}"`,
           type: 'success'
         });
       }
@@ -647,22 +1638,39 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
     .filter((p) => p.paymentDate.startsWith(currentMonthStr))
     .reduce((sum, p) => sum + p.amountPaid, 0);
 
-  const totalOutstandingCustomerDebt = customers.reduce((sum, c) => sum + c.dueBalance, 0);
-  const totalOutstandingSupplierDebt = suppliers.reduce((sum, s) => sum + (s.dueBalance ?? 0), 0);
+  const totalOutstandingCustomerDebt = customers.filter(c => !isInactiveStatus(c.status)).reduce((sum, c) => sum + c.dueBalance, 0);
+  const totalOutstandingSupplierDebt = suppliers.filter(s => !isInactiveStatus(s.status)).reduce((sum, s) => sum + (s.dueBalance ?? 0), 0);
 
   // --- Filtering computations ---
   const filteredCustomerPayments = customerPayments.filter((p) => {
     const matchesPerson = !personFilter || p.customerName?.toLowerCase().includes(personFilter.toLowerCase()) || p.customerId === personFilter;
     const matchesStart = !startDate || p.paymentDate >= startDate;
     const matchesEnd = !endDate || p.paymentDate <= endDate;
-    return matchesPerson && matchesStart && matchesEnd;
+    
+    const q = searchQuery.trim().toLowerCase();
+    const matchesQuery = !q || 
+      p.receiptNumber?.toLowerCase().includes(q) || 
+      p.id.toLowerCase().includes(q) || 
+      p.customerName?.toLowerCase().includes(q) || 
+      p.notes?.toLowerCase().includes(q) ||
+      p.paymentDate.includes(q);
+
+    return matchesPerson && matchesStart && matchesEnd && matchesQuery;
   });
 
   const filteredSupplierPayments = supplierPayments.filter((p) => {
     const matchesPerson = !personFilter || p.supplierName?.toLowerCase().includes(personFilter.toLowerCase()) || p.supplierId === personFilter;
     const matchesStart = !startDate || p.paymentDate >= startDate;
     const matchesEnd = !endDate || p.paymentDate <= endDate;
-    return matchesPerson && matchesStart && matchesEnd;
+
+    const q = searchQuery.trim().toLowerCase();
+    const matchesQuery = !q || 
+      p.id.toLowerCase().includes(q) || 
+      p.supplierName?.toLowerCase().includes(q) || 
+      p.notes?.toLowerCase().includes(q) ||
+      p.paymentDate.includes(q);
+
+    return matchesPerson && matchesStart && matchesEnd && matchesQuery;
   });
 
   const activeRecordsCount = activeSegment === 'customers' ? filteredCustomerPayments.length : filteredSupplierPayments.length;
@@ -827,7 +1835,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                   <div className="h-7 w-8 bg-slate-100 rounded-lg animate-pulse mt-1"></div>
                 ) : (
                   <p className="text-xl font-bold text-slate-800 mt-1">
-                    {activeSegment === 'customers' ? customers.length : suppliers.length}
+                    {activeSegment === 'customers' ? customers.filter(c => !isInactiveStatus(c.status)).length : suppliers.filter(s => !isInactiveStatus(s.status)).length}
                   </p>
                 )}
               </div>
@@ -838,8 +1846,8 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                 ) : (
                   <p className="text-xl font-bold text-amber-700 mt-1">
                     {activeSegment === 'customers' 
-                      ? customers.filter((c) => c.dueBalance > 0).length 
-                      : suppliers.filter((s) => (s.dueBalance ?? 0) > 0).length}
+                      ? customers.filter((c) => !isInactiveStatus(c.status) && c.dueBalance > 0).length 
+                      : suppliers.filter((s) => !isInactiveStatus(s.status) && (s.dueBalance ?? 0) > 0).length}
                   </p>
                 )}
               </div>
@@ -860,6 +1868,23 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
               <Filter className="h-4 w-4 text-slate-450 text-indigo-505" />
               <span>Search Filters</span>
             </h3>
+
+            {/* Filter by Receipt Number/General Search */}
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">
+                General Query (Receipt / ID)
+              </label>
+              <div className="relative">
+                <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="E.g., RC-4587 or payment date"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-xs font-semibold text-slate-800 placeholder:text-slate-400 transition focus:border-indigo-500 focus:bg-white focus:ring-1 focus:ring-indigo-505 outline-none"
+                />
+              </div>
+            </div>
 
             {/* Filter by Person Choice */}
             <div className="space-y-1.5">
@@ -1010,7 +2035,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                                     ${(c.customerCredit || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                                   </span>
                                 </div>
-                                {(userRole === 'admin' || userRole === 'accountant') && c.dueBalance > 0 && (
+                                {permissions.createPayment && c.dueBalance > 0 && (
                                   <button
                                     type="button"
                                     onClick={() => handleOpenRecordModal(c.id)}
@@ -1068,7 +2093,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                                     ${(c.customerCredit || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                                   </span>
                                 </div>
-                                {(userRole === 'admin' || userRole === 'accountant') && c.dueBalance > 0 && (
+                                {permissions.createPayment && c.dueBalance > 0 && (
                                   <button
                                     type="button"
                                     onClick={() => handleOpenRecordModal(c.id)}
@@ -1118,7 +2143,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                                 ${owed.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                               </span>
                             </div>
-                            {(userRole === 'admin' || userRole === 'accountant') && owed > 0 && (
+                            {permissions.createPayment && owed > 0 && (
                               <button
                                 type="button"
                                 onClick={() => handleOpenRecordModal(s.id)}
@@ -1152,7 +2177,7 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                 </p>
               </div>
 
-              {(userRole === 'admin' || userRole === 'accountant') && (
+              {permissions.createPayment && (
                 <button
                   type="button"
                   onClick={() => handleOpenRecordModal()}
@@ -1218,85 +2243,135 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                 </motion.div>
               ) : (
                 <div className="divide-y divide-slate-100">
-                  {(activeSegment === 'customers' ? filteredCustomerPayments : filteredSupplierPayments).map((p) => (
-                    <div 
-                      key={p.id} 
-                      className={`py-4.5 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-4 group transition ${p.status === 'voided' || p.status === 'VOID' ? 'opacity-45 bg-slate-55 bg-slate-50/70 line-through text-slate-400' : ''}`}
-                    >
-                      {/* Name / Date details */}
-                      <div className="space-y-1.5 min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-bold text-slate-950 group-hover:text-indigo-600 transition">
-                            {activeSegment === 'customers' 
-                              ? (p as CustomerPayment).customerName || 'Anonymous Client'
-                              : (p as SupplierPayment).supplierName || 'Anonymous Supplier'}
-                          </span>
-                          <span className="inline-flex items-center px-2 py-0.5 text-[10px] bg-slate-50 border border-slate-100 text-slate-400 font-bold rounded-full">
-                            ID: {p.id}
-                          </span>
-                        </div>
-
-                        {/* Description indicators */}
-                        <div className="flex items-center gap-4 text-[11px] text-slate-500 flex-wrap">
-                          <span className="flex items-center gap-1 shrink-0">
-                            <Calendar className="h-3.5 w-3.5 text-slate-400" />
-                            <span>{new Date(p.paymentDate).toLocaleDateString(undefined, { dateStyle: 'medium' })}</span>
-                          </span>
-
-                          {p.notes && (
-                            <span className="flex items-center gap-1 truncate max-w-[280px]">
-                              <FileText className="h-3.5 w-3.5 text-slate-400" />
-                              <span className="truncate italic text-slate-400">"{p.notes}"</span>
+                  {(activeSegment === 'customers' ? filteredCustomerPayments : filteredSupplierPayments).map((p) => {
+                    const isVoided = isVoidStatus(p.status);
+                    return (
+                      <div 
+                        key={p.id} 
+                        className={`py-4.5 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-4 group transition ${isVoided ? 'opacity-45 bg-slate-55 bg-slate-50/70 line-through text-slate-400' : ''}`}
+                      >
+                        {/* Name / Date details */}
+                        <div className="space-y-1.5 min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs font-bold text-slate-950 group-hover:text-indigo-600 transition">
+                              {activeSegment === 'customers' 
+                                ? (p as CustomerPayment).customerName || 'Anonymous Client'
+                                : (p as SupplierPayment).supplierName || 'Anonymous Supplier'}
                             </span>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Amounts column right */}
-                      <div className="flex items-center justify-between sm:justify-end gap-5 shrink-0">
-                        <div className="text-left sm:text-right space-y-0.5">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none block">Settled Sum</span>
-                          <span className={`text-sm font-bold block leading-none ${
-                            activeSegment === 'customers' ? 'text-emerald-600' : 'text-indigo-600'
-                          }`}>
-                            {activeSegment === 'customers' ? '+' : '-'}${p.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          </span>
-                        </div>
-
-                        {/* State step progress indicator */}
-                        <div className="text-[10px] text-slate-400 border-l border-slate-100 pl-4 space-y-0.5 min-w-[124px]">
-                          <div>Owed: <span className="font-bold text-slate-600">${(p.previousDue ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
-                          <div>Rem: <span className="font-bold text-slate-800">${(p.remainingDue ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
-                        </div>
-
-                        {/* Void Control */}
-                        <div className="border-l border-slate-100 pl-4 flex flex-col items-center justify-center gap-1.5 min-w-[95px]">
-                          {p.status === 'voided' || p.status === 'VOID' ? (
-                            <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 border border-rose-200 text-rose-700 px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider shadow-3xs">
-                              <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse"></span>
-                              Void
+                            <span className="inline-flex items-center px-2 py-0.5 text-[10px] bg-slate-50 border border-slate-100 text-slate-400 font-bold rounded-full">
+                              ID: {p.id}
                             </span>
-                          ) : (
+                            {activeSegment === 'customers' && (p as CustomerPayment).receiptNumber && (
+                              <span className="inline-flex items-center px-2 py-0.5 text-[10px] bg-indigo-50 border border-indigo-100 text-indigo-700 font-extrabold rounded-full animate-in fade-in zoom-in-95">
+                                Receipt: {(p as CustomerPayment).receiptNumber}
+                              </span>
+                            )}
+                            {activeSegment === 'suppliers' && (p as SupplierPayment).voucherNumber && (
+                              <span className="inline-flex items-center px-2 py-0.5 text-[10px] bg-orange-50 border border-orange-100 text-orange-700 font-extrabold rounded-full animate-in fade-in zoom-in-95">
+                                Voucher: {(p as SupplierPayment).voucherNumber}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Description indicators */}
+                          <div className="flex items-center gap-4 text-[11px] text-slate-500 flex-wrap">
+                            <span className="flex items-center gap-1 shrink-0">
+                              <Calendar className="h-3.5 w-3.5 text-slate-400" />
+                              <span>{new Date(p.paymentDate).toLocaleDateString(undefined, { dateStyle: 'medium' })}</span>
+                            </span>
+
+                            {p.notes && (
+                              <span className="flex items-center gap-1 truncate max-w-[280px]">
+                                <FileText className="h-3.5 w-3.5 text-slate-400" />
+                                <span className="truncate italic text-slate-400">"{p.notes}"</span>
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Amounts column right */}
+                        <div className="flex items-center justify-between sm:justify-end gap-5 shrink-0">
+                          <div className="text-left sm:text-right space-y-0.5">
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none block">Settled Sum</span>
+                            <span className={`text-sm font-bold block leading-none ${
+                              activeSegment === 'customers' ? 'text-emerald-600' : 'text-indigo-600'
+                            }`}>
+                              {activeSegment === 'customers' ? '+' : '-'}${p.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            </span>
+                          </div>
+
+                          {/* State step progress indicator */}
+                          <div className="text-[10px] text-slate-400 border-l border-slate-100 pl-4 space-y-0.5 min-w-[124px]">
+                            <div>Owed: <span className="font-bold text-slate-600">${(p.previousDue ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
+                            <div>Rem: <span className="font-bold text-slate-800">${(p.remainingDue ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
+                          </div>
+
+                           {/* Void & Receipt Control */}
+                          <div className="border-l border-slate-100 pl-4 flex flex-col items-center justify-center gap-1.5 min-w-[100px]">
+                            {isVoided ? (
+                              <>
+                                <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 border border-rose-200 text-rose-700 px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider shadow-3xs">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse"></span>
+                                  Void
+                                </span>
+                                {activeSegment === 'customers' ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedPayment(p as CustomerPayment)}
+                                    className="px-2 py-0.5 rounded-lg text-[9px] font-extrabold text-indigo-500 hover:text-white hover:bg-indigo-500 border border-indigo-200 cursor-pointer transition uppercase tracking-wider shadow-3xs"
+                                  >
+                                    Receipt
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedSupplierPayment(p as SupplierPayment)}
+                                    className="px-2 py-0.5 rounded-lg text-[9px] font-extrabold text-orange-500 hover:text-white hover:bg-orange-500 border border-orange-200 cursor-pointer transition uppercase tracking-wider shadow-3xs"
+                                  >
+                                    Voucher
+                                  </button>
+                                )}
+                              </>
+                            ) : (
                             <>
                               <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-250/60 text-emerald-700 px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider shadow-3xs">
                                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
                                 Success
                               </span>
-                              {(userRole === 'admin' || userRole === 'accountant') && (
-                                <button
-                                  type="button"
-                                  onClick={() => voidTransaction(p.id)}
-                                  className="px-2 py-0.5 rounded-lg text-[9px] font-extrabold text-rose-600 hover:text-white hover:bg-rose-600 border border-rose-200 cursor-pointer transition uppercase tracking-wider"
-                                >
-                                  Void
-                                </button>
-                              )}
+                              <div className="flex gap-1 flex-wrap justify-center">
+                                {activeSegment === 'customers' ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedPayment(p as CustomerPayment)}
+                                    className="px-2 py-0.5 rounded-lg text-[9px] font-extrabold text-indigo-600 hover:text-white hover:bg-indigo-600 border border-indigo-200 cursor-pointer transition uppercase tracking-wider shadow-3xs"
+                                  >
+                                    Receipt
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedSupplierPayment(p as SupplierPayment)}
+                                    className="px-2 py-0.5 rounded-lg text-[9px] font-extrabold text-orange-600 hover:text-white hover:bg-orange-600 border border-orange-200 cursor-pointer transition uppercase tracking-wider shadow-3xs"
+                                  >
+                                    Voucher
+                                  </button>
+                                )}
+                                {permissions.voidPayment && (
+                                  <button
+                                    type="button"
+                                    onClick={() => voidTransaction(p.id)}
+                                    className="px-2 py-0.5 rounded-lg text-[9px] font-extrabold text-rose-600 hover:text-white hover:bg-rose-600 border border-rose-200 cursor-pointer transition uppercase tracking-wider shadow-3xs"
+                                  >
+                                    Void
+                                  </button>
+                                )}
+                              </div>
                             </>
                           )}
                         </div>
                       </div>
                     </div>
-                  ))}
+                  )})}
                 </div>
               )}
             </div>
@@ -1353,13 +2428,13 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                   >
                     <option value="">{activeSegment === 'customers' ? '-- Choose a Client --' : '-- Choose a Supplier --'}</option>
                     {activeSegment === 'customers' ? (
-                      customers.filter(c => c.status !== 'inactive').map((c) => (
+                      customers.filter(c => !isInactiveStatus(c.status)).map((c) => (
                         <option key={c.id} value={c.id}>
                           {c.name} (Outstanding receivable: ${c.dueBalance.toFixed(2)})
                         </option>
                       ))
                     ) : (
-                      suppliers.filter(s => s.status !== 'inactive').map((s) => (
+                      suppliers.filter(s => !isInactiveStatus(s.status)).map((s) => (
                         <option key={s.id} value={s.id}>
                           {s.name} (Outstanding trade payable: ${(s.dueBalance ?? 0).toFixed(2)})
                         </option>
@@ -1443,6 +2518,180 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                     )}
                   </div>
                 </div>
+
+                {activeSegment === 'customers' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                    {/* Receipt Number */}
+                    <div className="relative w-full">
+                      <input
+                        type="text"
+                        required
+                        disabled={isSaving}
+                        id="form-payment-receipt-field"
+                        value={formData.receiptNumber}
+                        onChange={(e) => setFormData({ ...formData, receiptNumber: e.target.value })}
+                        placeholder=" "
+                        className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all h-[52px] bg-white ${
+                          formErrors.receiptNumber 
+                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455 focus:ring-1 focus:ring-rose-500' 
+                            : 'border-slate-200 focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605'
+                        }`}
+                      />
+                      <label htmlFor="form-payment-receipt-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Receipt Number <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                      {formErrors.receiptNumber && (
+                        <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                          <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                          <span>{formErrors.receiptNumber}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Received By */}
+                    <div className="relative w-full">
+                      <input
+                        type="text"
+                        required
+                        disabled={isSaving}
+                        id="form-payment-received-by-field"
+                        value={formData.receivedBy}
+                        onChange={(e) => setFormData({ ...formData, receivedBy: e.target.value })}
+                        placeholder=" "
+                        className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-indigo-605 focus:border-indigo-605 transition h-[52px]"
+                      />
+                      <label htmlFor="form-payment-received-by-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Received By <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                    </div>
+                  </div>
+                )}
+
+                {activeSegment === 'suppliers' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                    {/* Payment Voucher Number */}
+                    <div className="relative w-full">
+                      <input
+                        type="text"
+                        required
+                        disabled={isSaving}
+                        id="form-payment-voucher-field"
+                        value={formData.voucherNumber}
+                        onChange={(e) => setFormData({ ...formData, voucherNumber: e.target.value })}
+                        placeholder=" "
+                        className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all h-[52px] bg-white ${
+                          formErrors.voucherNumber 
+                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455 focus:ring-1 focus:ring-rose-500' 
+                            : 'border-slate-200 focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605'
+                        }`}
+                      />
+                      <label htmlFor="form-payment-voucher-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Payment Voucher Number <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                      {formErrors.voucherNumber && (
+                        <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                          <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                          <span>{formErrors.voucherNumber}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Paid By */}
+                    <div className="relative w-full">
+                      <input
+                        type="text"
+                        required
+                        disabled={isSaving}
+                        id="form-payment-paid-by-field"
+                        value={formData.paidBy}
+                        onChange={(e) => setFormData({ ...formData, paidBy: e.target.value })}
+                        placeholder=" "
+                        className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition h-[52px] ${
+                          formErrors.paidBy 
+                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455 focus:ring-1 focus:ring-rose-500' 
+                            : 'border-slate-200 focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605'
+                        }`}
+                      />
+                      <label htmlFor="form-payment-paid-by-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Paid By <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                      {formErrors.paidBy && (
+                        <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                          <AlertTriangle className="h-3.5 w-3.5 text-rose-505 shrink-0" />
+                          <span>{formErrors.paidBy}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {activeSegment === 'customers' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                    <div className="relative w-full">
+                      <input
+                        type="text"
+                        disabled={isSaving}
+                        id="form-payment-ref-num-field"
+                        value={formData.referenceNumber}
+                        onChange={(e) => setFormData({ ...formData, referenceNumber: e.target.value })}
+                        placeholder=" "
+                        className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-indigo-605 focus:border-indigo-605 transition h-[52px]"
+                      />
+                      <label htmlFor="form-payment-ref-num-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Reference Number (Optional)
+                      </label>
+                    </div>
+
+                    <div className="relative w-full">
+                      <input
+                        type="text"
+                        disabled={isSaving}
+                        id="form-payment-cheque-ref-field"
+                        value={formData.chequeOrBankRef}
+                        onChange={(e) => setFormData({ ...formData, chequeOrBankRef: e.target.value })}
+                        placeholder=" "
+                        className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-indigo-605 focus:border-indigo-605 transition h-[52px]"
+                      />
+                      <label htmlFor="form-payment-cheque-ref-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Cheque / Bank Reference (Optional)
+                      </label>
+                    </div>
+                  </div>
+                )}
+
+                {activeSegment === 'suppliers' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                    <div className="relative w-full">
+                      <input
+                        type="text"
+                        disabled={isSaving}
+                        id="form-payment-supp-ref-field"
+                        value={formData.referenceNumber}
+                        onChange={(e) => setFormData({ ...formData, referenceNumber: e.target.value })}
+                        placeholder=" "
+                        className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-indigo-605 focus:border-indigo-605 transition h-[52px]"
+                      />
+                      <label htmlFor="form-payment-supp-ref-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Reference Number (Optional)
+                      </label>
+                    </div>
+
+                    <div className="relative w-full">
+                      <input
+                        type="text"
+                        disabled={isSaving}
+                        id="form-payment-supp-cheque-field"
+                        value={formData.chequeOrBankRef}
+                        onChange={(e) => setFormData({ ...formData, chequeOrBankRef: e.target.value })}
+                        placeholder=" "
+                        className="peer w-full rounded-xl border border-slate-200 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-indigo-605 focus:border-indigo-605 transition h-[52px]"
+                      />
+                      <label htmlFor="form-payment-supp-cheque-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-650">
+                        Cheque / Bank Reference (Optional)
+                      </label>
+                    </div>
+                  </div>
+                )}
 
                 {/* Notes area */}
                 <div className="relative w-full">
@@ -1606,6 +2855,342 @@ export default function PaymentLedger({ userRole = 'admin' }: { userRole?: 'admi
                 >
                   Confirm Payment
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* PRINTABLE RECEIPT MODAL DIALOG */}
+      <AnimatePresence>
+        {selectedPayment && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-4xl rounded-[2.5rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-2xl overflow-y-auto max-h-[90vh] animate-in duration-200 fade-in zoom-in-95"
+            >
+              {/* Modal header */}
+              <div className="flex items-center justify-between pb-5 border-b border-slate-100 mb-6">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 tracking-tight flex items-center gap-2">
+                    <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                    <span>Official Customer Receipt Voucher</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Receipt details and FIFO allocation audit profile.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelectedPayment(null)}
+                  className="h-8 w-8 rounded-full border border-slate-200 flex items-center justify-center text-slate-400 hover:text-slate-650 hover:bg-slate-50 transition cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Receipt Body Snapshot */}
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-8">
+                {/* Left Side: General Vouchers */}
+                <div className="md:col-span-5 space-y-5">
+                  <div className="bg-slate-50 rounded-2xl border border-slate-100 p-5 space-y-4">
+                    <div className="flex items-center justify-between pb-3 border-b border-slate-200/60">
+                      <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">Receipt Number</span>
+                      <strong className="text-xs font-mono font-extrabold text-indigo-650 bg-indigo-50 border border-indigo-100/60 px-2.5 py-0.5 rounded-full">
+                        {selectedPayment.receiptNumber || 'N/A'}
+                      </strong>
+                    </div>
+
+                    <div className="space-y-1">
+                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Customer Account</span>
+                      <strong className="text-xs text-slate-850 block">{selectedPayment.customerName || 'Anonymous Client'}</strong>
+                      <span className="text-[10px] font-mono text-slate-400 block">ID: {selectedPayment.customerId}</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 pt-2 border-t border-slate-200/45">
+                      <div className="space-y-0.5">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Receipt Date</span>
+                        <span className="text-xs font-semibold text-slate-700">{selectedPayment.receiptDate || selectedPayment.paymentDate}</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Received By Agent</span>
+                        <span className="text-xs font-semibold text-slate-700">{selectedPayment.receivedBy || 'System Admin'}</span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 pt-2 border-t border-slate-200/45">
+                      <div className="space-y-0.5">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Reference #</span>
+                        <span className="text-xs font-mono font-semibold text-slate-700">{selectedPayment.referenceNumber || 'N/A'}</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Cheque / Bank Ref</span>
+                        <span className="text-xs font-mono font-semibold text-slate-700">{selectedPayment.chequeOrBankRef || 'N/A'}</span>
+                      </div>
+                    </div>
+
+                    {selectedPayment.notes && (
+                      <div className="pt-3 border-t border-slate-200/45 space-y-1">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Internal Notes</span>
+                        <p className="text-xs text-slate-500 italic leading-relaxed">"{selectedPayment.notes}"</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Settled sum summary */}
+                  <div className="bg-emerald-50 rounded-2xl border border-emerald-100 p-5 space-y-2">
+                    <span className="text-[10px] font-extrabold text-emerald-700 uppercase tracking-wider block">Settlement Sum Received</span>
+                    <strong className="text-2xl font-bold font-mono text-emerald-800 block">
+                      ${selectedPayment.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </strong>
+                    <div className="text-[10px] text-emerald-600 leading-relaxed font-semibold italic border-t border-emerald-200/60 pt-1.5">
+                      Amount in words: {numberToWords(selectedPayment.amountPaid)} Dollars Only
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right Side: FIFO Chronological Allocation Profile */}
+                <div className="md:col-span-7 space-y-4">
+                  <div className="border border-slate-200 rounded-2xl overflow-hidden bg-slate-50/50">
+                    <div className="bg-slate-100 px-5 py-3 border-b border-slate-200 flex items-center justify-between">
+                      <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                        <Clock className="h-3.5 w-3.5 text-indigo-500" />
+                        <span>FIFO Invoice Allocation Breakdown</span>
+                      </span>
+                      <span className="text-[10px] font-bold text-indigo-650 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-md">
+                        Deterministic FIFO Rule
+                      </span>
+                    </div>
+
+                    <div className="p-1 max-h-[300px] overflow-y-auto divide-y divide-slate-100">
+                      {getFIFOAllocationForSelected().length === 0 ? (
+                        <div className="text-center py-8 text-xs text-slate-400 font-medium italic">
+                          No outstanding invoices allocated. Full amount credited to account balance.
+                        </div>
+                      ) : (
+                        getFIFOAllocationForSelected().map((item) => (
+                          <div key={item.invoiceId} className="p-3.5 flex items-center justify-between gap-4 text-xs">
+                            <div className="space-y-1 min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <strong className="font-semibold text-slate-800">{item.invoiceNumber}</strong>
+                                <span className={`inline-flex items-center px-1.5 py-0.5 text-[9px] font-extrabold uppercase tracking-wider rounded-md ${
+                                  item.status === 'Fully Paid' 
+                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                                    : item.status === 'Unallocated Future Credit'
+                                    ? 'bg-amber-50 text-amber-700 border border-amber-100'
+                                    : 'bg-indigo-50 text-indigo-700 border border-indigo-100'
+                                }`}>
+                                  {item.status}
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-slate-400 flex items-center gap-3">
+                                <span>Date: {item.saleDate}</span>
+                                <span>Total Value: ${item.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                              </div>
+                            </div>
+
+                            <div className="text-right shrink-0">
+                              <div className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold leading-none mb-0.5">Allocated</div>
+                              <strong className="text-indigo-600 font-bold font-mono">${item.allocatedAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>
+                              {item.invoiceId !== 'CREDIT_POOL' && (
+                                <div className="text-[9px] text-slate-400">Rem: ${item.remainingAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                              )}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Operational Ledger Audit Snapshot */}
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs space-y-2">
+                    <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">Operational Ledger Verification</span>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="p-3 rounded-xl bg-white border border-slate-100/65">
+                        <div className="text-[9px] font-semibold text-slate-400 uppercase">Pre-Payment Outstanding</div>
+                        <strong className="text-sm font-bold text-slate-800">${(selectedPayment.previousDue ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>
+                      </div>
+                      <div className="p-3 rounded-xl bg-white border border-slate-100/65">
+                        <div className="text-[9px] font-semibold text-slate-400 uppercase">Post-Payment Outstanding</div>
+                        <strong className="text-sm font-bold text-slate-800">${(selectedPayment.remainingDue ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Modal footer actions */}
+              <div className="mt-8 pt-5 border-t border-slate-100 flex items-center justify-between flex-wrap gap-4">
+                <div className="text-[10px] font-mono text-slate-400 flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
+                  <span>Officially Verified & Registered  |  Audit Ledger Secure</span>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPayment(null)}
+                    className="px-5 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-500 hover:bg-slate-50 transition cursor-pointer"
+                  >
+                    Close Voucher
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handlePrintReceiptPDF(selectedPayment)}
+                    className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-sm hover:shadow-md cursor-pointer"
+                  >
+                    <Printer className="h-4 w-4" />
+                    <span>Print Official Receipt (PDF)</span>
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* PRINTABLE SUPPLIER VOUCHER MODAL DIALOG */}
+      <AnimatePresence>
+        {selectedSupplierPayment && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-4xl rounded-[2.5rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-2xl overflow-y-auto max-h-[90vh] animate-in duration-200 fade-in zoom-in-95"
+            >
+              {/* Modal header */}
+              <div className="flex items-center justify-between pb-5 border-b border-slate-100 mb-6">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 tracking-tight flex items-center gap-2">
+                    <CheckCircle2 className="h-5 w-5 text-orange-600" />
+                    <span>Official Supplier Payment Voucher</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Voucher details, disbursement agents, and ledger audit verification profile.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelectedSupplierPayment(null)}
+                  className="h-8 w-8 rounded-full border border-slate-200 flex items-center justify-center text-slate-400 hover:text-slate-650 hover:bg-slate-50 transition cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Voucher Body Snapshot */}
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-8">
+                {/* Left Side: General Info */}
+                <div className="md:col-span-5 space-y-5">
+                  <div className="bg-slate-50 rounded-2xl border border-slate-100 p-5 space-y-4">
+                    <div className="flex items-center justify-between pb-3 border-b border-slate-200/60">
+                      <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">Voucher Number</span>
+                      <strong className="text-xs font-mono font-extrabold text-orange-700 bg-orange-50 border border-orange-100/60 px-2.5 py-0.5 rounded-full">
+                        {selectedSupplierPayment.voucherNumber || 'N/A'}
+                      </strong>
+                    </div>
+
+                    <div className="space-y-1">
+                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Supplier Account</span>
+                      <strong className="text-xs text-slate-850 block">{selectedSupplierPayment.supplierName || 'Anonymous Supplier'}</strong>
+                      <span className="text-[10px] font-mono text-slate-400 block">ID: {selectedSupplierPayment.supplierId}</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 pt-2 border-t border-slate-200/45">
+                      <div className="space-y-0.5">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Payment Date</span>
+                        <span className="text-xs font-semibold text-slate-700">{selectedSupplierPayment.paymentDate}</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Disbursed By Agent</span>
+                        <span className="text-xs font-semibold text-slate-700">{selectedSupplierPayment.paidBy || 'System Admin'}</span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 pt-2 border-t border-slate-200/45">
+                      <div className="space-y-0.5">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Reference #</span>
+                        <span className="text-xs font-mono font-semibold text-slate-700">{selectedSupplierPayment.referenceNumber || 'N/A'}</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Cheque / Bank Ref</span>
+                        <span className="text-xs font-mono font-semibold text-slate-700">{selectedSupplierPayment.chequeOrBankRef || 'N/A'}</span>
+                      </div>
+                    </div>
+
+                    {selectedSupplierPayment.notes && (
+                      <div className="pt-3 border-t border-slate-200/45 space-y-1">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Internal Notes</span>
+                        <p className="text-xs text-slate-500 italic leading-relaxed">"{selectedSupplierPayment.notes}"</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Settled sum summary */}
+                  <div className="bg-orange-50 rounded-2xl border border-orange-100 p-5 space-y-2">
+                    <span className="text-[10px] font-extrabold text-orange-700 uppercase tracking-wider block">Settlement Sum Disbursed</span>
+                    <strong className="text-2xl font-bold font-mono text-orange-800 block">
+                      ${selectedSupplierPayment.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </strong>
+                    <div className="text-[10px] text-orange-600 leading-relaxed font-semibold italic border-t border-orange-200/60 pt-1.5">
+                      Amount in words: {numberToWords(selectedSupplierPayment.amountPaid)} Dollars Only
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right Side: Ledger Snapshot */}
+                <div className="md:col-span-7 space-y-4">
+                  {/* Operational Ledger Audit Snapshot */}
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 text-xs space-y-4">
+                    <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">Operational Ledger Verification</span>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="p-3 rounded-xl bg-white border border-slate-100/65">
+                        <div className="text-[9px] font-semibold text-slate-400 uppercase">Pre-Payment Outstanding</div>
+                        <strong className="text-sm font-bold text-slate-800">${(selectedSupplierPayment.previousDue ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>
+                      </div>
+                      <div className="p-3 rounded-xl bg-white border border-slate-100/65">
+                        <div className="text-[9px] font-semibold text-slate-400 uppercase">Post-Payment Outstanding</div>
+                        <strong className="text-sm font-bold text-slate-800">${(selectedSupplierPayment.remainingDue ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>
+                      </div>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-amber-50/40 border border-amber-100/80 text-[11px] text-amber-800 leading-relaxed space-y-2">
+                      <strong className="font-bold uppercase tracking-wider block text-[10px] text-amber-900">AP ENGINE SYSTEM RULE</strong>
+                      <p>
+                        This payment has been automatically logged against the supplier's balance under double-entry cash flow rules. It will mirror against the Procurements register sequentially.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Modal footer actions */}
+              <div className="mt-8 pt-5 border-t border-slate-100 flex items-center justify-between flex-wrap gap-4">
+                <div className="text-[10px] font-mono text-slate-400 flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-orange-500"></span>
+                  <span>Officially Verified & Registered  |  Accounts Payable Ledger Secure</span>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSupplierPayment(null)}
+                    className="px-5 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-500 hover:bg-slate-50 transition cursor-pointer"
+                  >
+                    Close Voucher
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handlePrintVoucherPDF(selectedSupplierPayment)}
+                    className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-orange-600 text-xs font-bold text-white hover:bg-orange-700 transition shadow-sm hover:shadow-md cursor-pointer"
+                  >
+                    <Printer className="h-4 w-4" />
+                    <span>Print Official Voucher (PDF)</span>
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>

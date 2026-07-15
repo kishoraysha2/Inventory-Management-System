@@ -1,6 +1,7 @@
 import React from 'react';
 import { Trash2, Plus, AlertCircle, ShoppingBag } from 'lucide-react';
 import { Product, LineItem, calculateLineTotals, calculateTransactionTotals } from '../types';
+import { isInactiveStatus } from '../lib/utils';
 
 interface LineItemTableProps {
   items: LineItem[];
@@ -166,7 +167,7 @@ export default function LineItemTable({
                       >
                         <option value="">-- Select Product --</option>
                         {products
-                          .filter((p) => p.status !== 'inactive')
+                          .filter((p) => !isInactiveStatus(p.status))
                           .map((p) => {
                             const otherRowsQuantityTotal = items.reduce((sum, otherItem, otherIndex) => {
                               if (otherIndex !== index && otherItem.productId === p.id) {

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Mail, Phone, ExternalLink, Send, CheckCircle2, User } from 'lucide-react';
 import { Supplier, Product } from '../types';
+import { isInactiveStatus } from '../lib/utils';
 
 interface SupplierContactProps {
   id?: string;
@@ -66,7 +67,7 @@ export default function SupplierContact({
               onChange={(e) => setSelectedSupplierId(e.target.value)}
               className="w-full rounded-xl border border-slate-200 text-xs px-3 py-2 outline-none bg-white font-medium text-slate-700 transition focus:border-slate-400"
             >
-              {suppliers.filter(s => s.status !== 'inactive').map((s) => (
+              {suppliers.filter(s => !isInactiveStatus(s.status)).map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name} ({s.category})
                 </option>
