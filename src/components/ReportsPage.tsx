@@ -20,6 +20,8 @@ import {
   RefreshCw,
   ShoppingBag,
   ArrowUpRight,
+  BookOpen,
+  HelpCircle,
   Printer,
   Clock,
   Activity,
@@ -36,7 +38,7 @@ import { PurchaseDetailModal } from './PurchaseDetailModal';
 
 import { AppPermissions, usePermission, UserRole } from '../hooks/usePermission';
 
-type ReportType = 'sales' | 'purchases' | 'profit_loss' | 'customer_due' | 'supplier_due' | 'tax_vat' | 'activity_logs' | 'customer_statement' | 'supplier_statement' | 'expense_analytics' | 'chart_of_accounts';
+type ReportType = 'sales' | 'purchases' | 'profit_loss' | 'general_ledger' | 'trial_balance' | 'customer_due' | 'supplier_due' | 'tax_vat' | 'activity_logs' | 'customer_statement' | 'supplier_statement' | 'expense_analytics' | 'chart_of_accounts';
 
 interface ReportsPageProps {
   userRole?: UserRole;
@@ -65,6 +67,18 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
   const [activeReport, setActiveReport] = useState<ReportType>('sales');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
   const [selectedSupplierId, setSelectedSupplierId] = useState<string>('');
+
+  // --- General Ledger Filters & States ---
+  const [selectedGlAccountId, setSelectedGlAccountId] = useState<string>('');
+  const [glCompanyFilter, setGlCompanyFilter] = useState<string>('');
+  const [glBranchFilter, setGlBranchFilter] = useState<string>('');
+  const [glVoucherTypeFilter, setGlVoucherTypeFilter] = useState<string>('');
+  const [glPostingStatusFilter, setGlPostingStatusFilter] = useState<string>('POSTED');
+  const [glSourceModuleFilter, setGlSourceModuleFilter] = useState<string>('');
+  const [glCreatedByFilter, setGlCreatedByFilter] = useState<string>('');
+  const [glDatePreset, setGlDatePreset] = useState<string>('all_time');
+  const [selectedGlEntryForDetail, setSelectedGlEntryForDetail] = useState<any | null>(null);
+  const [glAccountViewMode, setGlAccountViewMode] = useState<'active' | 'historical' | 'all'>('all');
 
   // --- Enterprise Sales Register Filters & States ---
   const [salesCustomerFilter, setSalesCustomerFilter] = useState<string>('');
@@ -109,6 +123,14 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
   const [expenseStatusFilter, setExpenseStatusFilter] = useState<string>('active');
   const [expenseMinAmtFilter, setExpenseMinAmtFilter] = useState<string>('');
   const [expenseMaxAmtFilter, setExpenseMaxAmtFilter] = useState<string>('');
+
+  // --- Enterprise Trial Balance Specific Filters State ---
+  const [tbCompanyFilter, setTbCompanyFilter] = useState<string>('');
+  const [tbBranchFilter, setTbBranchFilter] = useState<string>('');
+  const [tbPostingStatusFilter, setTbPostingStatusFilter] = useState<string>('POSTED');
+  const [tbCreatedByFilter, setTbCreatedByFilter] = useState<string>('');
+  const [tbDatePreset, setTbDatePreset] = useState<string>('all_time');
+  const [tbSubTab, setTbSubTab] = useState<'table' | 'reconciliation' | 'diagnostics'>('table');
 
   // --- Check for Redirect from Customer/Supplier Management View Statement ---
   useEffect(() => {
@@ -779,6 +801,63 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
     };
   }, []);
 
+  // --- General Ledger Dynamic Account Selection & Date Preset Logic ---
+  useEffect(() => {
+    if (coa.length > 0 && !selectedGlAccountId) {
+      const activeAccts = coa.filter(a => a.status === 'active');
+      if (activeAccts.length > 0) {
+        setSelectedGlAccountId(activeAccts[0].code);
+      }
+    }
+  }, [coa, selectedGlAccountId]);
+
+  const applyGlDatePreset = (preset: string) => {
+    // Current local date in Houston/USA: 2026-07-15
+    switch (preset) {
+      case 'today':
+        setStartDate("2026-07-15");
+        setEndDate("2026-07-15");
+        break;
+      case 'yesterday':
+        setStartDate("2026-07-14");
+        setEndDate("2026-07-14");
+        break;
+      case 'this_week':
+        setStartDate("2026-07-13"); // Monday of current week
+        setEndDate("2026-07-19");   // Sunday of current week
+        break;
+      case 'this_month':
+        setStartDate("2026-07-01");
+        setEndDate("2026-07-31");
+        break;
+      case 'this_quarter':
+        setStartDate("2026-07-01");
+        setEndDate("2026-09-30");
+        break;
+      case 'this_year':
+        setStartDate("2026-01-01");
+        setEndDate("2026-12-31");
+        break;
+      case 'fiscal_year':
+        setStartDate("2026-01-01");
+        setEndDate("2026-12-31");
+        break;
+      case 'custom':
+        // Keep the custom selection active
+        break;
+      case 'all_time':
+      default:
+        setStartDate("2020-01-01");
+        setEndDate("2026-12-31");
+        break;
+    }
+  };
+
+  const handleGlDatePresetChange = (preset: string) => {
+    setGlDatePreset(preset);
+    applyGlDatePreset(preset);
+  };
+
   const filteredSales = sales.filter(s => isDateInRange(s.saleDate) && !isVoidStatus(s.status)).map(s => {
     const summary = getSaleSummary(s, products);
     const saleDate = s.saleDate;
@@ -902,6 +981,264 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
     }
   };
 
+  // --- Historical Account Compatibility Layer (Sprint 6.2.2) ---
+  const unionCOA = useMemo(() => {
+    const coaMap = new Map<string, ChartOfAccount>();
+    coa.forEach(acc => coaMap.set(acc.code, acc));
+
+    const finalCoa: Array<ChartOfAccount & { isLegacy?: boolean; isVirtual?: boolean }> = [...coa];
+
+    // Discover unique account codes from ledgerEntries
+    const discoveredCodes = new Set<string>();
+    ledgerEntries.forEach(entry => {
+      if (entry.lines) {
+        entry.lines.forEach(line => {
+          if (line.accountCode) {
+            discoveredCodes.add(line.accountCode);
+          }
+        });
+      }
+    });
+
+    discoveredCodes.forEach(code => {
+      if (!coaMap.has(code)) {
+        // Determine type and normalBalance based on code prefix (standards compliant)
+        let type: 'Asset' | 'Liability' | 'Equity' | 'Revenue' | 'Expense' = 'Asset';
+        let normalBalance: 'Debit' | 'Credit' = 'Debit';
+
+        if (code.startsWith('1')) {
+          type = 'Asset';
+          normalBalance = 'Debit';
+        } else if (code.startsWith('2')) {
+          type = 'Liability';
+          normalBalance = 'Credit';
+        } else if (code.startsWith('3')) {
+          type = 'Equity';
+          normalBalance = 'Credit';
+        } else if (code.startsWith('4')) {
+          type = 'Revenue';
+          normalBalance = 'Credit';
+        } else if (code.startsWith('5') || code.startsWith('6') || code.startsWith('7') || code.startsWith('8') || code.startsWith('9')) {
+          type = 'Expense';
+          normalBalance = 'Debit';
+        }
+
+        // Try to resolve the legible name from postings
+        let name = 'Legacy Account';
+        for (const entry of ledgerEntries) {
+          if (entry.lines) {
+            const line = entry.lines.find(l => l.accountCode === code);
+            if (line && line.accountName) {
+              name = line.accountName;
+              break;
+            }
+          }
+        }
+
+        finalCoa.push({
+          id: `virtual-${code}`,
+          code,
+          name,
+          type,
+          normalBalance,
+          status: 'inactive',
+          isSystem: false,
+          editable: false,
+          isLegacy: true,
+          isVirtual: true,
+          description: 'Historical legacy account detected in ledger postings.'
+        });
+      }
+    });
+
+    return finalCoa.sort((a, b) => a.code.localeCompare(b.code));
+  }, [coa, ledgerEntries]);
+
+  // --- 11. General Ledger Report Math ---
+  const generalLedgerData = useMemo(() => {
+    if (!selectedGlAccountId) {
+      return {
+        openingBalance: 0,
+        totalDebits: 0,
+        totalCredits: 0,
+        closingBalance: 0,
+        entries: [],
+        lastPostingDate: null,
+        isDebitNormal: true
+      };
+    }
+
+    const account = unionCOA.find(a => a.code === selectedGlAccountId || a.id === selectedGlAccountId);
+    const isDebitNormal = account ? account.normalBalance === 'Debit' : true;
+
+    // Filter posted ledger entries
+    const postedEntries = ledgerEntries.filter(entry => {
+      // 1. Check if matches posting status filter
+      if (glPostingStatusFilter && entry.postingStatus !== glPostingStatusFilter) return false;
+      // If no filter, we only show POSTED by default
+      if (!glPostingStatusFilter && entry.postingStatus !== 'POSTED') return false;
+
+      // 2. Filter by Company
+      if (glCompanyFilter && entry.companyId !== glCompanyFilter) return false;
+
+      // 3. Filter by Branch
+      if (glBranchFilter && entry.branchId !== glBranchFilter) return false;
+
+      // 4. Filter by Source Module
+      if (glSourceModuleFilter && entry.sourceModule !== glSourceModuleFilter) return false;
+
+      // 5. Filter by Created By
+      if (glCreatedByFilter && entry.createdBy !== glCreatedByFilter) return false;
+
+      // 6. Check if voucher type matches (prefix of postingNumber e.g. "JV-100" -> "JV")
+      if (glVoucherTypeFilter) {
+        const entryVoucherType = entry.postingNumber ? entry.postingNumber.split('-')[0] : 'JV';
+        if (entryVoucherType !== glVoucherTypeFilter) return false;
+      }
+
+      return true;
+    });
+
+    // Extract all lines that affect this specific account
+    const allMatchingLines: Array<{
+      entry: LedgerEntry;
+      line: any;
+      postingDate: string;
+    }> = [];
+
+    postedEntries.forEach(entry => {
+      entry.lines.forEach(line => {
+        if (line.accountCode === selectedGlAccountId) {
+          allMatchingLines.push({
+            entry,
+            line,
+            postingDate: entry.postingDate || entry.createdAt
+          });
+        }
+      });
+    });
+
+    // Sort chronologically (oldest first) so running balances compute correctly
+    allMatchingLines.sort((a, b) => new Date(a.postingDate).getTime() - new Date(b.postingDate).getTime());
+
+    // Compute Opening Balance: sum lines with postingDate < startDate
+    let openingDebits = 0;
+    let openingCredits = 0;
+
+    const startDateTime = startDate ? new Date(startDate).getTime() : 0;
+    const endDateTime = endDate ? new Date(endDate).getTime() + 86400000 : Infinity; // end of day
+
+    const beforePeriodLines = allMatchingLines.filter(item => {
+      const t = new Date(item.postingDate).getTime();
+      return startDate && t < startDateTime;
+    });
+
+    beforePeriodLines.forEach(item => {
+      openingDebits += item.line.debit || 0;
+      openingCredits += item.line.credit || 0;
+    });
+
+    const openingBalance = isDebitNormal
+      ? (openingDebits - openingCredits)
+      : (openingCredits - openingDebits);
+
+    // Compute current period entries (between startDate and endDate)
+    const periodLines = allMatchingLines.filter(item => {
+      const t = new Date(item.postingDate).getTime();
+      return t >= startDateTime && t <= endDateTime;
+    });
+
+    let totalDebits = 0;
+    let totalCredits = 0;
+    let lastPostingDate: string | null = null;
+
+    // Build row-by-row entries with running balance
+    let currentBal = openingBalance;
+    const entries = periodLines.map(item => {
+      const debit = item.line.debit || 0;
+      const credit = item.line.credit || 0;
+      totalDebits += debit;
+      totalCredits += credit;
+      lastPostingDate = item.postingDate;
+
+      // Update running balance based on normal balance
+      if (isDebitNormal) {
+        currentBal = currentBal + debit - credit;
+      } else {
+        currentBal = currentBal + credit - debit;
+      }
+
+      // Voucher Type helper
+      const voucherType = item.entry.postingNumber ? item.entry.postingNumber.split('-')[0] : 'JV';
+
+      return {
+        id: item.entry.id,
+        postingDate: item.postingDate,
+        postingNumber: item.entry.postingNumber || 'JV-N/A',
+        voucherType,
+        sourceModule: item.entry.sourceModule,
+        reference: item.entry.createdFrom || '-',
+        narration: item.line.narration || item.entry.narration || 'Ledger Posting',
+        debit,
+        credit,
+        runningBalance: currentBal,
+        createdBy: item.entry.createdBy || 'System',
+        companyId: item.entry.companyId,
+        branchId: item.entry.branchId,
+        createdFrom: item.entry.createdFrom,
+        originalEntry: item.entry
+      };
+    });
+
+    const closingBalance = openingBalance + (isDebitNormal ? (totalDebits - totalCredits) : (totalCredits - totalDebits));
+
+    return {
+      openingBalance,
+      totalDebits,
+      totalCredits,
+      closingBalance,
+      entries,
+      lastPostingDate,
+      isDebitNormal
+    };
+  }, [ledgerEntries, unionCOA, selectedGlAccountId, startDate, endDate, glCompanyFilter, glBranchFilter, glVoucherTypeFilter, glPostingStatusFilter, glSourceModuleFilter, glCreatedByFilter]);
+
+  const searchableGlEntries = useMemo(() => {
+    if (!searchQuery) return generalLedgerData.entries;
+    const q = searchQuery.toLowerCase();
+    return generalLedgerData.entries.filter(e => 
+      e.postingNumber.toLowerCase().includes(q) ||
+      e.narration.toLowerCase().includes(q) ||
+      e.reference.toLowerCase().includes(q) ||
+      e.createdBy.toLowerCase().includes(q)
+    );
+  }, [generalLedgerData.entries, searchQuery]);
+
+  const handleDrillDown = (entryLine: any) => {
+    const { sourceModule, createdFrom } = entryLine;
+    if (!createdFrom || createdFrom === '-') return;
+
+    if (sourceModule === 'SALES') {
+      const foundSale = sales.find(s => s.id === createdFrom);
+      if (foundSale) {
+        setSelectedSaleForInvoice(foundSale);
+      } else {
+        alert("Sales invoice record not found in snapshot database.");
+      }
+    } 
+    else if (sourceModule === 'PROCUREMENT') {
+      const foundPurchase = purchases.find(p => p.id === createdFrom);
+      if (foundPurchase) {
+        setSelectedPurchaseForDetail(foundPurchase);
+      } else {
+        alert("Purchase procurement record not found in snapshot database.");
+      }
+    } 
+    else {
+      setSelectedGlEntryForDetail(entryLine);
+    }
+  };
+
   // 3. Profit / Loss Report Math (Ledger-Backed)
   const totalSubtotal = getLedgerReportBalance('4100', 'Credit', 'period');
   const costOfGoodsSold = getLedgerReportBalance('5100', 'Debit', 'period');
@@ -927,10 +1264,9 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
 
   // --- Chart Of Accounts Report Math (Ledger-Backed) ---
   const getCOAAccountLiveBalance = (code: string): number => {
-    const resolvedCode = code === '1010' ? '1100' : code;
-    const account = coa.find(acc => acc.code === resolvedCode);
+    const account = unionCOA.find(acc => acc.code === code);
     const isDebitNormal = account ? account.normalBalance === 'Debit' : true;
-    return getLedgerReportBalance(resolvedCode, isDebitNormal ? 'Debit' : 'Credit', 'cumulative');
+    return getLedgerReportBalance(code, isDebitNormal ? 'Debit' : 'Credit', 'cumulative');
   };
 
   const coaSummaryStats = useMemo(() => {
@@ -1436,6 +1772,625 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
     };
   }, [filteredExpensesList]);
 
+  // --- 10. Enterprise Trial Balance Calculation Engine (GAAP/IFRS Compliant) ---
+  const trialBalanceData = useMemo(() => {
+    // Filter ledgerEntries by general filters
+    const filteredEntries = ledgerEntries.filter(entry => {
+      // Filter by postingStatus
+      if (tbPostingStatusFilter && entry.postingStatus !== tbPostingStatusFilter) return false;
+      if (!tbPostingStatusFilter && entry.postingStatus !== 'POSTED') return false;
+
+      // Filter by Company
+      if (tbCompanyFilter && entry.companyId !== tbCompanyFilter) return false;
+
+      // Filter by Branch
+      if (tbBranchFilter && entry.branchId !== tbBranchFilter) return false;
+
+      // Filter by Created By
+      if (tbCreatedByFilter && entry.createdBy !== tbCreatedByFilter) return false;
+
+      return true;
+    });
+
+    // We want to calculate opening balances (entries with date < startDate)
+    // and period balances (entries with startDate <= date <= endDate)
+    const startDateTime = startDate ? new Date(startDate).getTime() : 0;
+    const endDateTime = endDate ? new Date(endDate).getTime() + 86400000 : Infinity;
+
+    // We map each account code to its balances
+    const accountBalances: Record<string, {
+      openingDebits: number;
+      openingCredits: number;
+      periodDebits: number;
+      periodCredits: number;
+    }> = {};
+
+    // Initialize all accounts from union Chart of Accounts
+    unionCOA.forEach(acc => {
+      accountBalances[acc.code] = {
+        openingDebits: 0,
+        openingCredits: 0,
+        periodDebits: 0,
+        periodCredits: 0
+      };
+    });
+
+    let lastPostingDate: string | null = null;
+
+    filteredEntries.forEach(entry => {
+      const entryDateStr = entry.postingDate || entry.createdAt;
+      const t = new Date(entryDateStr).getTime();
+
+      if (t > 0) {
+        if (!lastPostingDate || new Date(entryDateStr).getTime() > new Date(lastPostingDate).getTime()) {
+          lastPostingDate = entryDateStr;
+        }
+      }
+
+      entry.lines.forEach(line => {
+        const code = line.accountCode;
+        if (!code) return;
+
+        if (!accountBalances[code]) {
+          accountBalances[code] = {
+            openingDebits: 0,
+            openingCredits: 0,
+            periodDebits: 0,
+            periodCredits: 0
+          };
+        }
+
+        const debit = Number(line.debit) || 0;
+        const credit = Number(line.credit) || 0;
+
+        if (startDate && t < startDateTime) {
+          accountBalances[code].openingDebits += debit;
+          accountBalances[code].openingCredits += credit;
+        } else if (t >= startDateTime && t <= endDateTime) {
+          accountBalances[code].periodDebits += debit;
+          accountBalances[code].periodCredits += credit;
+        } else if (!startDate && t <= endDateTime) {
+          // If no startDate, everything up to endDate is period
+          accountBalances[code].periodDebits += debit;
+          accountBalances[code].periodCredits += credit;
+        }
+      });
+    });
+
+    // Build the final list of account rows
+    let totalDebitColumnSum = 0;
+    let totalCreditColumnSum = 0;
+
+    const rows = unionCOA.map(acc => {
+      const balances = accountBalances[acc.code] || {
+        openingDebits: 0,
+        openingCredits: 0,
+        periodDebits: 0,
+        periodCredits: 0
+      };
+
+      const isDebitNormal = acc.normalBalance === 'Debit';
+
+      // Opening Balance as normal balance sign
+      const openingBalance = isDebitNormal
+        ? (balances.openingDebits - balances.openingCredits)
+        : (balances.openingCredits - balances.openingDebits);
+
+      const periodDebit = balances.periodDebits;
+      const periodCredit = balances.periodCredits;
+
+      // Net ending debit balance
+      const netEndingDebit = (isDebitNormal ? openingBalance : -openingBalance) + periodDebit - periodCredit;
+
+      let debitColumnValue = 0;
+      let creditColumnValue = 0;
+
+      if (netEndingDebit >= 0) {
+        debitColumnValue = netEndingDebit;
+        creditColumnValue = 0;
+      } else {
+        debitColumnValue = 0;
+        creditColumnValue = Math.abs(netEndingDebit);
+      }
+
+      const endingBalance = isDebitNormal
+        ? (openingBalance + periodDebit - periodCredit)
+        : (openingBalance + periodCredit - periodDebit);
+
+      totalDebitColumnSum += debitColumnValue;
+      totalCreditColumnSum += creditColumnValue;
+
+      return {
+        code: acc.code,
+        name: acc.name,
+        type: acc.type,
+        normalBalance: acc.normalBalance,
+        isDebitNormal,
+        openingBalance,
+        periodDebit,
+        periodCredit,
+        endingBalance,
+        debitColumnValue,
+        creditColumnValue,
+        isLegacy: acc.isLegacy || false,
+      };
+    }).filter(row => {
+      // Include row if there's any non-zero value or activity
+      const hasActivity = Math.abs(row.openingBalance) > 0.001 || row.periodDebit > 0.001 || row.periodCredit > 0.001 || Math.abs(row.endingBalance) > 0.001;
+      return hasActivity;
+    });
+
+    const difference = Math.abs(totalDebitColumnSum - totalCreditColumnSum);
+    const isBalanced = difference < 0.01;
+
+    return {
+      rows,
+      totalDebitColumnSum,
+      totalCreditColumnSum,
+      difference,
+      isBalanced,
+      lastPostingDate,
+      totalAccounts: rows.length,
+    };
+  }, [ledgerEntries, unionCOA, startDate, endDate, tbCompanyFilter, tbBranchFilter, tbPostingStatusFilter, tbCreatedByFilter]);
+
+  // --- 10b. Enterprise Accounting Diagnostics Engine ---
+  const tbDiagnostics = useMemo(() => {
+    const issues: Array<{
+      id: string;
+      category: 'Critical' | 'Warning' | 'Info';
+      checkName: string;
+      message: string;
+      details: string;
+      sourceModule?: string;
+      voucherType?: string;
+      postingNumber?: string;
+      accountCode?: string;
+      possibleCause?: string;
+      remediation?: string;
+    }> = [];
+
+    const entries = ledgerEntries;
+
+    const addIssue = (
+      category: 'Critical' | 'Warning' | 'Info',
+      checkName: string,
+      message: string,
+      details: string,
+      extra?: Partial<any>
+    ) => {
+      issues.push({
+        id: `diag-${issues.length + 1}-${Date.now()}`,
+        category,
+        checkName,
+        message,
+        details,
+        ...extra
+      });
+    };
+
+    // 1. Unbalanced Journal Entries
+    entries.forEach(entry => {
+      let sumDebits = 0;
+      let sumCredits = 0;
+      entry.lines.forEach(line => {
+        sumDebits += Number(line.debit) || 0;
+        sumCredits += Number(line.credit) || 0;
+      });
+
+      const diff = Math.abs(sumDebits - sumCredits);
+      if (diff > 0.01) {
+        const voucherType = entry.postingNumber ? entry.postingNumber.split('-')[0] : 'JV';
+        addIssue(
+          'Critical',
+          'Unbalanced Journal Entry',
+          `Voucher ${entry.postingNumber || entry.id} is out of balance by $${diff.toFixed(2)}`,
+          `Total Debits: $${sumDebits.toFixed(2)} | Total Credits: $${sumCredits.toFixed(2)}. In a double-entry accounting system, total debits must equal total credits.`,
+          {
+            sourceModule: entry.sourceModule,
+            voucherType,
+            postingNumber: entry.postingNumber,
+            possibleCause: 'The ledger posting transaction did not balance during recording, likely due to a manual journal adjustment or a race condition in the posting pipeline.',
+            remediation: 'Void this journal voucher and re-record a balanced entry with matching debits and credits.'
+          }
+        );
+      }
+
+      // 3. Missing Ledger Lines
+      if (!entry.lines || entry.lines.length === 0) {
+        addIssue(
+          'Critical',
+          'Missing Ledger Lines',
+          `Voucher ${entry.postingNumber || entry.id} has no entry lines.`,
+          `The ledger entry exists in the system but contains no line items to debit or credit.`,
+          {
+            sourceModule: entry.sourceModule,
+            postingNumber: entry.postingNumber,
+            possibleCause: 'A corrupted transaction payload was sent to the database or the database write failed partially.',
+            remediation: 'Audit the source document and trigger a ledger posting re-run or manually recreate the lines.'
+          }
+        );
+      }
+
+      // 5. Missing Debit Leg
+      if (entry.lines && entry.lines.length > 0 && sumDebits === 0 && sumCredits > 0) {
+        addIssue(
+          'Critical',
+          'Missing Debit Leg',
+          `Voucher ${entry.postingNumber || entry.id} contains only Credits.`,
+          `Total Credit: $${sumCredits.toFixed(2)} but total Debit is $0.00.`,
+          {
+            sourceModule: entry.sourceModule,
+            postingNumber: entry.postingNumber,
+            possibleCause: 'The posting routine failed to add the debit line of the double entry.',
+            remediation: 'Examine the source document accounts mapping. Create a compensating debit adjustment.'
+          }
+        );
+      }
+
+      // 6. Missing Credit Leg
+      if (entry.lines && entry.lines.length > 0 && sumCredits === 0 && sumDebits > 0) {
+        addIssue(
+          'Critical',
+          'Missing Credit Leg',
+          `Voucher ${entry.postingNumber || entry.id} contains only Debits.`,
+          `Total Debit: $${sumDebits.toFixed(2)} but total Credit is $0.00.`,
+          {
+            sourceModule: entry.sourceModule,
+            postingNumber: entry.postingNumber,
+            possibleCause: 'The posting routine failed to add the credit line of the double entry.',
+            remediation: 'Examine the source document accounts mapping. Create a compensating credit adjustment.'
+          }
+        );
+      }
+
+      // 17. Missing Company
+      if (!entry.companyId) {
+        addIssue(
+          'Warning',
+          'Missing Company Identifier',
+          `Voucher ${entry.postingNumber || entry.id} has no Company assigned.`,
+          `The entry was posted without a valid companyId, violating multi-tenant entity integrity.`,
+          {
+            sourceModule: entry.sourceModule,
+            postingNumber: entry.postingNumber,
+            possibleCause: 'The session company profile was not populated or user was not assigned to a company.',
+            remediation: 'Link the entry to the primary corporate profile.'
+          }
+        );
+      }
+
+      // 18. Missing Branch
+      if (!entry.branchId) {
+        addIssue(
+          'Warning',
+          'Missing Branch Identifier',
+          `Voucher ${entry.postingNumber || entry.id} has no Branch assigned.`,
+          `The entry was posted without a branch designation, impacting divisional reporting.`,
+          {
+            sourceModule: entry.sourceModule,
+            postingNumber: entry.postingNumber,
+            possibleCause: 'Operational branch context was not loaded during transaction recording.',
+            remediation: 'Update the ledger record with the default HQ or operational branch.'
+          }
+        );
+      }
+
+      // 16. Invalid Fiscal Year / Period
+      if (entry.postingDate) {
+        const year = new Date(entry.postingDate).getFullYear();
+        if (isNaN(year) || year < 2020 || year > 2035) {
+          addIssue(
+            'Warning',
+            'Invalid Accounting Period / Fiscal Year',
+            `Voucher ${entry.postingNumber} has an irregular posting date: ${entry.postingDate}`,
+            `The year ${year} is outside of the active Nexus ERP fiscal configurations.`,
+            {
+              sourceModule: entry.sourceModule,
+              postingNumber: entry.postingNumber,
+              possibleCause: 'User manual override or device time synchronization discrepancy.',
+              remediation: 'Correct the posting date of the source journal.'
+            }
+          );
+        }
+      }
+    });
+
+    // 2. Duplicate Voucher Numbers
+    const voucherCounts: Record<string, string[]> = {};
+    entries.forEach(e => {
+      if (e.postingNumber && e.postingNumber !== 'JV-N/A') {
+        if (!voucherCounts[e.postingNumber]) {
+          voucherCounts[e.postingNumber] = [];
+        }
+        voucherCounts[e.postingNumber].push(e.id);
+      }
+    });
+    Object.entries(voucherCounts).forEach(([num, ids]) => {
+      if (ids.length > 1) {
+        addIssue(
+          'Critical',
+          'Duplicate Voucher Numbers',
+          `Voucher number ${num} is used by ${ids.length} different ledger entries.`,
+          `Voucher IDs: ${ids.join(', ')}. This violates accounting uniqueness principles.`,
+          {
+            postingNumber: num,
+            possibleCause: 'Concurrency issues, voucher sequence generator collision, or manual duplicate posting.',
+            remediation: 'Void the duplicate record or resequence the ledger entry numbering.'
+          }
+        );
+      }
+    });
+
+    // 7. Invalid Account Codes & 8. Inactive Accounts
+    entries.forEach(entry => {
+      entry.lines.forEach(line => {
+        const code = line.accountCode;
+        if (code) {
+          const acc = unionCOA.find(a => a.code === code);
+          if (!acc) {
+            addIssue(
+              'Critical',
+              'Invalid Account Code',
+              `Voucher ${entry.postingNumber} references an invalid account code: "${code}"`,
+              `The account code "${code}" does not exist in the active Chart of Accounts.`,
+              {
+                postingNumber: entry.postingNumber,
+                accountCode: code,
+                possibleCause: 'Hardcoded posting routine or account was deleted from the Chart of Accounts.',
+                remediation: 'Add the missing account code to the Chart of Accounts or edit the journal voucher line to use an existing account.'
+              }
+            );
+          } else if (acc.status === 'inactive' && !acc.isLegacy) {
+            addIssue(
+              'Warning',
+              'Inactive Account Used',
+              `Voucher ${entry.postingNumber} posted to an inactive account: "${acc.name}" (${code})`,
+              `The account is marked inactive. Postings should not be directed to suspended accounts.`,
+              {
+                postingNumber: entry.postingNumber,
+                accountCode: code,
+                possibleCause: 'A scheduled or automated transaction triggered against a frozen account.',
+                remediation: 'Change account status to Active, or reverse the transaction and re-route to an active substitute.'
+              }
+            );
+          }
+        }
+      });
+    });
+
+    // 9. Missing System Accounts
+    const criticalSystemCodes = ['1010', '1200', '1300', '2100', '3100', '4100', '5100'];
+    criticalSystemCodes.forEach(code => {
+      const match = coa.find(a => a.code === code);
+      if (!match) {
+        addIssue(
+          'Critical',
+          'Missing System Account',
+          `Essential system account "${code}" is missing from the Chart of Accounts.`,
+          `This account code is required for the automated ERP posting routines (Cash, AR, Inventory, AP, Capital, Sales, COGS).`,
+          {
+            accountCode: code,
+            possibleCause: 'Manual deletion or incomplete Chart of Accounts bootstrapping.',
+            remediation: 'Re-initialize the default Chart of Accounts template or manually create the required system account.'
+          }
+        );
+      }
+    });
+
+    // 10. Negative Inventory Asset, 11. Negative Cash Balance, 12. Negative Capital
+    trialBalanceData.rows.forEach(row => {
+      if (row.code === '1300' && row.endingBalance < 0) {
+        addIssue(
+          'Warning',
+          'Negative Inventory Asset Balance',
+          `Inventory account (${row.code}) has a negative ending balance: $${row.endingBalance.toFixed(2)}`,
+          `Asset balances are normally positive. A negative ending inventory balance implies an error in unit costing or stock ledger adjustments.`,
+          {
+            accountCode: row.code,
+            possibleCause: 'Sales recorded before purchase entries were posted, or incorrect COGS expense recognition.',
+            remediation: 'Audit the stock movement log and adjust standard COGS postings.'
+          }
+        );
+      }
+      if (row.code === '1010' && row.endingBalance < 0) {
+        addIssue(
+          'Warning',
+          'Negative Cash Balance',
+          `Cash account (${row.code}) is overdrawn: $${row.endingBalance.toFixed(2)}`,
+          `Cash is an asset with a normal Debit balance. A negative cash balance indicates a cash deficit or unregistered receipts.`,
+          {
+            accountCode: row.code,
+            possibleCause: 'Delayed registration of cash collections or duplicate payment postings.',
+            remediation: 'Perform a physical cash count and reconcile with bank statements.'
+          }
+        );
+      }
+      if (row.code === '3100' && row.endingBalance < 0) {
+        addIssue(
+          'Warning',
+          'Negative Capital Balance',
+          `Equity / Capital account (${row.code}) has negative balance: $${row.endingBalance.toFixed(2)}`,
+          `Capital is normally a Credit balance. Negative capital implies accumulated deficits exceeding initial investments.`,
+          {
+            accountCode: row.code,
+            possibleCause: 'Heavy operating losses or unrecorded owner capital injections.',
+            remediation: 'Review equity adjustment entries and closing journal allocations.'
+          }
+        );
+      }
+    });
+
+    // 13. Orphan Ledger Entries & 14. Ledger Entries without Source Documents
+    entries.forEach(entry => {
+      if (entry.sourceModule === 'SALES' && entry.createdFrom) {
+        const saleExists = sales.some(s => s.id === entry.createdFrom);
+        if (!saleExists) {
+          addIssue(
+            'Warning',
+            'Orphan Ledger Entry (SALES)',
+            `Voucher ${entry.postingNumber} references Sales ID "${entry.createdFrom}" which does not exist.`,
+            `The ledger entry is linked to a sales transaction that was deleted, or never synced.`,
+            {
+              postingNumber: entry.postingNumber,
+              possibleCause: 'A sales invoice was manually purged from the operational database after posting.',
+              remediation: 'Verify sales records or delete/re-post this ledger entry.'
+            }
+          );
+        }
+      } else if (entry.sourceModule === 'PROCUREMENT' && entry.createdFrom) {
+        const purchaseExists = purchases.some(p => p.id === entry.createdFrom);
+        if (!purchaseExists) {
+          addIssue(
+            'Warning',
+            'Orphan Ledger Entry (PROCUREMENT)',
+            `Voucher ${entry.postingNumber} references Purchase ID "${entry.createdFrom}" which does not exist.`,
+            `The ledger entry is linked to a procurement record that was deleted.`,
+            {
+              postingNumber: entry.postingNumber,
+              possibleCause: 'The procurement record was deleted or was not saved properly in the database.',
+              remediation: 'Audit the purchases list and recover the source document or void this entry.'
+            }
+          );
+        }
+      }
+    });
+
+    // 15. Source Documents without Ledger Entries
+    sales.forEach(sale => {
+      if (!isVoidStatus(sale.status)) {
+        const hasLedger = entries.some(e => e.createdFrom === sale.id);
+        if (!hasLedger) {
+          addIssue(
+            'Warning',
+            'Source Document without Ledger Entry (SALES)',
+            `Sales Invoice "${sale.invoiceNumber || sale.id}" has no general ledger entry.`,
+            `This posted transaction has not been synchronized to the General Ledger, causing operational and ledger misalignment.`,
+            {
+              sourceModule: 'SALES',
+              possibleCause: 'Voucher was saved but posting engine pipeline failed, or it was in draft status without ledger generation.',
+              remediation: 'Trigger a manual "Post to Ledger" action from the Sales invoice panel.'
+            }
+          );
+        }
+      }
+    });
+
+    purchases.forEach(purchase => {
+      if (!isVoidStatus(purchase.status)) {
+        const hasLedger = entries.some(e => e.createdFrom === purchase.id);
+        if (!hasLedger) {
+          addIssue(
+            'Warning',
+            'Source Document without Ledger Entry (PROCUREMENT)',
+            `Purchase Invoice "${purchase.invoiceNumber || purchase.id}" has no general ledger entry.`,
+            `The procurement invoice is saved but its corresponding financial transactions have not been posted to the General Ledger.`,
+            {
+              sourceModule: 'PROCUREMENT',
+              possibleCause: 'The procurement process completed but the ledger poster encountered a concurrency block.',
+              remediation: 'Re-run ledger posting from the procurement invoice manager.'
+            }
+          );
+        }
+      }
+    });
+
+    return issues;
+  }, [ledgerEntries, unionCOA, sales, purchases, trialBalanceData]);
+
+  // --- 10c. Enterprise Trial Balance & Operational Reconciliation Calculations ---
+  const reconciliationData = useMemo(() => {
+    // 1. Cash Ledger (1010)
+    const glCashAcc = trialBalanceData.rows.find(r => r.code === '1010');
+    const glCashBalance = glCashAcc ? glCashAcc.endingBalance : 0;
+    const operationalCashBalance = cashLedger.reduce((sum, item) => {
+      const type = (item.type || 'receipt').toLowerCase();
+      const amt = Number(item.amount) || 0;
+      return type === 'receipt' || type === 'deposit' || type === 'in' ? sum + amt : sum - amt;
+    }, 0);
+
+    // 2. Accounts Receivable (1200)
+    const glArAcc = trialBalanceData.rows.find(r => r.code === '1200');
+    const glArBalance = glArAcc ? glArAcc.endingBalance : 0;
+    const operationalArBalance = customersState.reduce((sum, c) => sum + (Number(c.dueBalance) || 0), 0);
+
+    // 3. Inventory (1300)
+    const glInventoryAcc = trialBalanceData.rows.find(r => r.code === '1300');
+    const glInventoryBalance = glInventoryAcc ? glInventoryAcc.endingBalance : 0;
+    const operationalInventoryBalance = products.reduce((sum, p) => {
+      const stock = Number(p.currentStock) || Number(p.stock) || 0;
+      const price = Number(p.purchasePrice) || Number(p.cost) || 0;
+      return sum + (stock * price);
+    }, 0);
+
+    // 4. Accounts Payable (2100)
+    const glApAcc = trialBalanceData.rows.find(r => r.code === '2100');
+    const glApBalance = glApAcc ? glApAcc.endingBalance : 0;
+    const operationalApBalance = suppliers.reduce((sum, s) => sum + (Number(s.dueBalance) || 0), 0);
+
+    // 5. Capital (3100)
+    const glCapitalAcc = trialBalanceData.rows.find(r => r.code === '3100');
+    const glCapitalBalance = glCapitalAcc ? glCapitalAcc.endingBalance : 0;
+    const operationalCapitalBalance = capital.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
+
+    // 6. Sales Revenue (4100)
+    const glSalesAcc = trialBalanceData.rows.find(r => r.code === '4100');
+    const glSalesBalance = glSalesAcc ? glSalesAcc.endingBalance : 0;
+    const operationalSalesBalance = sales.filter(s => !isVoidStatus(s.status)).reduce((sum, s) => sum + (Number(s.totalAmount) || 0), 0);
+
+    // 7. COGS (5100)
+    const glCogsAcc = trialBalanceData.rows.find(r => r.code === '5100');
+    const glCogsBalance = glCogsAcc ? glCogsAcc.endingBalance : 0;
+    const operationalCogsBalance = sales.filter(s => !isVoidStatus(s.status)).reduce((sum, s) => {
+      const items = getNormalizedItems(s);
+      const saleCogs = items.reduce((cSum, item) => {
+        const prod = products.find(p => p.id === item.productId);
+        const costPrice = prod ? (Number(prod.purchasePrice) || Number(prod.cost) || 0) : 0;
+        return cSum + (costPrice * (Number(item.quantity) || 0));
+      }, 0);
+      return sum + saleCogs;
+    }, 0);
+
+    // 8. Operating Expenses (61xx)
+    const glExpensesRows = trialBalanceData.rows.filter(r => r.code.startsWith('61'));
+    const glExpensesBalance = glExpensesRows.reduce((sum, r) => sum + r.endingBalance, 0);
+    const operationalExpensesBalance = expenses.filter(e => !isVoidStatus(e.status) && e.status !== 'void').reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+
+    const items = [
+      { name: 'Cash Ledger (1010)', code: '1010', gl: glCashBalance, op: operationalCashBalance },
+      { name: 'Accounts Receivable (1200)', code: '1200', gl: glArBalance, op: operationalArBalance },
+      { name: 'Inventory Asset (1300)', code: '1300', gl: glInventoryBalance, op: operationalInventoryBalance },
+      { name: 'Accounts Payable (2100)', code: '2100', gl: glApBalance, op: operationalApBalance },
+      { name: 'Owner Equity / Capital (3100)', code: '3100', gl: glCapitalBalance, op: operationalCapitalBalance },
+      { name: 'Sales Revenue (4100)', code: '4100', gl: glSalesBalance, op: operationalSalesBalance },
+      { name: 'Cost of Goods Sold (5100)', code: '5100', gl: glCogsBalance, op: operationalCogsBalance },
+      { name: 'Operating Expenses (61xx)', code: '61xx', gl: glExpensesBalance, op: operationalExpensesBalance },
+    ];
+
+    return items.map(item => {
+      const diff = Math.abs(item.gl - item.op);
+      const isReconciled = diff < 1.0; // allows for tiny cents discrepancies
+      return {
+        ...item,
+        diff,
+        isReconciled
+      };
+    });
+  }, [trialBalanceData, cashLedger, customersState, products, suppliers, capital, sales, expenses]);
+
+  // --- 10d. Drill Down function to navigate to General Ledger ---
+  const handleDrillDownToGl = (accountCode: string) => {
+    setSelectedGlAccountId(accountCode);
+    setGlCompanyFilter(tbCompanyFilter);
+    setGlBranchFilter(tbBranchFilter);
+    setGlPostingStatusFilter(tbPostingStatusFilter);
+    setGlCreatedByFilter(tbCreatedByFilter);
+    setGlDatePreset(tbDatePreset);
+    setActiveReport('general_ledger');
+    setSearchQuery('');
+  };
+
+
   // --- Action: Beautiful CSV Generator (Excel Native Compatible Format) ---
   const handleExportCSV = () => {
     if (permissions?.viewProductCost === false && (activeReport === 'purchases' || activeReport === 'profit_loss')) {
@@ -1592,6 +2547,47 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
       });
       csvContent += `\nSUMMARY,Total Accounts Registered,${coaSummaryStats.totalAccounts},Active Accounts,${coaSummaryStats.activeAccounts},System Accounts,${coaSummaryStats.systemAccounts},Custom Accounts,${coaSummaryStats.customAccounts}\n`;
       csvContent += `BALANCES,Total Assets,${coaSummaryStats.assetsBalance.toFixed(2)},Total Liabilities,${coaSummaryStats.liabilitiesBalance.toFixed(2)},Total Equity,${coaSummaryStats.equityBalance.toFixed(2)},Total Revenue,${coaSummaryStats.revenueBalance.toFixed(2)},Total Expenses,${coaSummaryStats.expensesBalance.toFixed(2)}\n`;
+    }
+    else if (activeReport === 'general_ledger') {
+      const selectedAcc = coa.find(a => a.code === selectedGlAccountId || a.id === selectedGlAccountId);
+      const accName = selectedAcc ? selectedAcc.name : 'Unknown Account';
+      csvContent = `NEXUS ENTERPRISE GENERAL LEDGER: ${selectedGlAccountId} - ${accName}\n`;
+      csvContent += `Reporting Range: ${startDate || 'All-time'} to ${endDate || 'All-time'}\n\n`;
+      csvContent += "Posting Date,Posting Number,Voucher Type,Source Module,Reference,Narration,Debit ($),Credit ($),Running Balance ($),Created By\n";
+      
+      // Opening Balance Row
+      csvContent += `"-","-","Opening Balance","-","-","Starting Balance before selected date",0,0,${generalLedgerData.openingBalance.toFixed(2)},"System"\n`;
+      
+      generalLedgerData.entries.forEach(e => {
+        csvContent += `"${e.postingDate.split('T')[0]}","${e.postingNumber}","${e.voucherType}","${e.sourceModule}","${e.reference}","${e.narration.replace(/"/g, '""')}",${e.debit},${e.credit},${e.runningBalance.toFixed(2)},"${e.createdBy}"\n`;
+      });
+      
+      csvContent += `\nSUMMARY,Opening Balance,${generalLedgerData.openingBalance.toFixed(2)},Total Debits,${generalLedgerData.totalDebits.toFixed(2)},Total Credits,${generalLedgerData.totalCredits.toFixed(2)},Closing Balance,${generalLedgerData.closingBalance.toFixed(2)},Transaction Count,${generalLedgerData.entries.length}\n`;
+    }
+    else if (activeReport === 'trial_balance') {
+      csvContent = "NEXUS ERP ENTERPRISE TRIAL BALANCE REPORT\n";
+      csvContent += `Generated On: ${new Date().toLocaleDateString()}, Range: ${startDate || 'All-time'} to ${endDate || 'All-time'}\n\n`;
+      csvContent += "SUMMARY METRICS\n";
+      csvContent += `Total Accounts,${trialBalanceData.totalAccounts}\n`;
+      csvContent += `Total Debit Column Sum,${trialBalanceData.totalDebitColumnSum.toFixed(2)}\n`;
+      csvContent += `Total Credit Column Sum,${trialBalanceData.totalCreditColumnSum.toFixed(2)}\n`;
+      csvContent += `Difference,${trialBalanceData.difference.toFixed(2)}\n`;
+      csvContent += `Balanced Status,${trialBalanceData.isBalanced ? 'BALANCED' : 'OUT OF BALANCE'}\n`;
+      csvContent += `Last Posting Date,${trialBalanceData.lastPostingDate || 'N/A'}\n\n`;
+
+      csvContent += "ACCOUNT CODES AND PERIOD BALANCES\n";
+      csvContent += "Account Code,Account Name,Account Type,Normal Balance,Opening Balance,Period Debit,Period Credit,Debit Column (Ending),Credit Column (Ending)\n";
+      trialBalanceData.rows.forEach(r => {
+        csvContent += `"${r.code}","${r.name.replace(/"/g, '""')}","${r.type}","${r.normalBalance}",${r.openingBalance.toFixed(2)},${r.periodDebit.toFixed(2)},${r.periodCredit.toFixed(2)},${r.debitColumnValue.toFixed(2)},${r.creditColumnValue.toFixed(2)}\n`;
+      });
+
+      if (!trialBalanceData.isBalanced) {
+        csvContent += "\nAUTOMATIC FINANCIAL DIAGNOSTICS REPORT\n";
+        csvContent += "Category,Check Name,Message,Details\n";
+        tbDiagnostics.filter(d => d.category === 'Critical' || d.category === 'Warning').forEach(d => {
+          csvContent += `"${d.category}","${d.checkName.replace(/"/g, '""')}","${d.message.replace(/"/g, '""')}","${d.details.replace(/"/g, '""')}"\n`;
+        });
+      }
     }
 
     // Prepare blob stream
@@ -2278,6 +3274,144 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
         rowY += 6.5;
       });
     }
+    else if (activeReport === 'general_ledger') {
+      const selectedAcc = coa.find(a => a.code === selectedGlAccountId || a.id === selectedGlAccountId);
+      const accName = selectedAcc ? selectedAcc.name : 'Unknown Account';
+
+      doc.setFillColor(248, 250, 252);
+      doc.rect(15, startY, 180, 22, 'F');
+      
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(71, 85, 105);
+      doc.text(`GENERAL LEDGER SUMMARY: ${selectedGlAccountId} - ${accName.toUpperCase()}`, 20, startY + 5);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text(`Opening Balance: $${generalLedgerData.openingBalance.toFixed(2)}   |   Total Debits: $${generalLedgerData.totalDebits.toFixed(2)}`, 20, startY + 12);
+      doc.text(`Closing Balance: $${generalLedgerData.closingBalance.toFixed(2)}   |   Total Credits: $${generalLedgerData.totalCredits.toFixed(2)}`, 20, startY + 18);
+      doc.text(`Transactions Count: ${generalLedgerData.entries.length}`, 120, startY + 12);
+      doc.text(`Normal Balance Type: ${generalLedgerData.isDebitNormal ? 'Debit-Normal' : 'Credit-Normal'}`, 120, startY + 18);
+
+      // Table Header
+      doc.setFillColor(30, 41, 59);
+      doc.rect(15, startY + 26, 180, 8, 'F');
+      
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(255, 255, 255);
+      doc.text("DATE", 18, startY + 31.5);
+      doc.text("POSTING NO", 35, startY + 31.5);
+      doc.text("VOUCHER TYPE", 65, startY + 31.5);
+      doc.text("NARRATION", 95, startY + 31.5);
+      doc.text("DEBIT ($)", 140, startY + 31.5);
+      doc.text("CREDIT ($)", 162, startY + 31.5);
+      doc.text("BALANCE ($)", 182, startY + 31.5);
+
+      let rowY = startY + 38;
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(51, 65, 85);
+      doc.setFontSize(7.5);
+
+      // Print Opening Balance row
+      doc.setFont('helvetica', 'bold');
+      doc.text("-", 18, rowY);
+      doc.text("INITIAL", 35, rowY);
+      doc.text("Opening Balance", 65, rowY);
+      doc.text("Starting cumulative balance", 95, rowY);
+      doc.text("-", 140, rowY);
+      doc.text("-", 162, rowY);
+      doc.text(`$${generalLedgerData.openingBalance.toFixed(2)}`, 182, rowY);
+      doc.setFont('helvetica', 'normal');
+      rowY += 6.5;
+
+      generalLedgerData.entries.slice(0, 25).forEach(e => {
+        if (rowY > 260) return;
+        doc.text(e.postingDate.split('T')[0], 18, rowY);
+        doc.text(e.postingNumber, 35, rowY);
+        doc.text(e.voucherType, 65, rowY);
+        
+        const shortNarration = e.narration.length > 25 ? e.narration.substring(0, 25) + '...' : e.narration;
+        doc.text(shortNarration, 95, rowY);
+        
+        doc.text(e.debit > 0 ? `$${e.debit.toFixed(2)}` : '-', 140, rowY);
+        doc.text(e.credit > 0 ? `$${e.credit.toFixed(2)}` : '-', 162, rowY);
+        doc.text(`$${e.runningBalance.toFixed(2)}`, 182, rowY);
+        rowY += 6.5;
+      });
+    }
+    else if (activeReport === 'trial_balance') {
+      doc.setFillColor(248, 250, 252);
+      doc.rect(15, startY, 180, 24, 'F');
+      
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(71, 85, 105);
+      doc.text("ENTERPRISE TRIAL BALANCE SUMMARY:", 20, startY + 5);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text(`Total Accounts: ${trialBalanceData.totalAccounts}   |   Status: ${trialBalanceData.isBalanced ? 'BALANCED' : 'OUT OF BALANCE'}`, 20, startY + 12);
+      doc.text(`Total Debits: $${trialBalanceData.totalDebitColumnSum.toFixed(2)}   |   Total Credits: $${trialBalanceData.totalCreditColumnSum.toFixed(2)}`, 20, startY + 18);
+      
+      if (!trialBalanceData.isBalanced) {
+        doc.setTextColor(220, 38, 38);
+        doc.setFont('helvetica', 'bold');
+        doc.text(`DIFFERENCE: $${trialBalanceData.difference.toFixed(2)}`, 130, startY + 12);
+        doc.setTextColor(15, 23, 42);
+        doc.setFont('helvetica', 'normal');
+      } else {
+        doc.setTextColor(16, 185, 129);
+        doc.setFont('helvetica', 'bold');
+        doc.text("✓ BALANCED", 130, startY + 12);
+        doc.setTextColor(15, 23, 42);
+        doc.setFont('helvetica', 'normal');
+      }
+      doc.text(`Last Posting: ${trialBalanceData.lastPostingDate ? trialBalanceData.lastPostingDate.split('T')[0] : 'None'}`, 130, startY + 18);
+
+      // Table Header
+      doc.setFillColor(30, 41, 59);
+      doc.rect(15, startY + 28, 180, 8, 'F');
+      
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.setTextColor(255, 255, 255);
+      doc.text("CODE", 18, startY + 33.5);
+      doc.text("ACCOUNT NAME", 38, startY + 33.5);
+      doc.text("TYPE", 85, startY + 33.5);
+      doc.text("OPENING", 120, startY + 33.5);
+      doc.text("DEBIT (+)", 142, startY + 33.5);
+      doc.text("CREDIT (-)", 164, startY + 33.5);
+      doc.text("ENDING BAL", 183, startY + 33.5);
+
+      let rowY = startY + 41;
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(51, 65, 85);
+      doc.setFontSize(7.0);
+
+      trialBalanceData.rows.slice(0, 32).forEach(r => {
+        if (rowY > 265) return;
+        doc.text(r.code, 18, rowY);
+        doc.text(r.name.length > 28 ? r.name.substring(0, 28) + '...' : r.name, 38, rowY);
+        doc.text(r.type, 85, rowY);
+        doc.text(`$${r.openingBalance.toFixed(1)}`, 120, rowY);
+        doc.text(r.periodDebit > 0 ? `$${r.periodDebit.toFixed(1)}` : '-', 142, rowY);
+        doc.text(r.periodCredit > 0 ? `$${r.periodCredit.toFixed(1)}` : '-', 164, rowY);
+        
+        doc.setFont('helvetica', 'bold');
+        if (r.debitColumnValue > 0) {
+          doc.text(`$${r.debitColumnValue.toFixed(1)} (Dr)`, 183, rowY);
+        } else if (r.creditColumnValue > 0) {
+          doc.text(`$${r.creditColumnValue.toFixed(1)} (Cr)`, 183, rowY);
+        } else {
+          doc.text('$0.0', 183, rowY);
+        }
+        doc.setFont('helvetica', 'normal');
+        rowY += 6;
+      });
+    }
 
     // Beautiful footer signature block
     doc.setFont('helvetica', 'normal');
@@ -2526,7 +3660,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:flex lg:flex-col gap-2 lg:col-span-1 print:hidden">
           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1 px-1 col-span-full">Select Report View</span>
           
-          {(['sales', 'purchases', 'profit_loss', 'customer_due', 'supplier_due', 'tax_vat', 'activity_logs', 'customer_statement', 'supplier_statement', 'expense_analytics', 'chart_of_accounts'] as ReportType[])
+          {(['sales', 'purchases', 'profit_loss', 'general_ledger', 'trial_balance', 'customer_due', 'supplier_due', 'tax_vat', 'activity_logs', 'customer_statement', 'supplier_statement', 'expense_analytics', 'chart_of_accounts'] as ReportType[])
             .filter((type) => {
               if (type === 'purchases' || type === 'profit_loss') {
                 return permissions?.viewProductCost !== false;
@@ -2542,6 +3676,8 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
               'sales': 'Enterprise Sales Register',
               'purchases': 'Enterprise Purchase Register',
               'profit_loss': 'Profit & Loss Statement',
+              'general_ledger': 'Enterprise General Ledger',
+              'trial_balance': 'Enterprise Trial Balance',
               'customer_due': 'Customer Due Report',
               'supplier_due': 'Supplier Due Report',
               'tax_vat': 'VAT/Tax Collected Report',
@@ -2556,6 +3692,8 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
               'sales': 'text-indigo-600 bg-indigo-50 border-indigo-150',
               'purchases': 'text-emerald-700 bg-emerald-50 border-emerald-150',
               'profit_loss': 'text-violet-600 bg-violet-50 border-violet-150',
+              'general_ledger': 'text-indigo-800 bg-indigo-50 border-indigo-150',
+              'trial_balance': 'text-indigo-850 bg-indigo-50 border-indigo-150',
               'customer_due': 'text-amber-700 bg-amber-50 border-amber-150',
               'supplier_due': 'text-sky-700 bg-sky-50 border-sky-150',
               'tax_vat': 'text-rose-600 bg-rose-50 border-rose-150',
@@ -2695,6 +3833,28 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                     <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest block">Net Operating Profit</span>
                     <p className="text-2xl font-black text-emerald-600">${netProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
                     <p className="text-[10px] text-emerald-600 font-bold font-mono">Net Margin: {marginPercentage.toFixed(1)}%</p>
+                  </div>
+                </>
+              )}
+
+              {activeReport === 'general_ledger' && (
+                <>
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest block">Opening & Closing Balances</span>
+                    <p className="text-lg font-black text-slate-700">
+                      Opening: <span className="font-bold text-slate-900">${generalLedgerData.openingBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </p>
+                    <p className="text-xs text-indigo-600 font-bold">Closing: ${generalLedgerData.closingBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  </div>
+                  <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Period Debits & Credits</span>
+                    <p className="text-lg font-black text-emerald-600">Debits: +${generalLedgerData.totalDebits.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p className="text-xs text-rose-600 font-bold">Credits: -${generalLedgerData.totalCredits.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  </div>
+                  <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Transaction volume</span>
+                    <p className="text-2xl font-black text-slate-900">{generalLedgerData.entries.length} Postings</p>
+                    <p className="text-[10px] text-slate-450">Last: {generalLedgerData.lastPostingDate ? new Date(generalLedgerData.lastPostingDate).toLocaleDateString() : 'N/A'}</p>
                   </div>
                 </>
               )}
@@ -3344,6 +4504,183 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
               <div className="flex items-center gap-2 p-3 bg-emerald-50 border border-emerald-200/40 rounded-xl text-emerald-800 text-[10px] font-bold uppercase tracking-wider">
                 <Info className="h-4 w-4 text-emerald-500 shrink-0" />
                 <span>Certified Ledger Match: Purchase Register = Supplier Statement = Supplier Due = Cash Ledger = Balance Sheet = Financial Audit Logs.</span>
+              </div>
+            </div>
+          )}
+
+          {/* GENERAL LEDGER ADVANCED ENTERPRISE FILTERS */}
+          {activeReport === 'general_ledger' && (
+            <div className="bg-slate-50 border border-slate-200/80 p-5 rounded-2xl space-y-4 animate-fade-in print:hidden">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold text-indigo-600 uppercase tracking-widest block">
+                    General Ledger Enterprise Controls
+                  </span>
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[9px] font-black bg-indigo-100 border border-indigo-200 text-indigo-800 uppercase tracking-wider">
+                    <span className="h-1.5 w-1.5 rounded-full bg-indigo-500"></span>
+                    Accounting Source Of Truth
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4 text-xs font-sans">
+                {/* Account Selector */}
+                <div className="space-y-1 col-span-2">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Account Selector</label>
+                  <select
+                    value={selectedGlAccountId}
+                    onChange={(e) => setSelectedGlAccountId(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition shadow-2xs"
+                  >
+                    <option value="">-- Choose Account --</option>
+                    {unionCOA
+                      .filter(a => {
+                        if (glAccountViewMode === 'active') return a.status === 'active' && !a.isLegacy;
+                        if (glAccountViewMode === 'historical') return a.isLegacy;
+                        return true; // 'all'
+                      })
+                      .map(a => (
+                        <option key={a.code} value={a.code}>
+                          {a.code} {a.name} {a.isLegacy ? '[HISTORICAL]' : `(${a.type})`}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                {/* Compatibility View Toggle Filter */}
+                <div className="space-y-1 col-span-1">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Legacy Filter</label>
+                  <select
+                    value={glAccountViewMode}
+                    onChange={(e) => setGlAccountViewMode(e.target.value as any)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-indigo-800 bg-indigo-50/30 border-indigo-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition shadow-2xs"
+                  >
+                    <option value="all">All Accounts</option>
+                    <option value="active">Active Only</option>
+                    <option value="historical">Legacy Only</option>
+                  </select>
+                </div>
+
+                {/* Company Filter */}
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Company</label>
+                  <select
+                    value={glCompanyFilter}
+                    onChange={(e) => setGlCompanyFilter(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition shadow-2xs"
+                  >
+                    <option value="">All Companies</option>
+                    {Array.from(new Set(ledgerEntries.map(e => e.companyId).filter(Boolean))).map(c => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Branch Filter */}
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Branch</label>
+                  <select
+                    value={glBranchFilter}
+                    onChange={(e) => setGlBranchFilter(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition shadow-2xs"
+                  >
+                    <option value="">All Branches</option>
+                    {Array.from(new Set(ledgerEntries.map(e => e.branchId).filter(Boolean))).map(b => (
+                      <option key={b} value={b}>{b}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Voucher Type */}
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Voucher Type</label>
+                  <select
+                    value={glVoucherTypeFilter}
+                    onChange={(e) => setGlVoucherTypeFilter(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition shadow-2xs"
+                  >
+                    <option value="">All Vouchers</option>
+                    <option value="JV">JV (Journal Voucher)</option>
+                    <option value="CP">CP (Cash Payment)</option>
+                    <option value="CR">CR (Cash Receipt)</option>
+                    <option value="BP">BP (Bank Payment)</option>
+                    <option value="BR">BR (Bank Receipt)</option>
+                    <option value="SI">SI (Sales Invoice)</option>
+                    <option value="PI">PI (Purchase Invoice)</option>
+                  </select>
+                </div>
+
+                {/* Posting Status */}
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Status</label>
+                  <select
+                    value={glPostingStatusFilter}
+                    onChange={(e) => setGlPostingStatusFilter(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition shadow-2xs"
+                  >
+                    <option value="POSTED">Posted Only</option>
+                    <option value="">All Statuses</option>
+                    <option value="DRAFT">Draft Only</option>
+                    <option value="VOID">Void Only</option>
+                  </select>
+                </div>
+
+                {/* Source Module */}
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Source Module</label>
+                  <select
+                    value={glSourceModuleFilter}
+                    onChange={(e) => setGlSourceModuleFilter(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition shadow-2xs"
+                  >
+                    <option value="">All Modules</option>
+                    {Array.from(new Set(ledgerEntries.map(e => e.sourceModule).filter(Boolean))).map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Created By */}
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Created By</label>
+                  <select
+                    value={glCreatedByFilter}
+                    onChange={(e) => setGlCreatedByFilter(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-500 transition shadow-2xs"
+                  >
+                    <option value="">All Operators</option>
+                    {Array.from(new Set(ledgerEntries.map(e => e.createdBy).filter(Boolean))).map(u => (
+                      <option key={u} value={u}>{u}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Date Presets Row */}
+              <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-150">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center pr-2">Date Presets:</span>
+                {[
+                  { value: 'all_time', label: 'All-Time' },
+                  { value: 'today', label: 'Today' },
+                  { value: 'yesterday', label: 'Yesterday' },
+                  { value: 'this_week', label: 'This Week' },
+                  { value: 'this_month', label: 'This Month' },
+                  { value: 'this_quarter', label: 'This Quarter' },
+                  { value: 'this_year', label: 'This Year' }
+                ].map(preset => (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    onClick={() => handleGlDatePresetChange(preset.value)}
+                    className={`text-[10px] font-bold px-2.5 py-1.5 rounded-lg border transition cursor-pointer ${
+                      glDatePreset === preset.value
+                        ? 'bg-indigo-600 border-indigo-600 text-white shadow-3xs'
+                        : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
               </div>
             </div>
           )}
@@ -4043,6 +5380,737 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                       <span className="text-emerald-600">${netProfit.toFixed(2)} ({marginPercentage.toFixed(1)}%)</span>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {activeReport === 'trial_balance' && (
+                <div className="space-y-6 animate-fade-in p-6">
+                  {/* Top Dashboard Banner */}
+                  <div className="flex flex-col lg:flex-row items-center justify-between gap-4 p-5 bg-slate-900 border border-slate-800 rounded-3xl text-white">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2.5 bg-indigo-600 rounded-2xl text-white">
+                        <Layers className="h-6 w-6" />
+                      </div>
+                      <div>
+                        <h3 className="text-base font-black uppercase tracking-widest text-slate-100">
+                          Enterprise Trial Balance Sheet
+                        </h3>
+                        <p className="text-xs text-slate-400 font-medium mt-0.5">
+                          GAAP-compliant double-entry ledger balance validation report
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2.5">
+                      <button
+                        type="button"
+                        onClick={handleExportCSV}
+                        className="inline-flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs min-h-[38px] px-3.5 rounded-xl border border-slate-750 transition cursor-pointer"
+                        title="Download Trial Balance as Excel-compatible CSV file"
+                      >
+                        <FileSpreadsheet className="h-4 w-4 text-emerald-450 text-emerald-450/90" />
+                        <span>Export CSV</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleExportPDF}
+                        className="inline-flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs min-h-[38px] px-3.5 rounded-xl border border-slate-750 transition cursor-pointer"
+                        title="Export vector PDF report format"
+                      >
+                        <FileText className="h-4 w-4 text-indigo-400" />
+                        <span>Export PDF</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Summary Metric Bento Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {/* Total Active Accounts */}
+                    <div className="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col justify-between shadow-xs">
+                      <div className="flex items-center justify-between text-slate-400">
+                        <span className="text-[10px] font-bold uppercase tracking-widest">Active Ledger Accounts</span>
+                        <Users className="h-4 w-4" />
+                      </div>
+                      <div className="mt-3">
+                        <h3 className="text-2xl font-black text-slate-900 font-mono leading-none">
+                          {trialBalanceData.totalAccounts}
+                        </h3>
+                        <p className="text-[10px] text-slate-400 mt-1">With recorded activity in range</p>
+                      </div>
+                    </div>
+
+                    {/* Total Debits Sum */}
+                    <div className="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col justify-between shadow-xs">
+                      <div className="flex items-center justify-between text-emerald-600">
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Debit Balance Sum</span>
+                        <TrendingUp className="h-4 w-4" />
+                      </div>
+                      <div className="mt-3">
+                        <h3 className="text-2xl font-black text-slate-900 font-mono leading-none text-emerald-600">
+                          ${trialBalanceData.totalDebitColumnSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </h3>
+                        <p className="text-[10px] text-slate-400 mt-1">Aggregate debit side ending balances</p>
+                      </div>
+                    </div>
+
+                    {/* Total Credits Sum */}
+                    <div className="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col justify-between shadow-xs">
+                      <div className="flex items-center justify-between text-rose-600">
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Credit Balance Sum</span>
+                        <TrendingDown className="h-4 w-4" />
+                      </div>
+                      <div className="mt-3">
+                        <h3 className="text-2xl font-black text-slate-900 font-mono leading-none text-rose-600">
+                          ${trialBalanceData.totalCreditColumnSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </h3>
+                        <p className="text-[10px] text-slate-400 mt-1">Aggregate credit side ending balances</p>
+                      </div>
+                    </div>
+
+                    {/* Ledger Status Card */}
+                    <div className={`rounded-2xl p-5 flex flex-col justify-between border shadow-xs ${
+                      trialBalanceData.isBalanced 
+                        ? 'bg-emerald-50/40 border-emerald-150 text-emerald-950' 
+                        : 'bg-rose-50/50 border-rose-150 text-rose-950 animate-pulse'
+                    }`}>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Validation Status</span>
+                        {trialBalanceData.isBalanced ? (
+                          <Activity className="h-4 w-4 text-emerald-600" />
+                        ) : (
+                          <ShieldAlert className="h-4 w-4 text-rose-600" />
+                        )}
+                      </div>
+                      <div className="mt-3">
+                        {trialBalanceData.isBalanced ? (
+                          <>
+                            <h3 className="text-xl font-black text-emerald-700 leading-none">
+                              ✓ BALANCED
+                            </h3>
+                            <p className="text-[10px] text-emerald-600 mt-1">Zero variance detected</p>
+                          </>
+                        ) : (
+                          <>
+                            <h3 className="text-xl font-black text-rose-700 leading-none">
+                              ⚠ OUT OF BALANCE
+                            </h3>
+                            <p className="text-[10px] text-rose-600 font-bold mt-1">
+                              Variance: ${trialBalanceData.difference.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            </p>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Sub-Tabs Selector */}
+                  <div className="flex border-b border-slate-150 gap-1 bg-slate-50/50 p-1.5 rounded-2xl border">
+                    <button
+                      type="button"
+                      onClick={() => setTbSubTab('table')}
+                      className={`flex-1 sm:flex-none py-2 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                        tbSubTab === 'table'
+                          ? 'bg-white border border-slate-200/80 text-slate-900 shadow-3xs'
+                          : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                      }`}
+                    >
+                      <Layers className="h-4 w-4 shrink-0 text-indigo-500" />
+                      <span>Ledger Trial Balance ({trialBalanceData.rows.length})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTbSubTab('reconciliation')}
+                      className={`flex-1 sm:flex-none py-2 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                        tbSubTab === 'reconciliation'
+                          ? 'bg-white border border-slate-200/80 text-slate-900 shadow-3xs'
+                          : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                      }`}
+                    >
+                      <RefreshCw className="h-4 w-4 shrink-0 text-emerald-500" />
+                      <span>Operational Reconciliation Checks</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTbSubTab('diagnostics')}
+                      className={`flex-1 sm:flex-none py-2 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer relative ${
+                        tbSubTab === 'diagnostics'
+                          ? 'bg-white border border-slate-200/80 text-slate-900 shadow-3xs'
+                          : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                      }`}
+                    >
+                      <ShieldAlert className="h-4 w-4 shrink-0 text-rose-500" />
+                      <span>Financial Diagnostics Scanner</span>
+                      {tbDiagnostics.filter(d => d.category === 'Critical').length > 0 && (
+                        <span className="absolute -top-1 -right-1 bg-rose-600 text-white text-[9px] font-black w-4.5 h-4.5 rounded-full flex items-center justify-center border border-white">
+                          {tbDiagnostics.filter(d => d.category === 'Critical').length}
+                        </span>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Sub-Tab 1: Main Trial Balance Table */}
+                  {tbSubTab === 'table' && (
+                    <div className="space-y-4">
+                      {/* Filter Controls Bar */}
+                      <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-3xs space-y-4">
+                        <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
+                          <Filter className="h-4 w-4 text-slate-400" />
+                          <h4 className="text-xs font-black text-slate-900 uppercase tracking-wider">
+                            Enterprise Search Filters & Date Presets
+                          </h4>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                          {/* Company Filter */}
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-455 uppercase tracking-wider block">Company</label>
+                            <select
+                              value={tbCompanyFilter}
+                              onChange={(e) => setTbCompanyFilter(e.target.value)}
+                              className="w-full bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-xl px-3 min-h-[38px] focus:outline-none focus:border-indigo-500 font-semibold"
+                            >
+                              <option value="">All Registered Companies</option>
+                              <option value="CO-001">Apex Global Supply Ltd.</option>
+                              <option value="CO-002">Nexus Innovations Corp.</option>
+                            </select>
+                          </div>
+
+                          {/* Branch Filter */}
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-455 uppercase tracking-wider block">Branch / Division</label>
+                            <select
+                              value={tbBranchFilter}
+                              onChange={(e) => setTbBranchFilter(e.target.value)}
+                              className="w-full bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-xl px-3 min-h-[38px] focus:outline-none focus:border-indigo-500 font-semibold"
+                            >
+                              <option value="">All Company Divisions</option>
+                              <option value="BR-HQ">Austin Headquarters (HQ)</option>
+                              <option value="BR-EAST">New York Distribution</option>
+                              <option value="BR-WEST">California Logistics</option>
+                            </select>
+                          </div>
+
+                          {/* Posting Status */}
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-455 uppercase tracking-wider block">Posting Status</label>
+                            <select
+                              value={tbPostingStatusFilter}
+                              onChange={(e) => setTbPostingStatusFilter(e.target.value)}
+                              className="w-full bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-xl px-3 min-h-[38px] focus:outline-none focus:border-indigo-500 font-semibold"
+                            >
+                              <option value="POSTED">Official Posted (General Ledger)</option>
+                              <option value="DRAFT">Draft Journals (Provisional)</option>
+                              <option value="">All State Postings</option>
+                            </select>
+                          </div>
+
+                          {/* Date Preset Selector */}
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-slate-455 uppercase tracking-wider block">Time Preset Range</label>
+                            <select
+                              value={tbDatePreset}
+                              onChange={(e) => {
+                                setTbDatePreset(e.target.value);
+                                handleGlDatePresetChange(e.target.value);
+                              }}
+                              className="w-full bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-xl px-3 min-h-[38px] focus:outline-none focus:border-indigo-500 font-semibold"
+                            >
+                              <option value="all_time">All Time Cumulative</option>
+                              <option value="today">Today (2026-07-15)</option>
+                              <option value="yesterday">Yesterday (2026-07-14)</option>
+                              <option value="this_week">This Week (Mon-Sun)</option>
+                              <option value="this_month">This Month (July 2026)</option>
+                              <option value="this_quarter">This Quarter (Q3 2026)</option>
+                              <option value="this_year">This Fiscal Year (2026)</option>
+                              <option value="fiscal_year">Full Current Fiscal Year</option>
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Main Data Table Container */}
+                      <div className="bg-white border border-slate-200 rounded-[2rem] shadow-2xs overflow-hidden">
+                        <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 bg-slate-50/20">
+                          <div>
+                            <h4 className="text-sm font-bold text-slate-900">Period Ledger Trial Balances</h4>
+                            <p className="text-[11px] text-slate-400">
+                              Opening and ending balances for all active accounts from Chart of Accounts. Ending balances reside exclusively in Dr or Cr (not both).
+                            </p>
+                          </div>
+                          <span className="text-[10px] font-mono text-slate-450 bg-slate-100 px-3 py-1 rounded-xl font-bold self-start sm:self-center">
+                            Date Filters Applied: {startDate || 'All-time'} to {endDate || 'All-time'}
+                          </span>
+                        </div>
+
+                        <div className="overflow-x-auto font-sans">
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                              <tr className="bg-slate-900 text-white font-bold uppercase tracking-wider text-[10px] border-b border-slate-800">
+                                <th className="py-3.5 px-5 whitespace-nowrap rounded-tl-2xl">Account Code</th>
+                                <th className="py-3.5 px-5 whitespace-nowrap">Account Name</th>
+                                <th className="py-3.5 px-5 whitespace-nowrap">Account Type</th>
+                                <th className="py-3.5 px-5 whitespace-nowrap">Normal Balance</th>
+                                <th className="py-3.5 px-5 text-right whitespace-nowrap">Opening Balance</th>
+                                <th className="py-3.5 px-5 text-right whitespace-nowrap">Period Debit (+)</th>
+                                <th className="py-3.5 px-5 text-right whitespace-nowrap">Period Credit (-)</th>
+                                <th className="py-3.5 px-5 text-right whitespace-nowrap bg-slate-850">Debit Ending</th>
+                                <th className="py-3.5 px-5 text-right whitespace-nowrap bg-slate-850">Credit Ending</th>
+                                <th className="py-3.5 px-5 text-center whitespace-nowrap rounded-tr-2xl">Ledger Link</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 font-sans">
+                              {trialBalanceData.rows.length === 0 ? (
+                                <tr>
+                                  <td colSpan={10} className="py-12 text-center text-slate-400 font-bold">
+                                    No ledger activity recorded in the selected period.
+                                  </td>
+                                </tr>
+                              ) : (
+                                <>
+                                  {trialBalanceData.rows.map((row) => (
+                                    <tr key={row.code} className="hover:bg-slate-50/50 transition-colors duration-150">
+                                      {/* Account Code */}
+                                      <td className="py-3.5 px-5 whitespace-nowrap font-mono font-bold text-slate-900">
+                                        {row.code}
+                                      </td>
+                                      {/* Account Name */}
+                                      <td className="py-3.5 px-5 whitespace-nowrap font-bold text-slate-800">
+                                        <div className="flex items-center gap-2">
+                                          <span>{row.name}</span>
+                                          {row.isLegacy && (
+                                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-black bg-amber-50 border border-amber-200 text-amber-700 uppercase tracking-wider animate-pulse">
+                                              Legacy Account
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      {/* Account Type */}
+                                      <td className="py-3.5 px-5 whitespace-nowrap">
+                                        <span className="text-[10px] font-semibold text-slate-500 uppercase">
+                                          {row.type}
+                                        </span>
+                                      </td>
+                                      {/* Normal Balance */}
+                                      <td className="py-3.5 px-5 whitespace-nowrap text-[10px] font-bold text-slate-400">
+                                        {row.normalBalance}-Normal
+                                      </td>
+                                      {/* Opening Balance */}
+                                      <td className="py-3.5 px-5 text-right font-mono font-bold text-slate-600 whitespace-nowrap">
+                                        ${row.openingBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                      </td>
+                                      {/* Period Debit */}
+                                      <td className="py-3.5 px-5 text-right font-mono text-emerald-600 font-bold whitespace-nowrap">
+                                        {row.periodDebit > 0 ? `+$${row.periodDebit.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                      </td>
+                                      {/* Period Credit */}
+                                      <td className="py-3.5 px-5 text-right font-mono text-rose-600 font-bold whitespace-nowrap">
+                                        {row.periodCredit > 0 ? `-$${row.periodCredit.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                      </td>
+                                      {/* Debit Column Value */}
+                                      <td className="py-3.5 px-5 text-right font-mono font-black text-slate-900 bg-slate-50/30 whitespace-nowrap">
+                                        {row.debitColumnValue > 0 ? `$${row.debitColumnValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                      </td>
+                                      {/* Credit Column Value */}
+                                      <td className="py-3.5 px-5 text-right font-mono font-black text-slate-900 bg-slate-50/30 whitespace-nowrap">
+                                        {row.creditColumnValue > 0 ? `$${row.creditColumnValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                      </td>
+                                      {/* General Ledger Drill Down */}
+                                      <td className="py-3.5 px-5 text-center whitespace-nowrap">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDrillDownToGl(row.code)}
+                                          className="inline-flex items-center gap-1.5 text-indigo-600 hover:text-indigo-900 font-bold cursor-pointer hover:underline min-h-[32px] px-2.5 rounded-lg hover:bg-indigo-50 transition"
+                                          title={`Drill down into General Ledger account ${row.code}`}
+                                        >
+                                          <Search className="h-3.5 w-3.5 text-indigo-500" />
+                                          <span>GL Books</span>
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+
+                                  {/* Table Summary Footer Row */}
+                                  <tr className="bg-slate-900 text-white font-black font-mono border-t border-slate-800 text-xs">
+                                    <td colSpan={4} className="py-4 px-5 text-left rounded-bl-2xl">
+                                      GRAND TRIAL SUMMARY
+                                    </td>
+                                    <td className="py-4 px-5 text-right text-[10px] text-slate-450">
+                                      Variance: ${trialBalanceData.difference.toFixed(2)}
+                                    </td>
+                                    <td colSpan={2} className="py-4 px-5 text-right text-[10px] text-slate-450">
+                                      Debit Sum vs Credit Sum
+                                    </td>
+                                    <td className="py-4 px-5 text-right text-emerald-400 font-bold">
+                                      ${trialBalanceData.totalDebitColumnSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </td>
+                                    <td className="py-4 px-5 text-right text-rose-400 font-bold">
+                                      ${trialBalanceData.totalCreditColumnSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </td>
+                                    <td className="py-4 px-5 rounded-br-2xl"></td>
+                                  </tr>
+                                </>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Sub-Tab 2: Operational Reconciliation Checks */}
+                  {tbSubTab === 'reconciliation' && (
+                    <div className="space-y-4">
+                      <div className="bg-white border border-slate-200 rounded-[2rem] p-6 shadow-xs space-y-4">
+                        <div>
+                          <h4 className="text-sm font-bold text-slate-900">General Ledger vs Operational Core Subledgers</h4>
+                          <p className="text-[11px] text-slate-400">
+                            Automatic verification aligning ledger balances in <strong>ledgerEntries</strong> against operational models (Cash Registers, Customers, Suppliers, Products). Discrepancies indicate postings that haven't hit subledgers or vice-versa.
+                          </p>
+                        </div>
+
+                        <div className="overflow-x-auto border border-slate-150 rounded-2xl">
+                          <table className="w-full text-left text-xs border-collapse">
+                            <thead>
+                              <tr className="bg-slate-900 text-white font-bold uppercase tracking-wider text-[10px] border-b border-slate-800">
+                                <th className="py-3 px-5 whitespace-nowrap">System Account Portfolio</th>
+                                <th className="py-3 px-5 whitespace-nowrap">Account Code</th>
+                                <th className="py-3 px-5 text-right whitespace-nowrap">General Ledger (Source of Truth)</th>
+                                <th className="py-3 px-5 text-right whitespace-nowrap">Operational Subledger (App State)</th>
+                                <th className="py-3 px-5 text-right whitespace-nowrap">Discrepancy / Variance</th>
+                                <th className="py-3 px-5 text-center whitespace-nowrap">Status Indicator</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 font-sans">
+                              {reconciliationData.map((item) => (
+                                <tr key={item.code} className="hover:bg-slate-50/50 transition">
+                                  <td className="py-4 px-5 font-bold text-slate-800">
+                                    {item.name}
+                                  </td>
+                                  <td className="py-4 px-5 font-mono text-slate-500 font-bold">
+                                    {item.code}
+                                  </td>
+                                  <td className="py-4 px-5 text-right font-mono text-slate-900 font-bold">
+                                    ${item.gl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                  </td>
+                                  <td className="py-4 px-5 text-right font-mono text-slate-700">
+                                    ${item.op.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                  </td>
+                                  <td className={`py-4 px-5 text-right font-mono font-bold ${item.isReconciled ? 'text-slate-500' : 'text-rose-600 text-sm font-black'}`}>
+                                    ${item.diff.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                  </td>
+                                  <td className="py-4 px-5 text-center whitespace-nowrap">
+                                    {item.isReconciled ? (
+                                      <span className="inline-flex items-center gap-1 bg-emerald-50 border border-emerald-100 text-emerald-700 px-2.5 py-0.5 rounded-full font-bold text-[9px] uppercase tracking-wide">
+                                        ✓ Reconciled
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1 bg-rose-50 border border-rose-100 text-rose-700 px-2.5 py-0.5 rounded-full font-bold text-[9px] uppercase tracking-wide">
+                                        ⚠ Discrepancy
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Sub-Tab 3: Financial Diagnostics Scanner */}
+                  {tbSubTab === 'diagnostics' && (
+                    <div className="space-y-4">
+                      {/* Sub-header Banner */}
+                      <div className="bg-white border border-slate-200 rounded-[2rem] p-6 shadow-xs space-y-4">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div>
+                            <h4 className="text-sm font-bold text-slate-900">Real-Time Integrity Violations & Auditing Logs</h4>
+                            <p className="text-[11px] text-slate-400">
+                              Scanning database journal records, vouchers, and accounts matching double-entry constraints.
+                            </p>
+                          </div>
+                          <span className={`text-[10px] font-bold px-3 py-1 rounded-xl font-mono self-start sm:self-center ${
+                            tbDiagnostics.filter(d => d.category === 'Critical').length === 0 
+                              ? 'bg-emerald-50 border border-emerald-100 text-emerald-800'
+                              : 'bg-rose-50 border border-rose-100 text-rose-800'
+                          }`}>
+                            {tbDiagnostics.filter(d => d.category === 'Critical').length} Critical Issues Detected
+                          </span>
+                        </div>
+
+                        {/* List of Scanned Integrity Diagnostics */}
+                        <div className="space-y-4">
+                          {tbDiagnostics.length === 0 ? (
+                            <div className="py-12 text-center border border-dashed border-slate-200 rounded-2xl text-slate-400">
+                              <Activity className="h-8 w-8 mx-auto text-emerald-500 mb-2" />
+                              <p className="text-xs font-bold uppercase tracking-wider text-slate-700">Perfect Health Score</p>
+                              <p className="text-[10px] text-slate-400 mt-1">
+                                No general ledger imbalances, duplicate voucher series, orphan records, or inactive accounting postings found in active datasets!
+                              </p>
+                            </div>
+                          ) : (
+                            tbDiagnostics.map((issue) => (
+                              <div
+                                key={issue.id}
+                                className={`border rounded-2xl p-4 transition-all duration-300 hover:shadow-xs space-y-3 ${
+                                  issue.category === 'Critical'
+                                    ? 'bg-rose-50/20 border-rose-150 text-slate-800'
+                                    : issue.category === 'Warning'
+                                    ? 'bg-amber-50/20 border-amber-150 text-slate-800'
+                                    : 'bg-slate-50/50 border-slate-200 text-slate-800'
+                                }`}
+                              >
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider border ${
+                                      issue.category === 'Critical'
+                                        ? 'bg-rose-100 border-rose-200 text-rose-800'
+                                        : issue.category === 'Warning'
+                                        ? 'bg-amber-100 border-amber-200 text-amber-800'
+                                        : 'bg-slate-100 border-slate-200 text-slate-800'
+                                    }`}>
+                                      {issue.category}
+                                    </span>
+                                    <span className="text-xs font-black text-slate-900 capitalize">
+                                      {issue.checkName}
+                                    </span>
+                                  </div>
+                                  <span className="text-[10px] text-slate-455 font-mono">
+                                    Voucher Reference: {issue.postingNumber || issue.id.substring(0, 15)}
+                                  </span>
+                                </div>
+
+                                <div className="space-y-1">
+                                  <p className="text-xs font-bold text-slate-800 leading-snug">
+                                    {issue.message}
+                                  </p>
+                                  <p className="text-[11px] text-slate-500 leading-relaxed font-sans">
+                                    {issue.details}
+                                  </p>
+                                </div>
+
+                                {/* Detailed Diagnostics Metadata Breakdown */}
+                                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 border-t border-slate-100 pt-3 text-[10px] font-semibold text-slate-500">
+                                  {issue.sourceModule && (
+                                    <div>
+                                      <span className="text-[8px] uppercase font-black text-slate-400 block tracking-wider">Source Module</span>
+                                      <span className="font-bold text-slate-800">{issue.sourceModule}</span>
+                                    </div>
+                                  )}
+                                  {issue.voucherType && (
+                                    <div>
+                                      <span className="text-[8px] uppercase font-black text-slate-400 block tracking-wider">Voucher Type</span>
+                                      <span className="font-bold text-slate-800">{issue.voucherType}</span>
+                                    </div>
+                                  )}
+                                  {issue.accountCode && (
+                                    <div>
+                                      <span className="text-[8px] uppercase font-black text-slate-400 block tracking-wider">Impacted Account Code</span>
+                                      <span className="font-bold font-mono text-slate-800">{issue.accountCode}</span>
+                                    </div>
+                                  )}
+                                  {issue.possibleCause && (
+                                    <div className="sm:col-span-2 md:col-span-3 bg-white/60 p-2.5 rounded-xl border border-slate-100/60 mt-1">
+                                      <span className="text-[8px] uppercase font-black text-rose-500 block tracking-wider font-sans">Audit Finding & Root Cause</span>
+                                      <p className="text-[10px] text-slate-700 leading-relaxed font-normal mt-0.5">{issue.possibleCause}</p>
+                                      {issue.remediation && (
+                                        <>
+                                          <span className="text-[8px] uppercase font-black text-emerald-600 block tracking-wider font-sans mt-2">Remediation Guide</span>
+                                          <p className="text-[10px] text-slate-700 leading-relaxed font-normal mt-0.5">{issue.remediation}</p>
+                                        </>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeReport === 'general_ledger' && (
+                <div className="space-y-4 animate-fade-in p-6">
+                  <div className="flex flex-col md:flex-row items-center justify-between gap-4 p-4 bg-indigo-50/40 border border-indigo-150 rounded-2xl">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-indigo-600 rounded-xl text-white">
+                        <BookOpen className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-black text-slate-900 uppercase tracking-widest">
+                          Account Ledger Book
+                        </h4>
+                        <p className="text-[10px] text-slate-500 font-medium">
+                          All ledger entries affecting the selected account code {selectedGlAccountId || '(Select an account)'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2 w-full md:w-auto">
+                      <div className="bg-white border border-slate-200/80 px-4 py-2 rounded-xl text-xs flex flex-col justify-center min-w-[120px] shadow-3xs">
+                        <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider">Opening</span>
+                        <span className="font-mono font-bold text-slate-900">${generalLedgerData.openingBalance.toFixed(2)}</span>
+                      </div>
+                      <div className="bg-white border border-slate-200/80 px-4 py-2 rounded-xl text-xs flex flex-col justify-center min-w-[120px] shadow-3xs">
+                        <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider">Debit Total</span>
+                        <span className="font-mono font-bold text-emerald-600">+${generalLedgerData.totalDebits.toFixed(2)}</span>
+                      </div>
+                      <div className="bg-white border border-slate-200/80 px-4 py-2 rounded-xl text-xs flex flex-col justify-center min-w-[120px] shadow-3xs">
+                        <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider">Credit Total</span>
+                        <span className="font-mono font-bold text-rose-600">-${generalLedgerData.totalCredits.toFixed(2)}</span>
+                      </div>
+                      <div className="bg-indigo-600 text-white border border-indigo-700 px-4 py-2 rounded-xl text-xs flex flex-col justify-center min-w-[120px] shadow-3xs">
+                        <span className="text-[8px] font-bold text-indigo-200 uppercase tracking-wider">Closing</span>
+                        <span className="font-mono font-black text-white">${generalLedgerData.closingBalance.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {!selectedGlAccountId ? (
+                    <div className="py-20 text-center border-2 border-dashed border-slate-200 rounded-[2rem] bg-white text-slate-400">
+                      <HelpCircle className="h-10 w-10 mx-auto text-slate-300 mb-2" />
+                      <p className="text-xs font-bold uppercase tracking-wider">No Account Selected</p>
+                      <p className="text-[10px] text-slate-400 mt-1 max-w-sm mx-auto">
+                        Please use the Account Selector controls at the top of the screen to select a valid Chart of Accounts account.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      {(() => {
+                        const selectedAccDetails = unionCOA.find(a => a.code === selectedGlAccountId || a.id === selectedGlAccountId);
+                        return selectedGlAccountId && selectedAccDetails?.isLegacy ? (
+                          <div className="bg-amber-50/50 border border-amber-200 p-4 rounded-2xl flex items-start gap-3 text-amber-800 animate-fade-in shadow-3xs">
+                            <Info className="h-5 w-5 text-amber-650 shrink-0 mt-0.5" />
+                            <div className="space-y-0.5">
+                              <h5 className="text-xs font-black uppercase tracking-wider">ReadOnly Historical Compatibility Layer Active</h5>
+                              <p className="text-[11px] text-amber-700/90 leading-relaxed font-semibold">
+                                This is a virtual reporting account automatically generated from legacy ledger postings. It is preserved for double-entry ledger balance integrity and audit trail compliance, but is closed for new journal entry creation.
+                              </p>
+                            </div>
+                          </div>
+                        ) : null;
+                      })()}
+                      <div className="overflow-x-auto border border-slate-200 rounded-[2rem] bg-white">
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="bg-slate-900 text-white text-xs">
+                            <th className="py-3.5 px-5 font-bold uppercase tracking-wider rounded-tl-xl whitespace-nowrap">Posting Date</th>
+                            <th className="py-3.5 px-5 font-bold uppercase tracking-wider whitespace-nowrap">Voucher Number</th>
+                            <th className="py-3.5 px-5 font-bold uppercase tracking-wider whitespace-nowrap">Voucher Type</th>
+                            <th className="py-3.5 px-5 font-bold uppercase tracking-wider whitespace-nowrap">Source Module</th>
+                            <th className="py-3.5 px-5 font-bold uppercase tracking-wider whitespace-nowrap">Narration / Memo</th>
+                            <th className="py-3.5 px-5 font-bold uppercase tracking-wider text-right whitespace-nowrap">Debit (+)</th>
+                            <th className="py-3.5 px-5 font-bold uppercase tracking-wider text-right whitespace-nowrap">Credit (-)</th>
+                            <th className="py-3.5 px-5 font-bold uppercase tracking-wider text-right whitespace-nowrap">Running Balance</th>
+                            <th className="py-3.5 px-5 font-bold uppercase tracking-wider whitespace-nowrap">Operator</th>
+                            <th className="py-3.5 px-5 font-bold uppercase tracking-wider text-center rounded-tr-xl whitespace-nowrap">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 font-sans text-xs">
+                          {/* 1. Opening Balance starting row */}
+                          <tr className="bg-slate-50/40">
+                            <td className="py-3.5 px-5 text-slate-400 font-medium whitespace-nowrap">-</td>
+                            <td className="py-3.5 px-5 text-slate-400 font-extrabold whitespace-nowrap">START_BAL</td>
+                            <td className="py-3.5 px-5 whitespace-nowrap">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-slate-100 border border-slate-200 text-slate-600">
+                                BAL
+                              </span>
+                            </td>
+                            <td className="py-3.5 px-5 text-slate-400 font-medium whitespace-nowrap">SYSTEM</td>
+                            <td className="py-3.5 px-5 text-slate-700 font-bold bg-slate-50/50">Cumulative Opening Balance (Starting Ledger Point)</td>
+                            <td className="py-3.5 px-5 text-slate-400 font-medium text-right whitespace-nowrap">-</td>
+                            <td className="py-3.5 px-5 text-slate-400 font-medium text-right whitespace-nowrap">-</td>
+                            <td className="py-3.5 px-5 text-indigo-700 font-black text-right bg-indigo-50/20 whitespace-nowrap">
+                              ${generalLedgerData.openingBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="py-3.5 px-5 text-slate-400 font-medium whitespace-nowrap">System</td>
+                            <td className="py-3.5 px-5 text-center whitespace-nowrap">-</td>
+                          </tr>
+
+                          {/* 2. Transaction Rows */}
+                          {searchableGlEntries.length === 0 ? (
+                            <tr>
+                              <td colSpan={10} className="py-12 text-center text-slate-400 text-xs font-semibold">
+                                No general ledger postings found for the selected account in this date range.
+                              </td>
+                            </tr>
+                          ) : (
+                            searchableGlEntries.map((e, index) => {
+                              // Dynamic voucher badges
+                              const voucherColors: Record<string, string> = {
+                                'JV': 'bg-indigo-50 text-indigo-700 border-indigo-100',
+                                'CP': 'bg-rose-50 text-rose-700 border-rose-100',
+                                'CR': 'bg-emerald-50 text-emerald-700 border-emerald-100',
+                                'BP': 'bg-sky-50 text-sky-700 border-sky-100',
+                                'BR': 'bg-violet-50 text-violet-700 border-violet-100',
+                                'SI': 'bg-amber-50 text-amber-700 border-amber-100',
+                                'PI': 'bg-teal-50 text-teal-700 border-teal-100',
+                              };
+                              const voucherColorClass = voucherColors[e.voucherType] || 'bg-slate-50 text-slate-700 border-slate-200';
+
+                              return (
+                                <tr key={`${e.id}-${index}`} className="hover:bg-indigo-50/20 transition duration-150">
+                                  {/* Posting Date */}
+                                  <td className="py-3.5 px-5 font-medium text-slate-500 whitespace-nowrap">
+                                    {e.postingDate.split('T')[0]}
+                                  </td>
+                                  {/* Posting / Voucher Number */}
+                                  <td className="py-3.5 px-5 font-mono font-bold text-slate-900 whitespace-nowrap">
+                                    {e.postingNumber}
+                                  </td>
+                                  {/* Voucher Type */}
+                                  <td className="py-3.5 px-5 whitespace-nowrap">
+                                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-extrabold border ${voucherColorClass}`}>
+                                      {e.voucherType}
+                                    </span>
+                                  </td>
+                                  {/* Source Module */}
+                                  <td className="py-3.5 px-5 font-bold text-slate-500 uppercase whitespace-nowrap">
+                                    {e.sourceModule}
+                                  </td>
+                                  {/* Narration */}
+                                  <td className="py-3.5 px-5 text-slate-700 max-w-[280px] truncate" title={e.narration}>
+                                    {e.narration}
+                                  </td>
+                                  {/* Debit */}
+                                  <td className="py-3.5 px-5 font-mono font-bold text-right text-emerald-600 whitespace-nowrap">
+                                    {e.debit > 0 ? `+$${e.debit.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                  </td>
+                                  {/* Credit */}
+                                  <td className="py-3.5 px-5 font-mono font-bold text-right text-rose-600 whitespace-nowrap">
+                                    {e.credit > 0 ? `-$${e.credit.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                  </td>
+                                  {/* Running Balance */}
+                                  <td className="py-3.5 px-5 font-mono font-black text-right text-slate-900 bg-slate-50/30 whitespace-nowrap">
+                                    ${e.runningBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                  </td>
+                                  {/* Operator / Creator */}
+                                  <td className="py-3.5 px-5 font-mono text-slate-400 whitespace-nowrap max-w-[120px] truncate" title={e.createdBy}>
+                                    {e.createdBy}
+                                  </td>
+                                  {/* Drill Down Actions */}
+                                  <td className="py-3.5 px-5 text-center whitespace-nowrap">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDrillDown(e)}
+                                      className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-900 font-bold hover:underline cursor-pointer min-h-[32px] px-2 rounded-lg hover:bg-indigo-50/50"
+                                      title="Drill down to auditing source voucher"
+                                    >
+                                      <Search className="h-3.5 w-3.5 shrink-0" />
+                                      <span>Trace Source</span>
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                    </>
+                  )}
                 </div>
               )}
 
