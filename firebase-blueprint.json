@@ -393,6 +393,28 @@
         }
       },
       "required": ["id", "postingNumber", "companyId", "branchId", "fiscalYear", "accountingPeriod", "sourceModule", "postingStatus", "currency", "exchangeRate", "baseCurrencyCode", "version", "narration", "createdFrom", "approvalStatus", "postingDate", "createdAt", "createdBy", "lines"]
+    },
+    "RestoreAuditTrail": {
+      "title": "RestoreAuditTrail",
+      "description": "An append-only log entry tracking backup restoration results, durations, and metadata validation results.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "operatorUid": { "type": "string" },
+        "operatorEmail": { "type": "string" },
+        "operationType": { "type": "string" },
+        "restoreMode": { "type": "string" },
+        "affectedModules": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "documentCounts": { "type": "integer" },
+        "status": { "type": "string" },
+        "duration": { "type": "integer" },
+        "validationResult": { "type": "object" }
+      },
+      "required": ["id", "timestamp", "operatorUid", "operatorEmail", "operationType", "restoreMode", "affectedModules", "documentCounts", "status", "duration", "validationResult"]
     }
   },
   "firestore": {
@@ -475,6 +497,10 @@
     "ledgerEntries": {
       "schema": "LedgerEntry",
       "description": "Store immutable double-entry accounting ledger records."
+    },
+    "restoreAuditTrail": {
+      "schema": "RestoreAuditTrail",
+      "description": "Store backup restoration result history and metadata verification status."
     }
   }
 }

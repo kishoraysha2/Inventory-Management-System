@@ -1141,9 +1141,10 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           }
         }
 
-        // Retrieve posting number sequence in READ phase (Voucher type: SV)
+        // Retrieve posting number sequence in READ phase (Voucher type: SV & INV)
         const year = new Date(formData.saleDate).getFullYear() || 2026;
         const { postingNumber, nextVal } = await getNextPostingNumber(transaction, 'SV', year);
+        const { postingNumber: invoiceNumber, nextVal: nextInvVal } = await getNextPostingNumber(transaction, 'INV', year);
 
         // C. WRITE operations (after all READS)
         // Apply one final stock update per unique product to prevent overwrite issues
@@ -1169,8 +1170,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           email: chosenCust.email || ""
         };
 
-        const indexPart = saleId.replace('sale-', '');
-        const invoiceNumber = `INV-2026-${indexPart.length > 5 ? indexPart.substring(indexPart.length - 5) : indexPart}`;
+        // Utilizing sequential transaction-safe invoiceNumber allocated from posting_sequences during READ phase
 
         const itemsWithSnap = lineItems.map((item) => {
           const pPrice = uniqueProductUpdates[item.productId].purchasePrice;
@@ -1365,6 +1365,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
 
         // Commit sequence number
         commitNextPostingNumber(transaction, 'SV', nextVal);
+        commitNextPostingNumber(transaction, 'INV', nextInvVal);
 
         // Ensure system accounts and VAT structures exist
         const currentCoaIds = coa.map(c => c.id);

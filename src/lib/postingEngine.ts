@@ -3,7 +3,7 @@ import { doc, setDoc } from 'firebase/firestore';
 import { LedgerEntry, LedgerEntryLine } from '../types';
 
 // Voucher type definition
-export type VoucherType = 'JV' | 'RV' | 'PV' | 'SV' | 'CV';
+export type VoucherType = 'JV' | 'RV' | 'PV' | 'SV' | 'CV' | 'INV';
 
 // Standard predefined accounts matching the preset Chart of Accounts
 export const SYSTEM_ACCOUNTS = {
@@ -146,13 +146,14 @@ export async function getNextPostingNumber(
   const counterRef = doc(db, 'counters', 'posting_sequences');
   const counterSnap = await transaction.get(counterRef);
   
-  let currentSequences = { JV: 0, RV: 0, PV: 0, SV: 0, CV: 0 };
+  let currentSequences = { JV: 0, RV: 0, PV: 0, SV: 0, CV: 0, INV: 0 };
   if (counterSnap.exists()) {
     currentSequences = { ...currentSequences, ...counterSnap.data() };
   }
   
   const nextVal = (currentSequences[voucherType] || 0) + 1;
-  const postingNumber = `${voucherType}-${year}-${String(nextVal).padStart(6, '0')}`;
+  const paddingSize = voucherType === 'INV' ? 5 : 6;
+  const postingNumber = `${voucherType}-${year}-${String(nextVal).padStart(paddingSize, '0')}`;
   
   return { postingNumber, nextVal };
 }

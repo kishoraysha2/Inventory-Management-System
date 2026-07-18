@@ -1,6 +1,3 @@
-import { customerService } from '../services/customer/customerService';
-import { supplierService } from '../services/supplier/supplierService';
-
 export function cn(...classes: (string | undefined | null | boolean)[]) {
   return classes.filter(Boolean).join(' ');
 }
@@ -36,13 +33,3 @@ export function isInactiveStatus(status: any): boolean {
   const norm = getNormalizedStatus(status);
   return norm === 'INACTIVE';
 }
-
-export function calculateCustomerLedger(sales: any[], payments: any[], customerId?: string, openingBalance: number = 0) {
-  return customerService.calculateCustomerLedger(sales, payments, customerId, openingBalance);
-}
-
-export function calculateSupplierLedger(purchases: any[], payments: any[], supplierId?: string, openingBalance: number = 0) {
-  return supplierService.calculateSupplierLedger(purchases, payments, supplierId, openingBalance);
-}
-
-

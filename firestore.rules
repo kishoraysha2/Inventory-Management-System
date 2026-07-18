@@ -268,7 +268,7 @@ service cloud.firestore {
     // Helper to validate complete BusinessProfile schema
     function isValidBusinessProfile(data) {
       return data.keys().hasAll(['name', 'taxRegistrationId', 'address', 'phone'])
-          && data.keys().hasOnly(['name', 'taxRegistrationId', 'address', 'phone', 'tradeName', 'ownerName', 'crNumber', 'email', 'website', 'logo', 'taxRatePercent'])
+          && data.keys().hasOnly(['name', 'taxRegistrationId', 'address', 'phone', 'tradeName', 'ownerName', 'crNumber', 'email', 'website', 'logo', 'taxRatePercent', 'currency', 'timezone', 'businessType', 'country', 'accentColor', 'theme', 'dateFormat', 'numberFormat', 'language'])
           && data.name is string && data.name.size() > 0 && data.name.size() <= 200
           && data.taxRegistrationId is string && data.taxRegistrationId.size() > 0 && data.taxRegistrationId.size() <= 100
           && data.address is string && data.address.size() > 0 && data.address.size() <= 500
@@ -279,7 +279,16 @@ service cloud.firestore {
           && (!data.keys().hasAny(['email']) || (data.email is string && data.email.size() <= 200))
           && (!data.keys().hasAny(['website']) || (data.website is string && data.website.size() <= 200))
           && (!data.keys().hasAny(['logo']) || (data.logo is string && data.logo.size() <= 1024))
-          && (!data.keys().hasAny(['taxRatePercent']) || (data.taxRatePercent is number || data.taxRatePercent is int));
+          && (!data.keys().hasAny(['taxRatePercent']) || (data.taxRatePercent is number || data.taxRatePercent is int))
+          && (!data.keys().hasAny(['currency']) || (data.currency is string && data.currency.size() <= 50))
+          && (!data.keys().hasAny(['timezone']) || (data.timezone is string && data.timezone.size() <= 100))
+          && (!data.keys().hasAny(['businessType']) || (data.businessType is string && data.businessType.size() <= 100))
+          && (!data.keys().hasAny(['country']) || (data.country is string && data.country.size() <= 100))
+          && (!data.keys().hasAny(['accentColor']) || (data.accentColor is string && data.accentColor.size() <= 50))
+          && (!data.keys().hasAny(['theme']) || (data.theme is string && data.theme.size() <= 100))
+          && (!data.keys().hasAny(['dateFormat']) || (data.dateFormat is string && data.dateFormat.size() <= 50))
+          && (!data.keys().hasAny(['numberFormat']) || (data.numberFormat is string && data.numberFormat.size() <= 50))
+          && (!data.keys().hasAny(['language']) || (data.language is string && data.language.size() <= 50));
     }
 
     // Helper to validate complete Expense schema
@@ -363,6 +372,23 @@ service cloud.firestore {
       && (!data.keys().hasAny(['originalEntryId']) || (data.originalEntryId is string && data.originalEntryId.size() <= 128));
     }
 
+    // Helper to validate complete RestoreAuditTrail schema
+    function isValidRestoreAuditTrail(data) {
+      return data.keys().hasAll(['id', 'timestamp', 'operatorUid', 'operatorEmail', 'operationType', 'restoreMode', 'affectedModules', 'documentCounts', 'status', 'duration', 'validationResult'])
+          && data.keys().hasOnly(['id', 'timestamp', 'operatorUid', 'operatorEmail', 'operationType', 'restoreMode', 'affectedModules', 'documentCounts', 'status', 'duration', 'validationResult'])
+          && data.id is string && data.id.size() <= 128
+          && data.timestamp is string
+          && data.operatorUid is string && data.operatorUid.size() <= 128
+          && data.operatorEmail is string && data.operatorEmail.size() <= 200
+          && data.operationType is string && data.operationType.size() <= 100
+          && data.restoreMode is string && data.restoreMode.size() <= 20
+          && data.affectedModules is list
+          && (data.documentCounts is int || data.documentCounts is number)
+          && data.status is string && data.status.size() <= 20
+          && (data.duration is int || data.duration is number)
+          && data.validationResult is map;
+    }
+
 
     // --- COLLECTION GATES AND DIRECT PATH MATCHES ---
 
@@ -372,7 +398,13 @@ service cloud.firestore {
       allow read: if isSignedIn() && (hasRole('admin') || hasRole('owner'));
       
       // Prevent role spoofing on initial self-creation, and allow admin full control
-      allow create: if isSignedIn() && (request.auth.uid == uid && request.resource.data.role == 'viewer');
+      allow create: if isSignedIn() && (
+        (request.auth.uid == uid && request.resource.data.role == 'viewer')
+        || (request.auth.uid == uid && request.resource.data.role == 'owner' && (
+          !exists(/databases/$(database)/documents/system/bootstrap) 
+          || get(/databases/$(database)/documents/system/bootstrap).data.initialized != true
+        ))
+      );
       allow create: if isSignedIn() && (hasRole('admin') || hasRole('owner'));
       
       // Block viewer from updating user records, only admin and logged-in non-viewer can update (role stays read-only)
@@ -528,9 +560,29 @@ service cloud.firestore {
     // Business Profile settings config
     match /businessProfile/{docId} {
       allow read: if isSignedIn();
-      allow create, update: if isSignedIn() && (hasRole('admin') || hasRole('accountant') || hasRole('cashier'))
-                            && isValidId(docId) && isValidBusinessProfile(request.resource.data);
+      allow create, update: if isSignedIn() && (
+        hasRole('admin') || hasRole('accountant') || hasRole('cashier') || (
+          docId == 'config' && (
+            !exists(/databases/$(database)/documents/system/bootstrap) 
+            || get(/databases/$(database)/documents/system/bootstrap).data.initialized != true
+          )
+        )
+      ) && isValidId(docId) && isValidBusinessProfile(request.resource.data);
       allow delete: if hasRole('admin');
+    }
+
+    // System bootstrap metadata (Publicly readable to check setup status)
+    match /system/{docId} {
+      allow read: if true;
+      allow create, update: if isSignedIn() && (
+        hasRole('admin') || hasRole('owner') || (
+          docId == 'bootstrap' && (
+            !exists(/databases/$(database)/documents/system/bootstrap) 
+            || get(/databases/$(database)/documents/system/bootstrap).data.initialized != true
+          )
+        )
+      );
+      allow delete: if false;
     }
 
     // Expenses Collection
@@ -600,6 +652,15 @@ service cloud.firestore {
       allow read, write: if isSignedIn()
                         && (hasRole('admin') || hasRole('accountant') || hasRole('cashier'))
                         && isValidId(counterId);
+    }
+
+    // Restore Audit Trail Collection (Append-only)
+    match /restoreAuditTrail/{auditId} {
+      allow read: if isSignedIn() && (hasRole('admin') || hasRole('owner'));
+      allow create: if isSignedIn() && (hasRole('admin') || hasRole('owner'))
+                    && isValidId(auditId)
+                    && isValidRestoreAuditTrail(request.resource.data);
+      allow update, delete: if false; // Immutable Audit Logs
     }
   }
 }

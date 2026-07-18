@@ -1,6 +1,6 @@
 {
   "name": "Inventory Management",
-  "description": "A clean, responsive single-screen dashboard to manage products, monitor stock levels, filter categories, and track inventory metrics.",
+  "description": "Enterprise ERP suite featuring high-fidelity inventory levels, purchasing workflows, General Ledger, Trial Balance validation with legacy account compatibility, and integrated financial statements (Balance Sheet, Profit & Loss, Direct Method Cash Flows, and Consistency Validation Engine).",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

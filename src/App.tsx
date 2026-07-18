@@ -65,9 +65,11 @@ import CompanySettings from './components/CompanySettings';
 import PrivilegeMatrix from './components/PrivilegeMatrix';
 import ExpenseManagement from './components/ExpenseManagement';
 import ProductLedger from './components/ProductLedger';
+import SetupWizard from './components/SetupWizard';
 import { usePermission, AppPermissions, seedRolePermissions, UserRole } from './hooks/usePermission';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from './lib/firebase';
-import { collection, onSnapshot, doc, setDoc, deleteDoc, getDoc, updateDoc } from 'firebase/firestore';
+import { getVisibleModules } from './core/moduleRegistry';
+import { collection, onSnapshot, doc, setDoc, deleteDoc, getDoc, updateDoc, query, where, limit, getDocs } from 'firebase/firestore';
 import { signOut, onAuthStateChanged, User, GoogleAuthProvider, signInWithPopup, signInAnonymously, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 
 export default function App() {
@@ -111,6 +113,13 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports' | 'balancesheet' | 'chart_of_accounts' | 'users' | 'company_settings' | 'expenses' | 'product_ledger'>('dashboard');
+  
+  const isModuleAccessible = (modId: string) => {
+    if (modId === 'expenses') return !!permissions.viewExpenses;
+    if (modId === 'users') return !!permissions.viewUsers;
+    if (modId === 'company_settings') return !!(permissions.viewSettings || permissions.voidPayment);
+    return true;
+  };
   const [userAccessTab, setUserAccessTab] = useState<'users' | 'matrix'>('users');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -124,6 +133,8 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [currentUserProfile, setCurrentUserProfile] = useState<{ role: UserRole; name: string; email: string } | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [isFirstInstallation, setIsFirstInstallation] = useState<boolean | null>(null);
+  const [isAuthChecked, setIsAuthChecked] = useState<boolean>(false);
   const [usersList, setUsersList] = useState<any[]>([]);
   const [usersLoading, setUsersLoading] = useState(true);
   const [usersError, setUsersError] = useState<string | null>(null);
@@ -175,9 +186,28 @@ export default function App() {
     return () => window.removeEventListener('nexus-change-tab', handleTabChange);
   }, []);
 
+  // --- Check first installation on load ---
+  useEffect(() => {
+    const checkFirstInstallation = async () => {
+      try {
+        const bootSnap = await getDoc(doc(db, 'system', 'bootstrap'));
+        if (bootSnap.exists() && bootSnap.data()?.initialized === true) {
+          setIsFirstInstallation(false);
+        } else {
+          setIsFirstInstallation(true);
+        }
+      } catch (err) {
+        console.error("Failed to check system bootstrap status:", err);
+        // Fallback: default to true if document doesn't exist, but if we got a permission/network error, default to false to not disrupt login
+        setIsFirstInstallation(false);
+      }
+    };
+    checkFirstInstallation();
+  }, []);
+
   // --- Trigger Database Privilege Seeding ---
   useEffect(() => {
-    if (currentUser && (userRole === 'admin' || userRole === 'owner' || currentUser.email === 'kishor.aysha2@gmail.com' || currentUser.email === 'kishor.aysha1@gmail.com')) {
+    if (currentUser && (userRole === 'admin' || userRole === 'owner')) {
       seedRolePermissions();
     }
   }, [currentUser, userRole]);
@@ -189,63 +219,56 @@ export default function App() {
       if (user) {
         if (user.isAnonymous) {
           const savedRole = localStorage.getItem('demo_user_role') || 'viewer';
-          const name = savedRole === 'admin' ? 'Kishor Aysha (Admin Bypass)' : 'Demo Guest';
-          const email = savedRole === 'admin' ? 'kishor.aysha2@gmail.com' : 'demo-guest@example.com';
+          const name = savedRole === 'admin' ? 'Sandbox Admin' : 'Demo Guest';
+          const email = savedRole === 'admin' ? 'admin@nexus-erp.com' : 'demo-guest@example.com';
           setCurrentUserProfile({
             role: savedRole as any,
             name,
             email
           });
-          setIsAuthLoading(false);
           await checkAndLogLogin(user.uid, email, name, savedRole);
+          setIsAuthChecked(true);
           return;
         }
 
         const userRef = doc(db, 'users', user.uid);
         try {
           const docSnap = await getDoc(userRef);
-          const isUserAdmin = user.email === 'kishor.aysha2@gmail.com' || user.email === 'kishor.aysha1@gmail.com';
           if (docSnap.exists()) {
             const data = docSnap.data();
-            if (isUserAdmin && data.role !== 'admin') {
-              await setDoc(userRef, { role: 'admin' }, { merge: true });
-              const name = data.name || 'Kishor Aysha (Admin)';
-              const email = user.email || 'kishor.aysha2@gmail.com';
-              const role = 'admin';
-              setCurrentUserProfile({
-                role,
-                name,
-                email
-              });
-              await checkAndLogLogin(user.uid, email, name, role);
-            } else {
-              const role = data.role || 'viewer';
-              const name = data.name || user.email?.split('@')[0] || 'User';
-              const email = data.email || user.email || '';
-              setCurrentUserProfile({
-                role,
-                name,
-                email
-              });
-              await checkAndLogLogin(user.uid, email, name, role);
-            }
+            const role = data.role || 'viewer';
+            const name = data.name || user.displayName || user.email?.split('@')[0] || 'User';
+            const email = data.email || user.email || '';
+            setCurrentUserProfile({
+              role,
+              name,
+              email
+            });
+            await checkAndLogLogin(user.uid, email, name, role);
           } else {
-            const defaultRole = isUserAdmin ? 'admin' : 'viewer';
+            // Check if system is installed
+            const bootSnap = await getDoc(doc(db, 'system', 'bootstrap'));
+            const isInstalled = bootSnap.exists() && bootSnap.data()?.initialized === true;
+
+            if (!isInstalled) {
+              console.log("System not installed, letting SetupWizard handle owner creation.");
+              setIsFirstInstallation(true);
+              setIsAuthChecked(true);
+              return;
+            }
+
+            const defaultRole = 'viewer';
             await setDoc(userRef, {
-              name: isUserAdmin ? 'Kishor Aysha (Admin)' : (user.email?.split('@')[0] || 'User'),
+              name: user.displayName || user.email?.split('@')[0] || 'User',
               email: user.email || '',
-              role: 'viewer',
+              role: defaultRole,
               createdAt: new Date().toISOString()
             });
 
-            if (isUserAdmin) {
-              await updateDoc(userRef, { role: 'admin' });
-            }
-
-            const name = isUserAdmin ? 'Kishor Aysha (Admin)' : (user.email?.split('@')[0] || 'User');
+            const name = user.displayName || user.email?.split('@')[0] || 'User';
             const email = user.email || '';
             setCurrentUserProfile({
-              role: defaultRole as any,
+              role: defaultRole,
               name,
               email
             });
@@ -253,9 +276,8 @@ export default function App() {
           }
         } catch (err) {
           console.error("Failed to load user profile document:", err);
-          const isUserAdmin = user.email === 'kishor.aysha2@gmail.com' || user.email === 'kishor.aysha1@gmail.com';
-          const role = isUserAdmin ? 'admin' : 'viewer';
-          const name = user.email?.split('@')[0] || 'User';
+          const role = 'viewer';
+          const name = user.displayName || user.email?.split('@')[0] || 'User';
           const email = user.email || '';
           setCurrentUserProfile({
             role,
@@ -267,11 +289,44 @@ export default function App() {
       } else {
         setCurrentUserProfile(null);
       }
-      setIsAuthLoading(false);
+      setIsAuthChecked(true);
     });
 
     return () => unsubscribe();
   }, []);
+
+  // --- Combined Loading State Resolver ---
+  useEffect(() => {
+    if (isFirstInstallation !== null && isAuthChecked) {
+      setIsAuthLoading(false);
+    }
+  }, [isFirstInstallation, isAuthChecked]);
+
+  const handleSetupComplete = async (user: User) => {
+    setIsFirstInstallation(false);
+    setIsAuthLoading(true);
+    
+    const userRef = doc(db, 'users', user.uid);
+    try {
+      const docSnap = await getDoc(userRef);
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        const role = data.role || 'owner';
+        const name = data.name || user.displayName || 'Owner';
+        const email = data.email || user.email || '';
+        setCurrentUserProfile({
+          role,
+          name,
+          email
+        });
+        await checkAndLogLogin(user.uid, email, name, role);
+      }
+    } catch (err) {
+      console.error("Error setting up user profile after wizard completion:", err);
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
 
   // --- Authentication Actions ---
   const handleEmailPasswordAuth = async (e: React.FormEvent) => {
@@ -392,8 +447,8 @@ export default function App() {
       sessionStorage.removeItem('just_logged_in');
       console.error("Demo Admin Auth Exception:", err);
       const uid = 'offline-admin-uid';
-      const email = 'kishor.aysha2@gmail.com';
-      const name = 'Kishor Aysha (Admin Bypass)';
+      const email = 'admin@nexus-erp.com';
+      const name = 'Sandbox Admin';
       const role = 'admin';
       const timestamp = new Date().toISOString();
       const details = [
@@ -1251,6 +1306,16 @@ export default function App() {
     );
   }
 
+  if (isFirstInstallation === true) {
+    return (
+      <SetupWizard 
+        db={db} 
+        auth={auth} 
+        onComplete={handleSetupComplete} 
+      />
+    );
+  }
+
   if (!currentUser) {
     return (
       <div id="unauthenticated-gate" className="min-h-screen bg-slate-50 flex items-center justify-center p-4 sm:p-6 lg:p-8">
@@ -1426,7 +1491,7 @@ export default function App() {
             <p className="text-[11px] text-slate-500 leading-normal flex gap-2">
               <Shield className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
               <span>
-                Authorized administrators logging in via <strong>kishor.aysha2@gmail.com</strong> will instantly receive full <strong>System Admin</strong> privileges. All other corporate profiles default to secure viewer clearance.
+                Authorized workstation administrators can authenticate using Google Single Sign-On or verified email credentials to gain secure clearance levels.
               </span>
             </p>
           </div>
@@ -1583,194 +1648,39 @@ export default function App() {
 
       {/* PRIMARY NAVIGATION TABS */}
       <div className="print:hidden hidden md:flex bg-slate-100 p-1 rounded-2xl max-w-7xl border border-slate-200 overflow-x-auto">
-        <button
-          type="button"
-          onClick={() => setActiveTab('dashboard')}
-          className={`flex-1 min-w-[100px] flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
-            activeTab === 'dashboard'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <LayoutDashboard className="h-4 w-4" />
-          <span>Dashboard</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('inventory')}
-          className={`flex-1 min-w-[110px] flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
-            activeTab === 'inventory'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <Box className="h-4 w-4" />
-          <span>Inventory Desk</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('product_ledger')}
-          className={`flex-1 min-w-[115px] flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
-            activeTab === 'product_ledger'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <RefreshCw className="h-4 w-4" />
-          <span>Stock Card</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('customers')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
-            activeTab === 'customers'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <Users className="h-4 w-4" />
-          <span>Customers</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('suppliers')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
-            activeTab === 'suppliers'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <Truck className="h-4 w-4" />
-          <span>Suppliers</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('ledger')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
-            activeTab === 'ledger'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <CreditCard className="h-4 w-4" />
-          <span>Due Ledger</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('products')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
-            activeTab === 'products'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <ShoppingBag className="h-4 w-4" />
-          <span>Products</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('sales')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
-            activeTab === 'sales'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <TrendingUp className="h-4 w-4" />
-          <span>Sales</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('procurement')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
-            activeTab === 'procurement'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <ShoppingCart className="h-4 w-4" />
-          <span>Procurement</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('reports')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
-            activeTab === 'reports'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <BarChart3 className="h-4 w-4" />
-          <span>Reports</span>
-        </button>
-        {permissions.viewExpenses && (
-          <button
-            type="button"
-            onClick={() => setActiveTab('expenses')}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition min-w-[100px] ${
-              activeTab === 'expenses'
-                ? 'bg-white text-rose-600 shadow-xs border border-slate-200/50'
-                : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <TrendingDown className="h-4 w-4" />
-            <span>Expenses</span>
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() => setActiveTab('balancesheet')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition min-w-[120px] ${
-            activeTab === 'balancesheet'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <Scale className="h-4 w-4" />
-          <span>Balance Sheet</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('chart_of_accounts')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition min-w-[145px] ${
-            activeTab === 'chart_of_accounts'
-              ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-              : 'text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <BookOpen className="h-4 w-4" />
-          <span>Chart of Accounts</span>
-        </button>
-        {permissions.viewUsers && (
-          <button
-            id="open-user-access-tab"
-            type="button"
-            onClick={() => setActiveTab('users')}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition min-w-[125px] ${
-              activeTab === 'users'
-                ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-                : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <Shield className="h-4 w-4" />
-            <span>User Access</span>
-          </button>
-        )}
-        {(permissions.viewSettings || permissions.voidPayment) && (
-          <button
-            id="open-company-settings-tab"
-            type="button"
-            onClick={() => setActiveTab('company_settings')}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition min-w-[130px] ${
-              activeTab === 'company_settings'
-                ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/50'
-                : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <Settings className="h-4 w-4" />
-            <span>Company Settings</span>
-          </button>
-        )}
+        {getVisibleModules().filter(mod => isModuleAccessible(mod.id)).map(mod => {
+          const Icon = mod.icon;
+          const routeKey = mod.routeKey || mod.id;
+          const isActive = activeTab === routeKey;
+          const activeColor = mod.id === 'expenses' ? 'text-rose-600' : 'text-indigo-600';
+          
+          let minWidthClass = '';
+          if (mod.id === 'dashboard') minWidthClass = 'min-w-[100px]';
+          else if (mod.id === 'inventory') minWidthClass = 'min-w-[110px]';
+          else if (mod.id === 'product_ledger') minWidthClass = 'min-w-[115px]';
+          else if (mod.id === 'expenses') minWidthClass = 'min-w-[100px]';
+          else if (mod.id === 'balancesheet') minWidthClass = 'min-w-[120px]';
+          else if (mod.id === 'chartOfAccounts') minWidthClass = 'min-w-[145px]';
+          else if (mod.id === 'users') minWidthClass = 'min-w-[125px]';
+          else if (mod.id === 'company_settings') minWidthClass = 'min-w-[130px]';
+          
+          return (
+            <button
+              key={mod.id}
+              id={mod.id === 'users' ? 'open-user-access-tab' : mod.id === 'company_settings' ? 'open-company-settings-tab' : undefined}
+              type="button"
+              onClick={() => setActiveTab(routeKey as any)}
+              className={`flex-1 ${minWidthClass} flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
+                isActive
+                  ? `bg-white ${activeColor} shadow-xs border border-slate-200/50`
+                  : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <Icon className="h-4 w-4" />
+              <span>{mod.displayName}</span>
+            </button>
+          );
+        })}
       </div>
 
       {/* FEEDBACK STATUS BANNER */}
@@ -2304,9 +2214,7 @@ export default function App() {
                               {usr.createdAt ? new Date(usr.createdAt).toLocaleString() : 'Bootstrap/Legacy'}
                             </td>
                             <td className="p-4 text-center">
-                              {usr.email === 'kishor.aysha2@gmail.com' ? (
-                                <span className="font-mono text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-2.5 py-1 uppercase">Root Admin</span>
-                              ) : usr.role === 'owner' ? (
+                              {usr.role === 'owner' ? (
                                 <span className="font-mono text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-150 rounded px-2.5 py-1 uppercase">👑 Owner</span>
                               ) : (userRole === 'owner' || (userRole === 'admin' && usr.role !== 'admin')) ? (
                                 <select
@@ -2539,252 +2447,34 @@ export default function App() {
 
               {/* Drawer Navigation List */}
               <div className="flex-1 overflow-y-auto py-3 px-4 space-y-1.5 scrollbar-thin">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('dashboard');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'dashboard'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <LayoutDashboard className="h-4.5 w-4.5" />
-                  <span>Dashboard</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('inventory');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'inventory'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <Box className="h-4.5 w-4.5" />
-                  <span>Inventory Desk</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('product_ledger');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'product_ledger'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <RefreshCw className="h-4.5 w-4.5" />
-                  <span>Stock Card</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('customers');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'customers'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <Users className="h-4.5 w-4.5" />
-                  <span>Customers</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('suppliers');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'suppliers'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <Truck className="h-4.5 w-4.5" />
-                  <span>Suppliers</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('ledger');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'ledger'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <CreditCard className="h-4.5 w-4.5" />
-                  <span>Due Ledger</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('products');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'products'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <ShoppingBag className="h-4.5 w-4.5" />
-                  <span>Products</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('sales');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'sales'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <TrendingUp className="h-4.5 w-4.5" />
-                  <span>Sales</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('procurement');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'procurement'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <ShoppingCart className="h-4.5 w-4.5" />
-                  <span>Procurement</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('reports');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'reports'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <BarChart3 className="h-4.5 w-4.5" />
-                  <span>Reports</span>
-                </button>
-
-                {permissions.viewExpenses && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveTab('expenses');
-                      setIsMobileMenuOpen(false);
-                    }}
-                    className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                      activeTab === 'expenses'
-                        ? 'bg-rose-50 border-rose-100 text-rose-700 font-black'
-                        : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                    }`}
-                  >
-                    <TrendingDown className="h-4.5 w-4.5" />
-                    <span>Expenses</span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('balancesheet');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'balancesheet'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <Scale className="h-4.5 w-4.5" />
-                  <span>Balance Sheet</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('chart_of_accounts');
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                    activeTab === 'chart_of_accounts'
-                      ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                      : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                  }`}
-                >
-                  <BookOpen className="h-4.5 w-4.5" />
-                  <span>Chart of Accounts</span>
-                </button>
-
-                {permissions.viewUsers && (
-                  <button
-                    id="open-mobile-user-access-tab"
-                    type="button"
-                    onClick={() => {
-                      setActiveTab('users');
-                      setIsMobileMenuOpen(false);
-                    }}
-                    className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                      activeTab === 'users'
-                        ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                        : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                    }`}
-                  >
-                    <Shield className="h-4.5 w-4.5" />
-                    <span>User Access</span>
-                  </button>
-                )}
-                {(permissions.viewSettings || permissions.voidPayment) && (
-                  <button
-                    id="open-mobile-company-settings-tab"
-                    type="button"
-                    onClick={() => {
-                      setActiveTab('company_settings');
-                      setIsMobileMenuOpen(false);
-                    }}
-                    className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
-                      activeTab === 'company_settings'
-                        ? 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black'
-                        : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-                    }`}
-                  >
-                    <Settings className="h-4.5 w-4.5" />
-                    <span>Company Settings</span>
-                  </button>
-                )}
+                {getVisibleModules().filter(mod => isModuleAccessible(mod.id)).map(mod => {
+                  const Icon = mod.icon;
+                  const routeKey = mod.routeKey || mod.id;
+                  const isActive = activeTab === routeKey;
+                  const activeColorClass = mod.id === 'expenses'
+                    ? 'bg-rose-50 border-rose-100 text-rose-700 font-black'
+                    : 'bg-indigo-50 border-indigo-100 text-indigo-700 font-black';
+                  
+                  return (
+                    <button
+                      key={mod.id}
+                      id={mod.id === 'users' ? 'open-mobile-user-access-tab' : mod.id === 'company_settings' ? 'open-mobile-company-settings-tab' : undefined}
+                      type="button"
+                      onClick={() => {
+                        setActiveTab(routeKey as any);
+                        setIsMobileMenuOpen(false);
+                      }}
+                      className={`w-full flex items-center gap-3.5 px-4.5 py-3.5 text-xs font-bold rounded-xl transition cursor-pointer border text-left ${
+                        isActive
+                          ? activeColorClass
+                          : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                      }`}
+                    >
+                      <Icon className="h-4.5 w-4.5" />
+                      <span>{mod.displayName}</span>
+                    </button>
+                  );
+                })}
               </div>
 
               {/* Drawer Footer info summary */}

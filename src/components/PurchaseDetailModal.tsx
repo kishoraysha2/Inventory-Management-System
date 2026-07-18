@@ -133,7 +133,7 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
               <p><strong>Date:</strong> ${purchaseDateStr}</p>
               <p><strong>Settlement Mode:</strong> ${purchase.paymentType}</p>
               <p><strong>Audit Status:</strong> ${isVoid ? 'VOIDED' : 'ACTIVE / COMPLETED'}</p>
-              <p><strong>Authorized By:</strong> kishor.aysha2@gmail.com</p>
+              <p><strong>Authorized By:</strong> ${purchase.createdBy || 'System Admin'}</p>
             </div>
           </div>
 
@@ -254,7 +254,7 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
     doc.setFontSize(8);
     doc.text(`Purchase Date: ${purchaseDateStr}`, 125, 71);
     doc.text(`Settlement Mode: ${purchase.paymentType}`, 125, 76);
-    doc.text(`Operator Auth: kishor.aysha2@gmail.com`, 125, 81);
+    doc.text(`Operator Auth: ${purchase.createdBy || 'System Admin'}`, 125, 81);
     doc.text(`Audit Status: ${isVoid ? 'VOIDED (No Impact)' : 'ACTIVE'}`, 125, 86);
 
     // Table Header
@@ -443,7 +443,7 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
                     </div>
                     <div>
                       <span className="text-slate-400 font-semibold uppercase text-[10px] tracking-wider block">Authorized By</span>
-                      <span className="text-slate-900 font-bold font-mono">kishor.aysha2@gmail.com</span>
+                      <span className="text-slate-900 font-bold font-mono">{purchase.createdBy || 'System Admin'}</span>
                     </div>
                     <div>
                       <span className="text-slate-400 font-semibold uppercase text-[10px] tracking-wider block">Voucher Status</span>
