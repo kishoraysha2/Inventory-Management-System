@@ -28,13 +28,16 @@ import {
   Archive,
   Briefcase,
   Wallet,
+  Coins,
   Save
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, runTransaction } from 'firebase/firestore';
 import { Sale, Customer, Product, Supplier, Capital, CashLedgerEntry, getNormalizedItems, getSaleSummary, LedgerEntry } from '../types';
 import { AppPermissions, UserRole } from '../hooks/usePermission';
-import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveSystemAccount } from '../lib/postingEngine';
+import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveSystemAccount, validateJournalBalance } from '../lib/postingEngine';
+import { formatCurrency, getCurrencySymbol, getCurrencyCode } from '../utils/currencyFormatter';
+import MetricCard, { ResponsiveKPIValue } from './MetricCard';
 
 export default function Dashboard({ userRole, permissions }: { userRole: UserRole | string; permissions: AppPermissions }) {
   // --- States ---
@@ -106,7 +109,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           action: 'Capital contribution',
           user: 'admin_01',
           timestamp: new Date().toISOString(),
-          details: `Injected manual capital contribution of $${amt.toLocaleString()} on ${newCapDate} (${newCapNote || 'No notes'})`
+          details: `Injected manual capital contribution of ${formatCurrency(amt)} on ${newCapDate} (${newCapNote || 'No notes'})`
         });
         localStorage.setItem('inventory_system_logs', JSON.stringify(logsList));
         setSystemLogs(logsList);
@@ -170,12 +173,8 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           }
         ];
 
-        // Double-entry validation
-        const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
-        const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
-        if (Math.abs(totalDebits - totalCredits) > 0.01) {
-          throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
-        }
+        // Mandatory Enterprise Journal Integrity Validation (Phase X)
+        validateJournalBalance(lines);
 
         const periodMonth = String(new Date(newCapDate).getMonth() + 1).padStart(2, '0');
         const accountingPeriod = `${transDateYear}-${periodMonth}`;
@@ -221,7 +220,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           action: 'Capital contribution',
           user: auth.currentUser?.email || 'admin_01',
           timestamp: new Date().toISOString(),
-          details: `Injected manual capital contribution of $${amt.toLocaleString()} on ${newCapDate} (${newCapNote || 'No notes'})`
+          details: `Injected manual capital contribution of ${formatCurrency(amt)} on ${newCapDate} (${newCapNote || 'No notes'})`
         });
       });
 
@@ -229,7 +228,11 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       setNewCapAmount('');
       setNewCapNote('');
     } catch (err: any) {
-      setCapFeedback({ message: `Failed to save Capital: ${err.message}`, type: 'error' });
+      if (err.message && err.message.includes("Accounting validation failed")) {
+        setCapFeedback({ message: err.message, type: 'error' });
+      } else {
+        setCapFeedback({ message: `Failed to save Capital: ${err.message}`, type: 'error' });
+      }
     }
   };
 
@@ -506,7 +509,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       if (datePart === todayStr) {
         entry.lines.forEach(line => {
           if (line.accountCode === '4100') {
-            sum += line.credit || 0;
+            sum += (line.credit || 0) - (line.debit || 0);
           }
         });
       }
@@ -526,7 +529,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       if (d.getMonth() === currentMonthNum && d.getFullYear() === currentYearNum) {
         entry.lines.forEach(line => {
           if (line.accountCode === '4100') {
-            sum += line.credit || 0;
+            sum += (line.credit || 0) - (line.debit || 0);
           }
         });
       }
@@ -541,7 +544,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       if (entry.postingStatus !== 'POSTED') return;
       entry.lines.forEach(line => {
         if (line.accountCode.startsWith('61') || line.accountCode === '5200') {
-          sum += line.debit || 0;
+          sum += (line.debit || 0) - (line.credit || 0);
         }
       });
     });
@@ -557,7 +560,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       if (d.getMonth() === currentMonthNum && d.getFullYear() === currentYearNum) {
         entry.lines.forEach(line => {
           if (line.accountCode.startsWith('61') || line.accountCode === '5200') {
-            sum += line.debit || 0;
+            sum += (line.debit || 0) - (line.credit || 0);
           }
         });
       }
@@ -574,7 +577,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       if (datePart === todayStr) {
         entry.lines.forEach(line => {
           if (line.accountCode.startsWith('61') || line.accountCode === '5200') {
-            sum += line.debit || 0;
+            sum += (line.debit || 0) - (line.credit || 0);
           }
         });
       }
@@ -588,7 +591,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       if (entry.postingStatus !== 'POSTED') return;
       entry.lines.forEach(line => {
         if (line.accountCode.startsWith('61') || line.accountCode === '5200') {
-          const val = line.debit || 0;
+          const val = (line.debit || 0) - (line.credit || 0);
           if (val > max) max = val;
         }
       });
@@ -615,7 +618,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
 
       entry.lines.forEach(line => {
         if (line.accountCode === '4100') {
-          const rev = line.credit || 0;
+          const rev = (line.credit || 0) - (line.debit || 0);
           overallRevenue += rev;
           if (isCredit) {
             creditRevenue += rev;
@@ -624,7 +627,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           }
         }
         if (line.accountCode === '5100') {
-          const cogs = line.debit || 0;
+          const cogs = (line.debit || 0) - (line.credit || 0);
           overallCOGS += cogs;
           if (isCredit) {
             creditCOGS += cogs;
@@ -740,10 +743,68 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
     .filter(c => !isInactiveStatus(c.status))
     .reduce((sum, c) => sum + (c.customerCredit || 0), 0);
 
-  // Total Purchases Sum (All-time valid purchases)
-  const totalPurchasesSum = purchases
-    .filter(p => !isVoidStatus(p.status))
-    .reduce((sum, p) => sum + p.totalAmount, 0);
+  // Today's Procurement Value (completed procurement transactions created today, excluding VOID)
+  const todaysProcurementValue = useMemo(() => {
+    const now = new Date();
+    const todayISO = now.toISOString().split('T')[0];
+    const todayLocal = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+    return (purchases || [])
+      .filter(p => !isVoidStatus(p.status))
+      .filter(p => {
+        const rawDate = p.purchaseDate || p.createdAt || p.timestamp;
+        if (!rawDate) return false;
+        const strDate = typeof rawDate === 'string' ? rawDate.split('T')[0] : '';
+        if (strDate === todayISO || strDate === todayLocal) return true;
+        const d = new Date(rawDate);
+        if (!isNaN(d.getTime())) {
+          return (
+            d.getFullYear() === now.getFullYear() &&
+            d.getMonth() === now.getMonth() &&
+            d.getDate() === now.getDate()
+          );
+        }
+        return false;
+      })
+      .reduce((sum, p) => sum + (Number(p.totalAmount) || 0), 0);
+  }, [purchases]);
+
+  // Monthly Procurement Value (completed procurement transactions created during the current calendar month, excluding VOID)
+  const monthlyProcurementValue = useMemo(() => {
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth();
+
+    return (purchases || [])
+      .filter(p => !isVoidStatus(p.status))
+      .filter(p => {
+        const rawDate = p.purchaseDate || p.createdAt || p.timestamp;
+        if (!rawDate) return false;
+
+        if (typeof rawDate === 'string') {
+          const parts = rawDate.split('T')[0].split('-');
+          if (parts.length >= 2) {
+            const year = parseInt(parts[0], 10);
+            const month = parseInt(parts[1], 10) - 1;
+            if (year === currentYear && month === currentMonth) return true;
+          }
+        }
+
+        const d = new Date(rawDate);
+        if (!isNaN(d.getTime())) {
+          return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+        }
+        return false;
+      })
+      .reduce((sum, p) => sum + (Number(p.totalAmount) || 0), 0);
+  }, [purchases]);
+
+  // Dynamic Current Month and Year Badge string (e.g. "JULY 2026")
+  const currentMonthYearBadge = useMemo(() => {
+    const now = new Date();
+    const monthName = now.toLocaleString('en-US', { month: 'long' }).toUpperCase();
+    return `${monthName} ${now.getFullYear()}`;
+  }, []);
 
   // 7. Cash accounting calculations with capital support - Ledger-Backed
   const ledgerCashMetrics = useMemo(() => {
@@ -766,6 +827,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
   }, [ledgerEntries]);
 
   const cashInHand = ledgerCashMetrics.cashInHand;
+  const liquidBusinessAssets = totalPurchaseValue + cashInHand;
   const totalInflow = ledgerCashMetrics.totalInflow;
   const totalOutflow = ledgerCashMetrics.totalOutflow;
   const netMovement = totalInflow - totalOutflow;
@@ -800,7 +862,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
     if (dailySalesTrendMap[dateString] !== undefined) {
       entry.lines.forEach(line => {
         if (line.accountCode === '4100') {
-          dailySalesTrendMap[dateString] += line.credit || 0;
+          dailySalesTrendMap[dateString] += (line.credit || 0) - (line.debit || 0);
         }
       });
     }
@@ -961,15 +1023,15 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           >
             <div className="absolute top-0 right-0 w-28 h-28 bg-gradient-to-br from-[#4F7BFF]/10 to-transparent rounded-full blur-2xl pointer-events-none group-hover:scale-110 transition-transform duration-300"></div>
             <div className="space-y-4">
-              <div className="flex items-center gap-3.5">
+              <div className="flex items-center gap-3.5 min-w-0">
                 <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#4F7BFF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_15px_rgba(79,123,255,0.35)] group-hover:scale-105 transition-transform duration-300">
                   <Briefcase className="h-5 w-5 text-white" />
                 </div>
-                <span className="text-[10px] font-bold text-[#4F7BFF] uppercase tracking-widest font-sans opacity-95">Business Capital</span>
+                <span className="text-[10px] font-bold text-[#4F7BFF] uppercase tracking-widest font-sans opacity-95 whitespace-nowrap truncate min-w-0">Business Capital</span>
               </div>
-              <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#4F7BFF] pt-1 font-mono">
-                ${startingCapital.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </h3>
+              <div className="pt-1">
+                <ResponsiveKPIValue value={formatCurrency(startingCapital)} className="text-[#4F7BFF]" />
+              </div>
             </div>
             <div className="pt-4 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
               <span className="truncate opacity-80">Owner Equity</span>
@@ -987,15 +1049,15 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           >
             <div className="absolute top-0 right-0 w-28 h-28 bg-gradient-to-br from-[#22C55E]/10 to-transparent rounded-full blur-2xl pointer-events-none group-hover:scale-110 transition-transform duration-300"></div>
             <div className="space-y-4">
-              <div className="flex items-center gap-3.5">
+              <div className="flex items-center gap-3.5 min-w-0">
                 <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#22C55E] to-[#10B981] shrink-0 ring-2 ring-white/10 shadow-[0_0_15px_rgba(34,197,94,0.35)] group-hover:scale-105 transition-transform duration-300">
                   <DollarSign className="h-5 w-5 text-white" />
                 </div>
-                <span className="text-[10px] font-bold text-[#22C55E] uppercase tracking-widest font-sans opacity-95">Cash in Hand</span>
+                <span className="text-[10px] font-bold text-[#22C55E] uppercase tracking-widest font-sans opacity-95 whitespace-nowrap truncate min-w-0">Cash in Hand</span>
               </div>
-              <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#22C55E] pt-1 font-mono">
-                ${cashInHand.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </h3>
+              <div className="pt-1">
+                <ResponsiveKPIValue value={formatCurrency(cashInHand)} className="text-[#22C55E]" />
+              </div>
             </div>
             <div className="pt-4 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
               <span className="truncate opacity-80">Liquid reserves</span>
@@ -1013,15 +1075,18 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           >
             <div className="absolute top-0 right-0 w-28 h-28 bg-gradient-to-br from-[#4F7BFF]/10 to-transparent rounded-full blur-2xl pointer-events-none group-hover:scale-110 transition-transform duration-300"></div>
             <div className="space-y-4">
-              <div className="flex items-center gap-3.5">
+              <div className="flex items-center gap-3.5 min-w-0">
                 <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#4F7BFF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_15px_rgba(79,123,255,0.35)] group-hover:scale-105 transition-transform duration-300">
                   <RefreshCw className="h-5 w-5 text-white" />
                 </div>
-                <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Net Movement</span>
+                <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95 whitespace-nowrap truncate min-w-0">Net Movement</span>
               </div>
-              <h3 className={`text-xl xs:text-2xl sm:text-3xl font-black tracking-tight pt-1 font-mono ${netMovement >= 0 ? 'text-[#22C55E]' : 'text-rose-400'}`}>
-                {netMovement >= 0 ? '+' : ''}${netMovement.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </h3>
+              <div className="pt-1">
+                <ResponsiveKPIValue 
+                  value={`${netMovement >= 0 ? '+' : ''}${formatCurrency(netMovement)}`} 
+                  className={netMovement >= 0 ? 'text-[#22C55E]' : 'text-rose-400'} 
+                />
+              </div>
             </div>
             <div className="pt-4 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
               <span className="truncate opacity-80">Combined cashflow</span>
@@ -1036,7 +1101,101 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       {/* 8 BENTO METRICS GRID (Showcasing all calculations requested with enhanced heights & modern SaaS feels) */}
       <div className="grid grid-cols-1 gap-4 sm:gap-6 md:gap-7 xl:gap-8 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 font-sans">
         
-        {/* CARD 1: Total Products */}
+        {/* CARD 1: Net Sales Revenue Today (Excl. VAT) */}
+        <motion.div
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(0,212,255,0.3)" }}
+          transition={{ duration: 0.2 }}
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(0,212,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
+        >
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#00D4FF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#00D4FF] to-[#9C4DFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(0,212,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <ShoppingBag className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Net Sales Revenue Today (Excl. VAT)</span>
+            </div>
+            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1 font-mono">
+              {formatCurrency(todaysSalesValue)}
+            </h3>
+          </div>
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-80">{todayStr}</span>
+            <span className="text-emerald-400 font-bold font-mono">LIVE BOOK</span>
+          </div>
+        </motion.div>
+
+        {/* CARD 2: Total Profit */}
+        {permissions?.viewProductCost !== false && (
+          <motion.div
+            whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(34,197,94,0.5)" }}
+            transition={{ duration: 0.2 }}
+            className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#22C55E]/30 rounded-xl sm:rounded-[1.5rem] shadow-[0_0_25px_rgba(34,197,94,0.06)] hover:shadow-[0_8px_35px_rgba(34,197,94,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] lg:col-span-2 h-full relative overflow-hidden group"
+          >
+            <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-[#22C55E]/10 to-transparent rounded-full blur-3xl pointer-events-none group-hover:scale-110 transition-transform"></div>
+            <div className="space-y-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-[#22C55E] shrink-0 ring-2 ring-white/15 shadow-[0_0_15px_rgba(34,197,94,0.4)] group-hover:scale-105 transition-transform duration-300">
+                  <Sparkles className="h-5 w-5 text-white animate-pulse" />
+                </div>
+                <span className="text-[10px] font-bold text-[#22C55E] uppercase tracking-widest font-sans">Total Profit</span>
+              </div>
+              
+              <div>
+                <h3 className="text-2xl xs:text-3xl sm:text-4xl font-extrabold tracking-tight text-[#22C55E] font-mono">
+                  {formatCurrency(salesProfitValue)}
+                </h3>
+                <p className="text-[10px] text-[#93A3B8] mt-1 font-sans font-medium tracking-wide">Gross accumulated trading profit margins</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 border-t border-[#1E2A44]/65 pt-3 w-full text-sans">
+                <div>
+                  <span className="text-[9px] font-bold text-[#93A3B8] uppercase tracking-wider block">Cash Profit</span>
+                  <span className="text-sm xs:text-base font-black text-[#22C55E] block mt-0.5 font-mono">
+                    {formatCurrency(cashProfitValue)}
+                  </span>
+                </div>
+                <div className="border-l border-[#1E2A44]/70 pl-4">
+                  <span className="text-[9px] font-bold text-[#93A3B8] uppercase tracking-wider block">Credit Profit</span>
+                  <span className="text-sm xs:text-base font-black text-[#4F7BFF] block mt-0.5 font-mono">
+                    {formatCurrency(creditProfitValue)}
+                  </span>
+                </div>
+              </div>
+            </div>
+            
+            <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+              <span className="opacity-80">Gross trade margins</span>
+              <span className="font-bold text-white font-mono bg-[#1E2A44]/90 px-3 py-1 rounded-lg border border-[#1E2A44]/80">{averageProfitMargin.toFixed(1)}% Avg Margin</span>
+            </div>
+          </motion.div>
+        )}
+
+        {/* CARD 3: Sales This Month */}
+        <motion.div
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(0,212,255,0.3)" }}
+          transition={{ duration: 0.2 }}
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(0,212,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
+        >
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#00D4FF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#00D4FF] to-[#9C4DFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(0,212,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <Calendar className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Sales This Month</span>
+            </div>
+            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1 font-mono">
+              {formatCurrency(monthlySalesValue)}
+            </h3>
+          </div>
+          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
+            <span className="truncate opacity-85">Running cycle billing</span>
+            <span className="text-[#00D4FF] font-bold">Active Cycle</span>
+          </div>
+        </motion.div>
+
+        {/* CARD 4: Total Products */}
         <motion.div
           whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(79,123,255,0.3)" }}
           transition={{ duration: 0.2 }}
@@ -1060,7 +1219,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           </div>
         </motion.div>
 
-        {/* CARD 2: Total Customers */}
+        {/* CARD 5: Total Customers */}
         <motion.div
           whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(79,123,255,0.3)" }}
           transition={{ duration: 0.2 }}
@@ -1084,7 +1243,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           </div>
         </motion.div>
 
-        {/* CARD 3: Total Suppliers */}
+        {/* CARD 6: Total Suppliers */}
         <motion.div
           whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(79,123,255,0.3)" }}
           transition={{ duration: 0.2 }}
@@ -1108,7 +1267,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           </div>
         </motion.div>
 
-        {/* CARD 4: Low Stock Products alert count */}
+        {/* CARD 7: Low Stock Products alert count */}
         <motion.div
           whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(239,68,68,0.5)" }}
           transition={{ duration: 0.2 }}
@@ -1138,79 +1297,61 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           </div>
         </motion.div>
 
-        {/* CARD 5: Total Sales Today */}
+        {/* CARD 8: TODAY'S PROCUREMENT */}
         <motion.div
           whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(0,212,255,0.3)" }}
           transition={{ duration: 0.2 }}
           className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(0,212,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
         >
           <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#00D4FF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
-          <div className="space-y-4">
-            <div className="flex items-center gap-3.5">
-              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#00D4FF] to-[#9C4DFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(0,212,255,0.35)] group-hover:scale-105 transition-transform duration-300">
-                <ShoppingBag className="h-5 w-5 text-white" />
-              </div>
-              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Sales Today</span>
-            </div>
-            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1 font-mono">
-              ${todaysSalesValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </h3>
-          </div>
-          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
-            <span className="truncate opacity-80">{todayStr}</span>
-            <span className="text-emerald-400 font-bold font-mono">LIVE BOOK</span>
-          </div>
-        </motion.div>
-
-        {/* CARD 6: Total Sales This Month */}
-        <motion.div
-          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(0,212,255,0.3)" }}
-          transition={{ duration: 0.2 }}
-          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(0,212,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
-        >
-          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#00D4FF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
-          <div className="space-y-4">
-            <div className="flex items-center gap-3.5">
-              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#00D4FF] to-[#9C4DFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(0,212,255,0.35)] group-hover:scale-105 transition-transform duration-300">
-                <Calendar className="h-5 w-5 text-white" />
-              </div>
-              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Sales This Month</span>
-            </div>
-            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1 font-mono">
-              ${monthlySalesValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </h3>
-          </div>
-          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
-            <span className="truncate opacity-85">Running cycle billing</span>
-            <span className="text-[#00D4FF] font-bold">Active Cycle</span>
-          </div>
-        </motion.div>
-
-        {/* CARD 7: Total Purchases */}
-        <motion.div
-          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(0,212,255,0.3)" }}
-          transition={{ duration: 0.2 }}
-          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(0,212,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
-        >
-          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#00D4FF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
-          <div className="space-y-4">
+          <div className="space-y-3.5">
             <div className="flex items-center gap-3.5">
               <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#00D4FF] to-[#9C4DFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(0,212,255,0.35)] group-hover:scale-105 transition-transform duration-300">
                 <Archive className="h-5 w-5 text-white" />
               </div>
-              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Purchases</span>
+              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">TODAY'S PROCUREMENT</span>
             </div>
-            <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] pt-1 font-mono">
-              ${totalPurchasesSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </h3>
+            <div>
+              <ResponsiveKPIValue 
+                value={formatCurrency(todaysProcurementValue)} 
+                className="text-[#E6EDF7]" 
+              />
+            </div>
           </div>
-          <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
-            <span className="truncate opacity-80">Procurement history</span>
-            <span className="text-emerald-400 font-bold">Completed</span>
+          <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans min-w-0">
+            <span className="opacity-80 leading-none truncate">Today's Transactions</span>
+            <span className="text-emerald-400 font-mono text-[9px] font-bold tracking-wider bg-emerald-950/40 px-2.5 py-1 rounded border border-emerald-500/20 shrink-0 leading-none flex items-center">LIVE</span>
           </div>
         </motion.div>
 
-        {/* CARD 8: Customer Due */}
+        {/* CARD 9: MONTHLY PROCUREMENT */}
+        <motion.div
+          whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(0,212,255,0.3)" }}
+          transition={{ duration: 0.2 }}
+          className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(0,212,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
+        >
+          <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#00D4FF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+          <div className="space-y-3.5">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#00D4FF] to-[#9C4DFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(0,212,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                <Calendar className="h-5 w-5 text-white" />
+              </div>
+              <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">MONTHLY PROCUREMENT</span>
+            </div>
+            <div>
+              <ResponsiveKPIValue 
+                value={formatCurrency(monthlyProcurementValue)} 
+                className="text-[#E6EDF7]" 
+              />
+            </div>
+          </div>
+          <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans min-w-0">
+            <span className="opacity-80 leading-none truncate">Current Month</span>
+            <span className="text-[#00D4FF] font-mono text-[9px] font-bold tracking-wider bg-[#1E2A44] px-2.5 py-1 rounded border border-[#1E2A44]/80 shrink-0 leading-none flex items-center uppercase">{currentMonthYearBadge}</span>
+          </div>
+        </motion.div>
+
+        {/* CARD 10: Customer Due */}
         <motion.div
           whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(245,158,11,0.4)" }}
           transition={{ duration: 0.2 }}
@@ -1225,7 +1366,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
               <span className="text-[10px] font-bold text-amber-400 tracking-widest uppercase font-sans">Customer Due</span>
             </div>
             <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-amber-500 pt-1 font-mono">
-              ${totalCustomerDue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(totalCustomerDue)}
             </h3>
           </div>
           <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
@@ -1236,7 +1377,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           </div>
         </motion.div>
 
-        {/* CARD 9: Customer Credit */}
+        {/* CARD 11: Customer Credit */}
         <motion.div
           whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(168,85,247,0.4)" }}
           transition={{ duration: 0.2 }}
@@ -1251,7 +1392,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
               <span className="text-[10px] font-bold text-[#A855F7] uppercase tracking-widest font-sans opacity-95">Customer Credit</span>
             </div>
             <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#A855F7] pt-1 font-mono">
-              ${totalCustomerCredit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(totalCustomerCredit)}
             </h3>
           </div>
           <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
@@ -1260,7 +1401,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           </div>
         </motion.div>
 
-        {/* CARD 10: Supplier Due */}
+        {/* CARD 12: Supplier Due */}
         <motion.div
           whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(239,68,68,0.4)" }}
           transition={{ duration: 0.2 }}
@@ -1275,7 +1416,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
               <span className="text-[10px] font-bold text-rose-400 uppercase tracking-widest font-sans opacity-95">Supplier Due</span>
             </div>
             <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#EF4444] pt-1 font-mono">
-              ${totalSupplierDue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(totalSupplierDue)}
             </h3>
           </div>
           <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
@@ -1286,53 +1427,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
           </div>
         </motion.div>
 
-        {/* CARD 11: Total Profit */}
-        {permissions?.viewProductCost !== false && (
-          <motion.div
-            whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(34,197,94,0.5)" }}
-            transition={{ duration: 0.2 }}
-            className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#22C55E]/30 rounded-xl sm:rounded-[1.5rem] shadow-[0_0_25px_rgba(34,197,94,0.06)] hover:shadow-[0_8px_35px_rgba(34,197,94,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] lg:col-span-2 h-full relative overflow-hidden group"
-          >
-            <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-[#22C55E]/10 to-transparent rounded-full blur-3xl pointer-events-none group-hover:scale-110 transition-transform"></div>
-            <div className="space-y-4">
-              <div className="flex items-center gap-3.5">
-                <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-[#22C55E] shrink-0 ring-2 ring-white/15 shadow-[0_0_15px_rgba(34,197,94,0.4)] group-hover:scale-105 transition-transform duration-300">
-                  <Sparkles className="h-5 w-5 text-white animate-pulse" />
-                </div>
-                <span className="text-[10px] font-bold text-[#22C55E] uppercase tracking-widest font-sans">Total Profit</span>
-              </div>
-              
-              <div>
-                <h3 className="text-2xl xs:text-3xl sm:text-4xl font-extrabold tracking-tight text-[#22C55E] font-mono">
-                  ${salesProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </h3>
-                <p className="text-[10px] text-[#93A3B8] mt-1 font-sans font-medium tracking-wide">Gross accumulated trading profit margins</p>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4 border-t border-[#1E2A44]/65 pt-3 w-full text-sans">
-                <div>
-                  <span className="text-[9px] font-bold text-[#93A3B8] uppercase tracking-wider block">Cash Profit</span>
-                  <span className="text-sm xs:text-base font-black text-[#22C55E] block mt-0.5 font-mono">
-                    ${cashProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </span>
-                </div>
-                <div className="border-l border-[#1E2A44]/70 pl-4">
-                  <span className="text-[9px] font-bold text-[#93A3B8] uppercase tracking-wider block">Credit Profit</span>
-                  <span className="text-sm xs:text-base font-black text-[#4F7BFF] block mt-0.5 font-mono">
-                    ${creditProfitValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </span>
-                </div>
-              </div>
-            </div>
-            
-            <div className="mt-4 pt-3.5 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
-              <span className="opacity-80">Gross trade margins</span>
-              <span className="font-bold text-white font-mono bg-[#1E2A44]/90 px-3 py-1 rounded-lg border border-[#1E2A44]/80">{averageProfitMargin.toFixed(1)}% Avg Margin</span>
-            </div>
-          </motion.div>
-        )}
-
-        {/* CARD 12: Original Opening Stock Value */}
+        {/* CARD 13: Original Opening Stock Value */}
         {permissions?.viewProductCost !== false && (
           <motion.div
             whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(79,123,255,0.3)" }}
@@ -1340,7 +1435,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
             className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#1E2A44] rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(79,123,255,0.08)] hover:shadow-[0_8px_30px_rgba(79,123,255,0.15)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
           >
             <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#4F7BFF]/5 to-transparent rounded-full blur-2xl pointer-events-none"></div>
-            <div className="space-y-4">
+            <div className="space-y-3.5">
               <div className="flex items-center gap-3.5">
                 <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#4F7BFF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(79,123,255,0.35)] group-hover:scale-105 transition-transform duration-300">
                   <Archive className="h-5 w-5 text-white" />
@@ -1349,28 +1444,32 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
               </div>
 
               <div>
-                <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#E6EDF7] font-mono">
-                  ${openingStockValueCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </h3>
+                <ResponsiveKPIValue 
+                  value={formatCurrency(openingStockValueCost)} 
+                  className="text-[#E6EDF7]" 
+                />
                 <p className="text-[10px] text-[#93A3B8] mt-1 font-sans">Cost base setup valuation</p>
               </div>
 
-              <div className="border-t border-[#1E2A44]/65 pt-3.5">
+              <div className="border-t border-[#1E2A44]/65 pt-3">
                 <span className="text-[9px] font-bold text-[#93A3B8] uppercase block font-sans tracking-wide">Opening Stock Retail Value</span>
-                <span className="text-xs xs:text-sm font-extrabold text-[#4F7BFF] block mt-0.5 font-mono">
-                  ${openingStockValueRetail.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
+                <div className="mt-0.5">
+                  <ResponsiveKPIValue 
+                    value={formatCurrency(openingStockValueRetail)} 
+                    className="text-[#4F7BFF]" 
+                  />
+                </div>
               </div>
             </div>
 
-            <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
-              <span className="opacity-80">Setup reserve base</span>
-              <span className="text-[#00D4FF] font-mono text-[9px] font-bold tracking-wider bg-[#1E2A44] px-2 py-0.5 rounded border border-[#1E2A44]/80">INITIAL</span>
+            <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans min-w-0">
+              <span className="opacity-80 leading-none truncate">Setup reserve base</span>
+              <span className="text-[#00D4FF] font-mono text-[9px] font-bold tracking-wider bg-[#1E2A44] px-2.5 py-1 rounded border border-[#1E2A44]/80 shrink-0 leading-none flex items-center">INITIAL</span>
             </div>
           </motion.div>
         )}
 
-        {/* CARD 13: Current Inventory Value */}
+        {/* CARD 14: Current Inventory Value */}
         {permissions?.viewProductCost !== false && (
           <motion.div
             whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(59,130,246,0.4)" }}
@@ -1378,7 +1477,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
             className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#3B82F6]/25 rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(59,130,246,0.08)] hover:shadow-[0_8px_30px_rgba(59,130,246,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
           >
             <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#3B82F6]/10 to-transparent rounded-full blur-2xl pointer-events-none"></div>
-            <div className="space-y-4">
+            <div className="space-y-3.5">
               <div className="flex items-center gap-3.5">
                 <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#3B82F6] to-[#60A5FA] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(59,130,246,0.35)] group-hover:scale-105 transition-transform duration-300">
                   <Briefcase className="h-5 w-5 text-white" />
@@ -1387,23 +1486,58 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
               </div>
 
               <div>
-                <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-[#3B82F6] font-mono">
-                  ${totalPurchaseValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </h3>
+                <ResponsiveKPIValue 
+                  value={formatCurrency(totalPurchaseValue)} 
+                  className="text-[#3B82F6]" 
+                />
                 <p className="text-[10px] text-[#93A3B8] mt-1 font-sans">Active tied assets (at Cost Price)</p>
               </div>
 
-              <div className="border-t border-[#1E2A44]/65 pt-3.5">
+              <div className="border-t border-[#1E2A44]/65 pt-3">
                 <span className="text-[9px] font-bold text-[#93A3B8] uppercase block font-sans tracking-wide">Valuation Form</span>
-                <span className="text-[10px] text-[#93A3B8] block mt-0.5">
-                  Purchase Price × Stock count
-                </span>
+                <div className="mt-0.5 flex items-baseline min-h-[24px]">
+                  <span className="text-[10px] font-extrabold text-[#60A5FA] font-mono tracking-tight leading-tight">
+                    Purchase Price × Stock count
+                  </span>
+                </div>
               </div>
             </div>
 
-            <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
-              <span className="opacity-80">Inventory live capital</span>
-              <span className="text-[#3B82F6] font-mono text-[9px] font-bold tracking-wider bg-blue-950/40 px-2.5 py-1 rounded border border-[#3B82F6]/20">ASSET BASIS</span>
+            <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans min-w-0">
+              <span className="opacity-80 leading-none truncate">Inventory live capital</span>
+              <span className="text-[#3B82F6] font-mono text-[9px] font-bold tracking-wider bg-blue-950/40 px-2.5 py-1 rounded border border-[#3B82F6]/20 shrink-0 leading-none flex items-center">ASSET BASIS</span>
+            </div>
+          </motion.div>
+        )}
+
+        {/* CARD 15: Liquid Business Assets */}
+        {permissions?.viewProductCost !== false && (
+          <motion.div
+            whileHover={{ y: -5, scale: 1.025, borderColor: "rgba(0,212,255,0.4)" }}
+            transition={{ duration: 0.2 }}
+            className="bg-gradient-to-b from-[#0F1626] to-[#121B2F] border border-[#00D4FF]/25 rounded-xl sm:rounded-[1.5rem] shadow-[0_4px_20px_-4px_rgba(0,212,255,0.08)] hover:shadow-[0_8px_30px_rgba(0,212,255,0.18)] transition p-4 xs:p-5 sm:p-6 flex flex-col justify-between min-h-[160px] sm:min-h-[200px] h-full relative overflow-hidden group"
+          >
+            <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[#00D4FF]/10 to-transparent rounded-full blur-2xl pointer-events-none"></div>
+            <div className="space-y-3.5">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl flex items-center justify-center bg-gradient-to-tr from-[#00D4FF] to-[#7B5CFF] shrink-0 ring-2 ring-white/10 shadow-[0_0_12px_rgba(0,212,255,0.35)] group-hover:scale-105 transition-transform duration-300">
+                  <Coins className="h-5 w-5 text-white" />
+                </div>
+                <span className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-widest font-sans opacity-95">LIQUID BUSINESS ASSETS</span>
+              </div>
+
+              <div>
+                <ResponsiveKPIValue 
+                  value={formatCurrency(liquidBusinessAssets)} 
+                  className="text-[#00D4FF]" 
+                />
+                <p className="text-[10px] text-[#93A3B8] mt-1 font-sans">Inventory + Cash Assets</p>
+              </div>
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans min-w-0">
+              <span className="opacity-80 leading-none truncate">Current Inventory + Cash</span>
+              <span className="text-[#00D4FF] font-mono text-[9px] font-bold tracking-wider bg-cyan-950/40 px-2.5 py-1 rounded border border-[#00D4FF]/20 shrink-0 leading-none flex items-center">REAL-TIME</span>
             </div>
           </motion.div>
         )}
@@ -1439,7 +1573,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                   <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Total Expense</span>
                 </div>
                 <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-white pt-1 font-mono">
-                  ${totalExpensesValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {formatCurrency(totalExpensesValue)}
                 </h3>
               </div>
               <div className="mt-3 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
@@ -1463,7 +1597,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                   <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Monthly Expense</span>
                 </div>
                 <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-white pt-1 font-mono">
-                  ${monthlyExpensesValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {formatCurrency(monthlyExpensesValue)}
                 </h3>
               </div>
               <div className="mt-3 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
@@ -1487,7 +1621,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                   <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Today's Expense</span>
                 </div>
                 <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-white pt-1 font-mono">
-                  ${todaysExpensesValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {formatCurrency(todaysExpensesValue)}
                 </h3>
               </div>
               <div className="mt-3 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
@@ -1511,7 +1645,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                   <span className="text-[10px] font-bold text-[#8FA2B9] uppercase tracking-widest font-sans opacity-95">Largest Expense</span>
                 </div>
                 <h3 className="text-xl xs:text-2xl sm:text-3xl font-black tracking-tight text-white pt-1 font-mono">
-                  ${largestExpenseValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {formatCurrency(largestExpenseValue)}
                 </h3>
               </div>
               <div className="mt-3 pt-3 border-t border-[#1E2A44]/65 flex items-center justify-between text-[11px] text-[#93A3B8] font-sans">
@@ -1582,7 +1716,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                         strokeWidth="3"
                         className="transition duration-200 cursor-pointer hover:r-7"
                       />
-                      <title>{`${d.label}: $${d.value.toFixed(2)}`}</title>
+                      <title>{`${d.label}: ${formatCurrency(d.value)}`}</title>
                     </g>
                   );
                 })}
@@ -1661,7 +1795,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                     <div key={index} className="space-y-1.5">
                       <div className="flex justify-between items-center text-xs">
                         <span className="font-bold text-slate-800 capitalize leading-none">{cat}</span>
-                        <span className="font-semibold text-slate-500 font-mono">${val.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                        <span className="font-semibold text-slate-500 font-mono">{formatCurrency(val)}</span>
                       </div>
                       <div className="w-full h-2 bg-slate-50 border border-slate-100 rounded-full overflow-hidden">
                         <div 
@@ -1789,7 +1923,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
       {/* --- BUSINESS CAPITAL RESERVES & INVESTMENT BOARD MODAL --- */}
       <AnimatePresence>
         {isCapitalModalOpen && (
-          <div className="fixed inset-0 bg-slate-950/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="fixed inset-0 bg-slate-950/60 flex items-center justify-center z-50 p-4">
             <motion.div 
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -1809,7 +1943,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                     setIsCapitalModalOpen(false);
                     setCapFeedback(null);
                   }}
-                  className="p-1.5 hover:bg-white/10 rounded-xl transition text-slate-400 hover:text-white"
+                  className="p-1.5 hover:bg-white/10 rounded-xl transition text-slate-400 hover:text-white cursor-pointer"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -1840,7 +1974,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                 </div>
 
                 {/* Subtitle Form to Add Investment */}
-                <div className="bg-slate-50 rounded-2xl p-5 border border-slate-100/80 space-y-4">
+                <div className="bg-slate-50 rounded-2xl p-5 border border-slate-200/80 space-y-4">
                   <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">Log New Capital Contribution</h4>
                   
                   {capFeedback && (
@@ -1855,21 +1989,20 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                   <form onSubmit={handleSaveCapital} className="grid grid-cols-1 md:grid-cols-3 gap-5 items-start">
                     {/* Amount */}
                     <div className="relative w-full">
-                      <DollarSign className="absolute left-3.5 top-[18px] w-4 h-4 text-slate-400" />
+                      <DollarSign className="absolute left-3.5 top-[18px] w-4 h-4 text-slate-500 z-10" />
                       <input 
                         type="number"
                         step="0.01"
                         required
                         id="cap-amount-field"
-                        placeholder=" shadow-xs"
-                        placeholder-transparent="true"
+                        placeholder=" "
                         value={newCapAmount}
                         onChange={(e) => setNewCapAmount(e.target.value)}
-                        disabled={!permissions.manageSettings}
-                        className="peer w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                        disabled={!permissions.voidPayment}
+                        className="peer w-full rounded-xl border border-slate-300 bg-white text-slate-900 text-opacity-100 opacity-100 pl-9 pr-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed antialiased"
                       />
-                      <label htmlFor="cap-amount-field" className="absolute left-9 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-9 peer-focus:top-1.5 peer-focus:left-9 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
-                        Amount ($ USD) <span className="text-rose-500 font-extrabold">*</span>
+                      <label htmlFor="cap-amount-field" className="absolute left-9 top-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-placeholder-shown:left-9 peer-focus:top-1.5 peer-focus:left-9 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                        Amount ({getCurrencyCode()}) <span className="text-rose-500 font-extrabold">*</span>
                       </label>
                     </div>
 
@@ -1882,10 +2015,10 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                         placeholder=" "
                         value={newCapDate}
                         onChange={(e) => setNewCapDate(e.target.value)}
-                        disabled={!permissions.manageSettings}
-                        className="peer w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed cursor-pointer"
+                        disabled={!permissions.voidPayment}
+                        className="peer w-full rounded-xl border border-slate-300 bg-white text-slate-900 text-opacity-100 opacity-100 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed cursor-pointer antialiased"
                       />
-                      <label htmlFor="cap-date-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      <label htmlFor="cap-date-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
                         Contribution Date <span className="text-rose-500 font-extrabold">*</span>
                       </label>
                     </div>
@@ -1898,10 +2031,10 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                         placeholder=" "
                         value={newCapNote}
                         onChange={(e) => setNewCapNote(e.target.value)}
-                        disabled={!permissions.manageSettings}
-                        className="peer w-full rounded-xl border border-slate-200 bg-white px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-605 focus:ring-1 focus:ring-indigo-605 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed"
+                        disabled={!permissions.voidPayment}
+                        className="peer w-full rounded-xl border border-slate-300 bg-white text-slate-900 text-opacity-100 opacity-100 px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none transition-all placeholder-transparent h-[52px] disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed antialiased"
                       />
-                      <label htmlFor="cap-note-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
+                      <label htmlFor="cap-note-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-wider transition-all duration-150 pointer-events-none origin-left peer-placeholder-shown:text-xs peer-placeholder-shown:font-semibold peer-placeholder-shown:top-4 peer-focus:top-1.5 peer-focus:text-[10px] peer-focus:font-bold peer-focus:text-indigo-600">
                         Source Note / Equity Reference
                       </label>
                     </div>
@@ -1909,7 +2042,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                     <div className="md:col-span-3 flex justify-end pt-2">
                       <button 
                         type="submit"
-                        disabled={!permissions.manageSettings}
+                        disabled={!permissions.voidPayment}
                         className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[11px] uppercase tracking-wider px-5 py-2.5 rounded-xl transition shadow-xs hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer inline-flex items-center gap-1.5 h-10"
                       >
                         <Save className="w-3.5 h-3.5" />
@@ -1947,7 +2080,7 @@ export default function Dashboard({ userRole, permissions }: { userRole: UserRol
                             <tr key={cap.id} className="border-b border-slate-50 hover:bg-slate-50/30 transition text-slate-750">
                               <td className="p-4 font-bold font-mono text-slate-800">{cap.id}</td>
                               <td className="p-4 font-mono font-bold">{cap.date}</td>
-                              <td className="p-4 text-right font-black font-mono text-[13px] text-emerald-700">${cap.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                              <td className="p-4 text-right font-black font-mono text-[13px] text-emerald-700">{formatCurrency(cap.amount)}</td>
                               <td className="p-4 font-semibold text-indigo-650">
                                 <span className="bg-indigo-50 text-indigo-750 px-1.5 py-0.5 rounded text-[9.5px] font-bold font-mono">
                                   {cap.createdBy || 'System'}

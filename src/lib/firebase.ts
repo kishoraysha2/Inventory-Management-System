@@ -83,16 +83,20 @@ testConnection();
 
 export async function logSystemActivity(action: string, details: string) {
   try {
+    if (!auth.currentUser) {
+      console.warn("Skipping logSystemActivity: user not signed in");
+      return;
+    }
     const logId = `syslog-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const user = auth.currentUser?.email || 'System';
     const timestamp = new Date().toISOString();
 
     const payload = {
       id: logId,
-      action,
-      user,
+      action: String(action || 'System Action').substring(0, 100),
+      user: String(user || 'System').substring(0, 200),
       timestamp,
-      details
+      details: String(details || 'No details provided').substring(0, 5000)
     };
 
     await setDoc(doc(db, 'Logs', logId), payload);

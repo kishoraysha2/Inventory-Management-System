@@ -17,10 +17,13 @@ import {
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import QRCode from 'qrcode';
+import { applyEnterprisePdfFont, formatPdfText, formatPdfCurrency, setPdfFont } from '../utils/pdfHelper';
+import { formatAmountInWords } from '../utils/amountInWords';
 import { Sale, Customer, Product, getNormalizedItems } from '../types';
 import { db, auth } from '../lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { isVoidStatus } from '../lib/utils';
+import { formatCurrency } from '../utils/currencyFormatter';
 
 interface TaxInvoiceModalProps {
   sale: Sale;
@@ -365,11 +368,10 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
   }, [sale.customerSnapshot, sale.customerName, sale.paymentType, matchedCustomer]);
 
   // --- Invoice Financial Formula Processing ---
-  const isUpgradedSale = sale.subtotal !== undefined;
-  const subtotal = isUpgradedSale ? sale.subtotal : sale.totalAmount;
-  const taxRatePercent = isUpgradedSale ? sale.taxRatePercent : activeCompany.taxRatePercent;
-  const taxAmount = isUpgradedSale ? sale.taxAmount : (subtotal * activeCompany.taxRatePercent) / 100;
-  const grandTotal = isUpgradedSale ? sale.totalAmount : subtotal + taxAmount;
+  const taxRatePercent = sale.taxRatePercent ?? activeCompany.taxRatePercent ?? 15;
+  const subtotal = sale.subtotal ?? (sale.totalAmount / (1 + taxRatePercent / 100));
+  const taxAmount = sale.taxAmount ?? (sale.totalAmount - subtotal);
+  const grandTotal = sale.totalAmount;
 
   // Track customer meta defaults
   const customerAddress = resolvedCustomer.address;
@@ -392,13 +394,19 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
       const productName = item.productSnapshot?.name || item.productName;
       const itemTaxRate = item.taxRatePercent !== undefined ? item.taxRatePercent : taxRatePercent;
       const itemVatAmount = item.taxAmount !== undefined ? item.taxAmount : (item.subtotal * itemTaxRate) / 100;
+      const itemUnitCode = item.unitCode || prod?.unitCode || item.productSnapshot?.unitCode || 'PCS';
       return {
         sl: idx + 1,
         id: item.productId || `item-${idx}`,
         productName: productName,
         sku: sku,
         quantity: item.quantity,
-        unit: 'Pcs',
+        unit: item.enteredUnitCode || itemUnitCode,
+        enteredQuantity: item.enteredQuantity,
+        enteredUnitCode: item.enteredUnitCode,
+        baseQuantity: item.baseQuantity,
+        baseUnitCode: item.baseUnitCode,
+        isAlternateUnit: item.isAlternateUnit,
         unitPrice: item.unitPrice,
         taxRatePercent: itemTaxRate,
         vatAmount: itemVatAmount,
@@ -440,6 +448,11 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
           sku: `SKU-MOCK-${1000 + i}`,
           quantity: qty,
           unit: 'Pcs',
+          enteredQuantity: qty,
+          enteredUnitCode: 'Pcs',
+          baseQuantity: qty,
+          baseUnitCode: 'Pcs',
+          isAlternateUnit: false,
           unitPrice: unitPrice,
           taxRatePercent: itemVatPercent,
           vatAmount: itemVatAmount,
@@ -453,38 +466,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
   // --- Helper to convert numbers to words ---
   const numberToWords = (num: number): string => {
-    if (num === 0) return 'Zero Dollars Only';
-    
-    const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
-    const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-    
-    const convertLessThanOneThousand = (n: number): string => {
-      if (n === 0) return '';
-      if (n < 20) return ones[n] + ' ';
-      if (n < 100) return tens[Math.floor(n / 10)] + ' ' + ones[n % 10] + ' ';
-      return ones[Math.floor(n / 100)] + ' Hundred ' + convertLessThanOneThousand(n % 100);
-    };
-    
-    const convert = (n: number): string => {
-      if (n < 1000) return convertLessThanOneThousand(n);
-      if (n < 1000000) return convert(Math.floor(n / 1000)) + 'Thousand ' + convertLessThanOneThousand(n % 1000);
-      return convert(Math.floor(n / 1000000)) + 'Million ' + convert(n % 1000000);
-    };
-    
-    const cleanNum = Math.floor(num);
-    const cents = Math.round((num - cleanNum) * 100);
-    
-    let result = convert(cleanNum).trim();
-    if (result) result += ' Dollars';
-    
-    if (cents > 0) {
-      if (result) result += ' and ';
-      result += `${cents}/100 Cents`;
-    } else {
-      result += ' Only';
-    }
-    
-    return result;
+    return formatAmountInWords(num);
   };
 
   const overallTotals = React.useMemo(() => {
@@ -510,6 +492,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
       unit: 'mm',
       format: 'a4'
     });
+    applyEnterprisePdfFont(doc);
 
     // Calculate Page 1 table start Y (tableY for page 1)
     let p1LeftY = 12;
@@ -681,6 +664,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
       unit: 'mm',
       format: 'a4'
     });
+    applyEnterprisePdfFont(doc);
 
     const pageCount = pageItemsList.length;
 
@@ -700,7 +684,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         
         // LEFT: Business Information (compact layout) - 40% Width (72mm max width, starts at 15, ends on or before 87)
         let leftY = 12;
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(11);
         doc.setTextColor(15, 23, 42); // slate-900
         const bizNameLines = doc.splitTextToSize(activeCompany.name.toUpperCase(), 72);
@@ -709,7 +693,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
           leftY += 4.5;
         });
         
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'normal');
         doc.setFontSize(7.5);
         doc.setTextColor(71, 85, 105);
         
@@ -722,14 +706,14 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         }
         
         // Emphasized VAT
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         const vatLineInput = `VAT Number: ${activeCompany.taxRegistrationId}`;
         const vatLines = doc.splitTextToSize(vatLineInput, 72);
         vatLines.forEach((line: string) => {
           doc.text(line, 15, leftY);
           leftY += 3.5;
         });
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'normal');
 
         if (activeCompany.crNumber) {
           const crLines = doc.splitTextToSize(`CR Number: ${activeCompany.crNumber}`, 72);
@@ -779,13 +763,13 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
           try {
             doc.addImage(qrCodeDataUrl, 'PNG', 97, 10, 16, 16);
           } catch (e) {
-            doc.setFont('helvetica', 'bold');
+            setPdfFont(doc, 'bold');
             doc.setFontSize(5);
             doc.setTextColor(148, 163, 184);
             doc.text("[QR CODE]", 100, 18);
           }
         } else {
-          doc.setFont('helvetica', 'bold');
+          setPdfFont(doc, 'bold');
           doc.setFontSize(5);
           doc.setTextColor(148, 163, 184);
           doc.text("[QR CODE]", 100, 18);
@@ -794,13 +778,13 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         // RIGHT: Customer Information (compact layout) - 40% Width (72mm max width, starts at 123, ends at 195)
         // Highly visible, right aligned at X = 123
         let rightY = 12;
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(8);
         doc.setTextColor(100, 116, 139);
         doc.text("BILL TO (CUSTOMER):", 123, rightY);
         rightY += 4.5;
         
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(9.5);
         doc.setTextColor(79, 70, 229); // indigo-650
         const custNameLines = doc.splitTextToSize(resolvedCustomer.name.toUpperCase(), 72);
@@ -809,7 +793,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
           rightY += 4.5;
         });
         
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'normal');
         doc.setFontSize(7.5);
         doc.setTextColor(71, 85, 105);
         
@@ -836,14 +820,14 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         }
 
         if (resolvedCustomer.vatNumber && resolvedCustomer.vatNumber !== "N/A") {
-          doc.setFont('helvetica', 'bold');
+          setPdfFont(doc, 'bold');
           const custVatLine = `VAT Number: ${resolvedCustomer.vatNumber}`;
           const custVatLines = doc.splitTextToSize(custVatLine, 72);
           custVatLines.forEach((line: string) => {
             doc.text(line, 123, rightY);
             rightY += 3.5;
           });
-          doc.setFont('helvetica', 'normal');
+          setPdfFont(doc, 'normal');
         }
 
         // --- SECOND SECTION ---
@@ -856,11 +840,11 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.rect(15, secY, 85, 17, 'F');
         doc.rect(15, secY, 85, 17, 'S');
         
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(7);
         doc.setTextColor(100, 116, 139);
         doc.text("ADDITIONAL NOTES & CONDITIONS", 18, secY + 3.5);
-        doc.setFont('helvetica', 'italic');
+        setPdfFont(doc, 'italic');
         doc.setFontSize(7);
         doc.setTextColor(71, 85, 105);
         const wrappedNotes = doc.splitTextToSize(invoiceNotes, 79);
@@ -871,12 +855,12 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.rect(105, secY, 90, 17, 'F');
         doc.rect(105, secY, 90, 17, 'S');
 
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(7);
         doc.setTextColor(15, 23, 42);
         doc.text("TAX INVOICE DETAILS", 108, secY + 3.5);
 
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'normal');
         doc.setFontSize(6.5);
         doc.setTextColor(115, 115, 115);
         
@@ -895,7 +879,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.setFillColor(30, 41, 59); // slate-800
         doc.rect(0, 0, 210, 4, 'F');
 
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(9);
         doc.setTextColor(15, 23, 42);
         const compLines = doc.splitTextToSize(activeCompany.name.toUpperCase(), 72);
@@ -905,7 +889,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
           leftCY += 3.5;
         });
 
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'normal');
         doc.setFontSize(7);
         doc.setTextColor(100, 116, 139);
         doc.text(`Invoice No: ${invoiceNumber}`, 15, leftCY);
@@ -920,7 +904,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         }
 
         // Right Customer Name - 40% width (72mm, X:123 to 195)
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(9);
         doc.setTextColor(79, 70, 229);
         const custContLines = doc.splitTextToSize(resolvedCustomer.name.toUpperCase(), 72);
@@ -930,7 +914,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
           rightCY += 3.5;
         });
 
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'normal');
         doc.setFontSize(7);
         doc.setTextColor(100, 116, 139);
         doc.text(`Page ${pageIdx + 1} of ${pageCount}`, 195, rightCY, { align: 'right' });
@@ -947,7 +931,7 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
       doc.setFillColor(15, 23, 42); // deep slate
       doc.rect(15, tableY, 180, 7, 'F');
 
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(7);
       doc.setTextColor(255, 255, 255);
       doc.text("SL", 18, tableY + 4.5);
@@ -957,11 +941,11 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
       doc.text("UNIT PRICE", 142, tableY + 4.5, { align: 'right' });
       doc.text("VAT %", 156, tableY + 4.5, { align: 'right' });
       doc.text("VAT", 173, tableY + 4.5, { align: 'right' });
-      doc.text("TOTAL ($)", 191, tableY + 4.5, { align: 'right' });
+      doc.text("TOTAL", 191, tableY + 4.5, { align: 'right' });
 
       // Draw rows
       let rowY = tableY + 7;
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'normal');
       doc.setFontSize(7);
       doc.setTextColor(15, 23, 42);
 
@@ -969,9 +953,9 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.setDrawColor(241, 245, 249);
         doc.line(15, rowY + 6, 195, rowY + 6);
 
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.text(item.sl.toString(), 18, rowY + 4);
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'normal');
 
         const desc = item.productName;
         const shortDesc = desc.length > 52 ? desc.substring(0, 50) + "..." : desc;
@@ -979,13 +963,13 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
 
         doc.text(item.quantity.toString(), 110, rowY + 4, { align: 'right' });
         doc.text(item.unit, 122, rowY + 4, { align: 'right' });
-        doc.text(`$${item.unitPrice.toFixed(2)}`, 142, rowY + 4, { align: 'right' });
+        doc.text(formatPdfCurrency(item.unitPrice), 142, rowY + 4, { align: 'right' });
         doc.text(`${item.taxRatePercent}%`, 156, rowY + 4, { align: 'right' });
-        doc.text(`$${item.vatAmount.toFixed(2)}`, 173, rowY + 4, { align: 'right' });
+        doc.text(formatPdfCurrency(item.vatAmount), 173, rowY + 4, { align: 'right' });
 
-        doc.setFont('helvetica', 'bold');
-        doc.text(`$${item.totalAmount.toFixed(2)}`, 191, rowY + 4, { align: 'right' });
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'bold');
+        doc.text(formatPdfCurrency(item.totalAmount), 191, rowY + 4, { align: 'right' });
+        setPdfFont(doc, 'normal');
 
         rowY += 6;
       });
@@ -996,27 +980,27 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
       doc.setDrawColor(226, 232, 240);
       doc.rect(15, rowY, 180, 6, 'S');
 
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(7);
       doc.setTextColor(71, 85, 105);
       doc.text(`SUBTOTAL (PAGE ${pageIdx + 1})`, 25, rowY + 4);
       doc.setTextColor(15, 23, 42);
       
       const pageSub = calculatedPageTotals[pageIdx];
-      doc.text(`$${pageSub.subtotalExVat.toFixed(2)}`, 142, rowY + 4, { align: 'right' });
-      doc.text(`$${pageSub.vatAmount.toFixed(2)}`, 173, rowY + 4, { align: 'right' });
-      doc.text(`$${pageSub.totalWithVat.toFixed(2)}`, 191, rowY + 4, { align: 'right' });
+      doc.text(formatPdfCurrency(pageSub.subtotalExVat), 142, rowY + 4, { align: 'right' });
+      doc.text(formatPdfCurrency(pageSub.vatAmount), 173, rowY + 4, { align: 'right' });
+      doc.text(formatPdfCurrency(pageSub.totalWithVat), 191, rowY + 4, { align: 'right' });
 
       // --- PERSISTENT FOOTER ON EVERY PAGE ---
       doc.setDrawColor(226, 232, 240);
       doc.line(15, 280, 195, 280);
       
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(7);
       doc.setTextColor(79, 70, 229); 
       doc.text("SYSTEM CERTIFIED INVOICE", 15, 284);
       
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'normal');
       doc.setFontSize(6.5);
       doc.setTextColor(148, 163, 184);
       doc.text("This is a system generated invoice and does not require signature.", 15, 287);
@@ -1032,25 +1016,25 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.setDrawColor(226, 232, 240);
         doc.rect(15, finalY, 85, 18, 'S');
 
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(7.5);
         doc.setTextColor(15, 23, 42);
         doc.text("PAYMENT SUMMARY", 18, finalY + 4.5);
 
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'normal');
         doc.setFontSize(7);
         doc.setTextColor(100, 116, 139);
         doc.text("Paid Amount:", 18, finalY + 9);
         doc.setTextColor(16, 185, 129); // emerald-550
-        doc.setFont('helvetica', 'bold');
-        doc.text(`$${paymentInfo.amountPaid.toFixed(2)}`, 65, finalY + 9);
+        setPdfFont(doc, 'bold');
+        doc.text(formatPdfCurrency(paymentInfo.amountPaid), 65, finalY + 9);
 
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'normal');
         doc.setTextColor(100, 116, 139);
         doc.text("Outstanding Balance:", 18, finalY + 13.5);
         doc.setTextColor(paymentInfo.remainingBalance > 0 ? 220 : 100, paymentInfo.remainingBalance > 0 ? 38 : 116, paymentInfo.remainingBalance > 0 ? 38 : 139);
-        doc.setFont('helvetica', 'bold');
-        doc.text(`$${paymentInfo.remainingBalance.toFixed(2)}`, 65, finalY + 13.5);
+        setPdfFont(doc, 'bold');
+        doc.text(formatPdfCurrency(paymentInfo.remainingBalance), 65, finalY + 13.5);
 
         // Total Summary (RIGHT)
         doc.setFillColor(254, 254, 255);
@@ -1058,19 +1042,19 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.rect(105, finalY, 90, rectHeight, 'F');
         doc.rect(105, finalY, 90, rectHeight, 'S');
 
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(7.5);
         doc.setTextColor(15, 23, 42);
         doc.text("TOTAL SUMMARY", 108, finalY + 4.5);
 
         let sumY = finalY + 9;
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'normal');
         doc.setFontSize(6.5);
         doc.setTextColor(115, 115, 115);
         
         calculatedPageTotals.forEach((pageTotal, sIdx) => {
           doc.text(`Subtotal Page ${sIdx + 1}:`, 108, sumY);
-          doc.text(`$${pageTotal.totalWithVat.toFixed(2)}`, 191, sumY, { align: 'right' });
+          doc.text(formatPdfCurrency(pageTotal.totalWithVat), 191, sumY, { align: 'right' });
           sumY += 3.5;
         });
 
@@ -1078,35 +1062,35 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
         doc.setDrawColor(241, 245, 249);
         doc.line(105, sumY - 1, 195, sumY - 1);
 
-        doc.setFont('helvetica', 'normal');
+        setPdfFont(doc, 'normal');
         doc.setFontSize(7);
         doc.setTextColor(115, 115, 115);
         doc.text("Subtotal (Ex VAT):", 108, sumY + 3);
-        doc.text(`$${overallTotals.totalAmountExVat.toFixed(2)}`, 191, sumY + 3, { align: 'right' });
+        doc.text(formatPdfCurrency(overallTotals.totalAmountExVat), 191, sumY + 3, { align: 'right' });
 
         doc.text("Total VAT Amount:", 108, sumY + 7);
-        doc.text(`$${overallTotals.totalVat.toFixed(2)}`, 191, sumY + 7, { align: 'right' });
+        doc.text(formatPdfCurrency(overallTotals.totalVat), 191, sumY + 7, { align: 'right' });
 
         doc.setDrawColor(226, 232, 240);
         doc.line(105, sumY + 9.5, 195, sumY + 9.5);
 
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(7);
         doc.setTextColor(100, 116, 139);
         doc.text("GRAND TOTAL", 108, sumY + 13.5);
 
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(9.5);
         doc.setTextColor(79, 70, 229);
-        doc.text(`$${overallTotals.grandTotalAll.toLocaleString(undefined, { minimumFractionDigits: 2 })}`, 108, sumY + 18);
+        doc.text(formatPdfCurrency(overallTotals.grandTotalAll), 108, sumY + 18);
 
         // Amount in Words below blocks
         let wordY = finalY + Math.max(18, rectHeight) + 4;
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, 'bold');
         doc.setFontSize(7);
         doc.setTextColor(100, 116, 139);
         doc.text("AMOUNT IN WORDS:", 15, wordY);
-        doc.setFont('helvetica', 'italic');
+        setPdfFont(doc, 'italic');
         doc.setFontSize(7.5);
         doc.setTextColor(15, 23, 42);
         
@@ -1487,12 +1471,17 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                                 {item.productName}
                                 {item.sku && <span className="block text-[8.5px] text-slate-400 font-mono mt-0.5 leading-none">SKU: {item.sku}</span>}
                               </td>
-                              <td className="py-2 px-2.5 text-right font-semibold">{item.quantity}</td>
-                              <td className="py-2 px-2.5 text-right text-slate-500">{item.unit}</td>
-                              <td className="py-2 px-2.5 text-right font-mono">${item.unitPrice.toFixed(2)}</td>
+                              <td className="py-2 px-2.5 text-right font-semibold">
+                                {item.enteredQuantity !== undefined ? item.enteredQuantity : item.quantity}
+                                {item.isAlternateUnit && item.baseQuantity !== undefined && (
+                                  <span className="block text-[8px] text-indigo-650 font-extrabold">({item.baseQuantity} {item.baseUnitCode})</span>
+                                )}
+                              </td>
+                              <td className="py-2 px-2.5 text-right text-slate-500">{item.enteredUnitCode || item.unit}</td>
+                              <td className="py-2 px-2.5 text-right font-mono">{formatCurrency(item.unitPrice)}</td>
                               <td className="py-2 px-2.5 text-right font-semibold text-slate-500">{item.taxRatePercent}%</td>
-                              <td className="py-2 px-2.5 text-right font-mono">${item.vatAmount.toFixed(2)}</td>
-                              <td className="py-2 px-2.5 text-right font-bold text-slate-950 font-mono">${item.totalAmount.toFixed(2)}</td>
+                              <td className="py-2 px-2.5 text-right font-mono">{formatCurrency(item.vatAmount)}</td>
+                              <td className="py-2 px-2.5 text-right font-bold text-slate-950 font-mono">{formatCurrency(item.totalAmount)}</td>
                             </tr>
                           ))}
                           
@@ -1501,8 +1490,8 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                             <td colSpan={2} className="py-2 px-2.5 text-slate-500 uppercase tracking-widest text-[9px]">Subtotal Page {pageIdx + 1}</td>
                             <td colSpan={3} className="py-2 px-2.5"></td>
                             <td className="py-2 px-2.5"></td>
-                            <td className="py-2 px-2.5 text-right font-mono text-[9px]">${pageSubtotalBlock.vatAmount.toFixed(2)}</td>
-                            <td className="py-2 px-2.5 text-right font-mono text-slate-900 text-[10px]">${pageSubtotalBlock.totalWithVat.toFixed(2)}</td>
+                            <td className="py-2 px-2.5 text-right font-mono text-[9px]">{formatCurrency(pageSubtotalBlock.vatAmount)}</td>
+                            <td className="py-2 px-2.5 text-right font-mono text-slate-900 text-[10px]">{formatCurrency(pageSubtotalBlock.totalWithVat)}</td>
                           </tr>
                         </tbody>
                       </table>
@@ -1517,12 +1506,12 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                           <div className="space-y-1 text-[10px]">
                             <div className="flex justify-between">
                               <span className="text-slate-400">Paid Amount:</span>
-                              <span className="font-extrabold text-emerald-600">${paymentInfo.amountPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                              <span className="font-extrabold text-emerald-600">{formatCurrency(paymentInfo.amountPaid)}</span>
                             </div>
                             <div className="flex justify-between">
                               <span className="text-slate-400">Outstanding Balance:</span>
                               <span className={`font-extrabold ${paymentInfo.remainingBalance > 0 ? "text-rose-600" : "text-slate-650"}`}>
-                                ${paymentInfo.remainingBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                {formatCurrency(paymentInfo.remainingBalance)}
                               </span>
                             </div>
                             <div className="flex justify-between items-center pt-0.5 mt-0.5 border-t border-slate-200/40">
@@ -1546,24 +1535,24 @@ export default function TaxInvoiceModal({ sale, customers, products, sales, cust
                               {calculatedPageTotals.map((pageTotal, sIdx) => (
                                 <div key={sIdx} className="flex justify-between text-slate-500 text-[9px]">
                                   <span>Subtotal Page {sIdx + 1}:</span>
-                                  <span className="font-bold font-mono">${pageTotal.totalWithVat.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                                  <span className="font-bold font-mono">{formatCurrency(pageTotal.totalWithVat)}</span>
                                 </div>
                               ))}
                               <div className="h-[1px] bg-slate-200/80 my-1"></div>
                               <div className="flex justify-between text-slate-500 text-[9.5px]">
                                 <span>Subtotal (Ex VAT):</span>
-                                <span className="font-semibold font-mono">${overallTotals.totalAmountExVat.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                                <span className="font-semibold font-mono">{formatCurrency(overallTotals.totalAmountExVat)}</span>
                               </div>
                               <div className="flex justify-between text-slate-500 text-[9.5px]">
                                 <span>Total VAT:</span>
-                                <span className="font-semibold font-mono">${overallTotals.totalVat.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                                <span className="font-semibold font-mono">{formatCurrency(overallTotals.totalVat)}</span>
                               </div>
                               <div className="h-[1px] bg-slate-200/80 my-1"></div>
                               
                               {/* STACKED GRAND TOTAL BLOCK */}
                               <div className="flex flex-col pt-1.5 space-y-0.5">
                                 <span className="text-indigo-600 font-extrabold font-mono uppercase text-[9px] tracking-wider leading-none">GRAND TOTAL</span>
-                                <span className="font-mono text-indigo-650 text-base font-black leading-tight">${overallTotals.grandTotalAll.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                                <span className="font-mono text-indigo-650 text-base font-black leading-tight">{formatCurrency(overallTotals.grandTotalAll)}</span>
                               </div>
                             </div>
                           </div>

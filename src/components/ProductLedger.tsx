@@ -22,8 +22,11 @@ import {
 import { db, auth, OperationType, handleFirestoreError } from '../lib/firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { Product, Sale, Purchase, ActivityLog } from '../types';
-import { isVoidStatus } from '../lib/utils';
+import { isVoidStatus, formatQuantity } from '../lib/utils';
+import { UnitBadge } from './ui/UnitBadge';
+import { formatCurrency } from '../utils/currencyFormatter';
 import { jsPDF } from 'jspdf';
+import { applyEnterprisePdfFont, formatPdfText, formatPdfCurrency, setPdfFont } from '../utils/pdfHelper';
 
 interface LedgerMovement {
   id: string;
@@ -163,13 +166,14 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
     purchases.forEach((pur) => {
       if (pur.productId === selectedProductId) {
         const isVoid = isVoidStatus((pur as any).status);
+        const qtyInVal = pur.baseQuantity ?? pur.quantity;
         list.push({
           id: pur.id,
           date: pur.purchaseDate || new Date().toISOString(),
           type: 'PROCUREMENT',
           refId: pur.id,
           counterparty: pur.supplierName,
-          qtyIn: pur.quantity,
+          qtyIn: qtyInVal,
           qtyOut: 0,
           unitCost: pur.purchasePrice,
           unitPrice: 0,
@@ -189,6 +193,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
       if (sale.items && Array.isArray(sale.items)) {
         sale.items.forEach((item, index) => {
           if (item.productId === selectedProductId) {
+            const qtyOutVal = item.baseQuantity ?? item.quantity;
             list.push({
               id: `${sale.id}-${index}`,
               date: sale.saleDate || sale.timestamp || new Date().toISOString(),
@@ -197,7 +202,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
               invoiceNumber: sale.invoiceNumber,
               counterparty: sale.customerName,
               qtyIn: 0,
-              qtyOut: item.quantity,
+              qtyOut: qtyOutVal,
               unitCost: item.purchasePriceAtSale ?? sale.productPurchasePriceAtSale ?? 0,
               unitPrice: item.unitPrice,
               totalValue: item.totalAmount,
@@ -208,6 +213,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
           }
         });
       } else if (sale.productId === selectedProductId) {
+        const qtyOutVal = sale.baseQuantity ?? sale.quantity;
         list.push({
           id: sale.id,
           date: sale.saleDate || sale.timestamp || new Date().toISOString(),
@@ -216,7 +222,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
           invoiceNumber: sale.invoiceNumber,
           counterparty: sale.customerName,
           qtyIn: 0,
-          qtyOut: sale.quantity,
+          qtyOut: qtyOutVal,
           unitCost: sale.productPurchasePriceAtSale ?? 0,
           unitPrice: sale.sellingPrice,
           totalValue: sale.totalAmount,
@@ -387,6 +393,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
 
     try {
       const doc = new jsPDF();
+      applyEnterprisePdfFont(doc);
       const margin = 14;
       let y = 20;
 
@@ -395,23 +402,22 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
       doc.rect(0, 0, 220, 38, 'F');
 
       doc.setTextColor(255, 255, 255);
-      doc.setFont('helvetica', 'bold');
       doc.setFontSize(22);
-      doc.text('NEXUS ENTERPRISE ERP', margin, y);
+      doc.text(formatPdfText('NEXUS ENTERPRISE ERP'), margin, y);
       y += 8;
 
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'normal');
       doc.setFontSize(10);
       doc.text(`STOCK MOVEMENT CARD (PRODUCT LEDGER) | GENERATED: ${new Date().toLocaleString()}`, margin, y);
 
       y = 50;
       doc.setTextColor(15, 23, 42); // slate-900
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(14);
       doc.text(`PRODUCT: ${selectedProduct.name}`, margin, y);
       y += 6;
 
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'normal');
       doc.setFontSize(10);
       doc.text(`SKU: ${selectedProduct.sku}  |  Category: ${selectedProduct.category}  |  Location: ${selectedProduct.location || 'N/A'}`, margin, y);
       y += 10;
@@ -424,7 +430,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
       if (movementType !== 'ALL') {
         filterStr += ` | Type: ${movementType}`;
       }
-      doc.setFont('helvetica', 'italic');
+      setPdfFont(doc, 'italic');
       doc.setFontSize(9);
       doc.setTextColor(100, 116, 139);
       doc.text(filterStr, margin, y);
@@ -436,7 +442,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
       doc.roundedRect(margin, y, 182, 22, 3, 3, 'FD');
 
       doc.setTextColor(71, 85, 105);
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(8);
       doc.text('OPENING STOCK', margin + 6, y + 8);
       doc.text('TOTAL QTY IN (+)', margin + 42, y + 8);
@@ -460,7 +466,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
       doc.setFillColor(241, 245, 249); // slate-100
       doc.rect(margin, y, 182, 8, 'F');
       
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(8);
       doc.setTextColor(71, 85, 105);
       doc.text('DATE/TIME', margin + 2, y + 5.5);
@@ -472,7 +478,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
       doc.text('BALANCE', margin + 168, y + 5.5);
 
       y += 8;
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'normal');
       doc.setFontSize(7.5);
       doc.setTextColor(51, 65, 85);
 
@@ -484,7 +490,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
           // Sub-header for page change
           doc.setFillColor(241, 245, 249);
           doc.rect(margin, y, 182, 8, 'F');
-          doc.setFont('helvetica', 'bold');
+          setPdfFont(doc, 'bold');
           doc.text('DATE/TIME', margin + 2, y + 5.5);
           doc.text('TYPE', margin + 35, y + 5.5);
           doc.text('REF ID', margin + 62, y + 5.5);
@@ -493,7 +499,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
           doc.text('QTY OUT', margin + 148, y + 5.5);
           doc.text('BALANCE', margin + 168, y + 5.5);
           y += 8;
-          doc.setFont('helvetica', 'normal');
+          setPdfFont(doc, 'normal');
         }
 
         // Zebra lines
@@ -646,7 +652,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
                 ) : (
                   products.map((p) => (
                     <option key={p.id} value={p.id}>
-                      {p.name} ({p.sku}) [Qty: {p.currentStock}]
+                      {p.name} ({p.sku}) [Qty: {p.currentStock} {p.unitCode || 'Units'}]
                     </option>
                   ))
                 )}
@@ -765,7 +771,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
                 <Clock className="h-4 w-4 text-slate-400" />
               </div>
               <p className="text-2xl font-bold tracking-tight text-slate-900 mt-2 font-mono">
-                {metrics.openingStock} <span className="text-xs text-slate-400 font-normal uppercase">Units</span>
+                {metrics.openingStock} <span className="text-xs text-slate-400 font-normal uppercase">{selectedProduct?.unitCode || 'No Unit'}</span>
               </p>
             </div>
             <div className="mt-4 pt-3 border-t border-slate-100 text-[10px] text-slate-400 font-medium">
@@ -781,7 +787,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
                 <TrendingUp className="h-4 w-4 text-emerald-500" />
               </div>
               <p className="text-2xl font-bold tracking-tight text-emerald-600 mt-2 font-mono">
-                +{metrics.totalIn} <span className="text-xs text-slate-400 font-normal uppercase">Units</span>
+                +{metrics.totalIn} <span className="text-xs text-slate-400 font-normal uppercase">{selectedProduct?.unitCode || 'No Unit'}</span>
               </p>
             </div>
             <div className="mt-4 pt-3 border-t border-slate-100 text-[10px] text-slate-400 font-medium">
@@ -797,7 +803,7 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
                 <TrendingDown className="h-4 w-4 text-rose-500" />
               </div>
               <p className="text-2xl font-bold tracking-tight text-rose-600 mt-2 font-mono">
-                -{metrics.totalOut} <span className="text-xs text-slate-400 font-normal uppercase">Units</span>
+                -{metrics.totalOut} <span className="text-xs text-slate-400 font-normal uppercase">{selectedProduct?.unitCode || 'No Unit'}</span>
               </p>
             </div>
             <div className="mt-4 pt-3 border-t border-slate-100 text-[10px] text-slate-400 font-medium">
@@ -813,11 +819,11 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
                 <Box className="h-4 w-4 text-indigo-600" />
               </div>
               <p className="text-2xl font-bold tracking-tight text-slate-900 mt-2 font-mono">
-                {metrics.closingStock} <span className="text-xs text-slate-400 font-normal uppercase">Units</span>
+                {metrics.closingStock} <span className="text-xs text-slate-400 font-normal uppercase">{selectedProduct?.unitCode || 'No Unit'}</span>
               </p>
             </div>
             <div className="mt-4 pt-3 border-t border-slate-100 text-[10px] text-slate-400 flex items-center justify-between">
-              <span>Value: <strong className="font-bold font-mono text-indigo-600">${(metrics.closingStock * selectedProduct.sellingPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
+              <span>Value: <strong className="font-bold font-mono text-indigo-600">{formatCurrency(metrics.closingStock * selectedProduct.sellingPrice)}</strong></span>
               <span className={`font-bold font-mono text-[9px] px-1.5 py-0.5 rounded ${
                 metrics.netChange >= 0 ? 'bg-emerald-50 text-emerald-705' : 'bg-rose-50 text-rose-705'
               }`}>
@@ -945,28 +951,30 @@ export default function ProductLedger({ userRole = 'viewer' }: { userRole?: stri
 
                       {/* Qty IN */}
                       <td className="py-4 px-5 text-right font-mono text-emerald-600 font-extrabold whitespace-nowrap">
-                        {mov.qtyIn > 0 ? `+${mov.qtyIn}` : <span className="text-slate-300">-</span>}
+                        {mov.qtyIn > 0 ? `+${formatQuantity(mov.qtyIn, selectedProduct?.unitCode)}` : <span className="text-slate-300">-</span>}
                       </td>
 
                       {/* Qty OUT */}
                       <td className="py-4 px-5 text-right font-mono text-rose-600 font-extrabold whitespace-nowrap">
-                        {mov.qtyOut > 0 ? `-${mov.qtyOut}` : <span className="text-slate-300">-</span>}
+                        {mov.qtyOut > 0 ? `-${formatQuantity(mov.qtyOut, selectedProduct?.unitCode)}` : <span className="text-slate-300">-</span>}
                       </td>
 
                       {/* Running Balance */}
-                      <td className="py-4 px-5 text-right font-mono font-black text-sm text-slate-900 bg-slate-50/45 border-x border-slate-50/80">
-                        {mov.runningBalance}
+                      <td className="py-4 px-5 text-right font-mono font-black text-sm text-slate-900 bg-slate-50/45 border-x border-slate-50/80 whitespace-nowrap">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <span>{formatQuantity(mov.runningBalance, selectedProduct?.unitCode)}</span>
+                        </div>
                       </td>
 
                       {/* Value Breakdown */}
                       <td className="py-4 px-5 text-right font-mono whitespace-nowrap">
                         {mov.type === 'SALE' ? (
                           <div className="flex flex-col items-end">
-                            <span className="text-slate-800 font-bold">${mov.unitPrice.toFixed(2)}</span>
-                            <span className="text-[9px] text-slate-400">Cost: ${mov.unitCost.toFixed(2)}</span>
+                            <span className="text-slate-800 font-bold">{formatCurrency(mov.unitPrice)}</span>
+                            <span className="text-[9px] text-slate-400">Cost: {formatCurrency(mov.unitCost)}</span>
                           </div>
                         ) : mov.type === 'PROCUREMENT' || mov.type === 'OPENING' ? (
-                          <span className="text-slate-800 font-bold">${mov.unitCost.toFixed(2)}</span>
+                          <span className="text-slate-800 font-bold">{formatCurrency(mov.unitCost)}</span>
                         ) : (
                           <span className="text-slate-400">-</span>
                         )}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Plus, 
   Search, 
@@ -15,15 +15,37 @@ import {
   X,
   RefreshCw,
   Clock,
-  Filter
+  Filter,
+  Printer,
+  CheckCircle2,
+  Check,
+  FileText
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity, logFinancialAudit } from '../lib/firebase';
 import { collection, onSnapshot, doc, runTransaction, setDoc, deleteDoc, updateDoc, getDoc } from 'firebase/firestore';
-import { Purchase, Supplier, Product, CashLedgerEntry, Capital } from '../types';
+import { Purchase, Supplier, Product, CashLedgerEntry, Capital, CompanySnapshot, UnitConversion, Unit, BarcodeType } from '../types';
+import { BarcodeExecutionService } from '../services/barcode/execution/BarcodeExecutionService';
+import { UnitConversionService } from '../services/unitConversionService';
+import { convertToBase, formatConversionText } from '../lib/unitConversion';
 import { usePermission, UserRole } from '../hooks/usePermission';
-import { isVoidStatus, isInactiveStatus } from '../lib/utils';
-import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveSystemAccount } from '../lib/postingEngine';
+import { PurchaseDetailModal } from './PurchaseDetailModal';
+import { isVoidStatus, isInactiveStatus, formatQuantity, formatUnitPrice } from '../lib/utils';
+import { formatCurrency } from '../utils/currencyFormatter';
+import { UnitBadge } from './ui/UnitBadge';
+import { ResponsiveKPIValue } from './MetricCard';
+import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveSystemAccount, validateJournalBalance } from '../lib/postingEngine';
+
+interface PrintablePurchaseItem {
+  productId: string;
+  productName: string;
+  sku: string;
+  barcodeValue: string;
+  barcodeType: BarcodeType;
+  quantityToPrint: number;
+  copies: number;
+  selected: boolean;
+}
 
 export default function ProcurementManagement({ userRole = 'admin' }: { userRole?: UserRole }) {
   const { permissions } = usePermission({ role: userRole });
@@ -32,9 +54,20 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [units, setUnits] = useState<Unit[]>([]);
+  const [conversions, setConversions] = useState<UnitConversion[]>([]);
   const [cashLedger, setCashLedger] = useState<CashLedgerEntry[]>([]);
   const [capital, setCapital] = useState<Capital[]>([]);
   const [coa, setCoa] = useState<any[]>([]);
+  const [companyProfile, setCompanyProfile] = useState<CompanySnapshot>({
+    name: "Nexus Enterprise Solutions",
+    taxRegistrationId: "300012345600003",
+    crNumber: "CR-10102020",
+    address: "Enterprise Blvd, Silicon District, Riyadh, Saudi Arabia",
+    phone: "+966 11 234 5678",
+    email: "info@nexus-erp.com",
+    taxRatePercent: 15
+  });
   const [loading, setLoading] = useState(true);
   
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -56,11 +89,221 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
   }[] | null>(null);
   const [voidConfirmationPurchase, setVoidConfirmationPurchase] = useState<Purchase | null>(null);
 
+  // --- Barcode & Invoice Print States (Sprint 11.0A Integration) ---
+  const [pendingBarcodePurchase, setPendingBarcodePurchase] = useState<Purchase | null>(null);
+  const [showPrintOfferModal, setShowPrintOfferModal] = useState<boolean>(false);
+  const [showBarcodePrintDialog, setShowBarcodePrintDialog] = useState<boolean>(false);
+  const [selectedPurchaseForInvoice, setSelectedPurchaseForInvoice] = useState<Purchase | null>(null);
+
+  const [printableItems, setPrintableItems] = useState<PrintablePurchaseItem[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<string>('STD_PRODUCT_38X25MM');
+  const [selectedPrinter, setSelectedPrinter] = useState<string>('MZ Thermal Printer ZD421');
+
+  const [isPrintingBatch, setIsPrintingBatch] = useState<boolean>(false);
+  const [batchProgress, setBatchProgress] = useState<{
+    current: number;
+    total: number;
+    statusMessage: string;
+    completed: number;
+    failed: number;
+    skipped: number;
+    startTime: number;
+    endTime?: number;
+    lastJobId?: string;
+  } | null>(null);
+
+  const cancelBatchRef = useRef<boolean>(false);
+
+  const openBarcodePrintForPurchase = (purchase: Purchase) => {
+    let itemsToProcess: any[] = [];
+    if (purchase.items && purchase.items.length > 0) {
+      itemsToProcess = purchase.items;
+    } else {
+      itemsToProcess = [{
+        productId: purchase.productId,
+        productName: purchase.productName,
+        quantity: purchase.enteredQuantity || purchase.quantity || 1,
+        productSnapshot: purchase.productSnapshot
+      }];
+    }
+
+    const items: PrintablePurchaseItem[] = itemsToProcess.map((item) => {
+      const matchedProduct = products.find(p => p.id === item.productId) || item.productSnapshot;
+      const prodName = item.productName || matchedProduct?.name || purchase.productName || 'Unknown Product';
+      const prodSku = matchedProduct?.sku || `SKU-${(item.productId || '000').substring(0, 6).toUpperCase()}`;
+      const prodBarcode = matchedProduct?.barcode || prodSku;
+      const prodBarcodeType: BarcodeType = (matchedProduct?.barcodeType as BarcodeType) || 'CODE128';
+      const qty = Math.max(1, Math.round(item.enteredQuantity || item.quantity || purchase.enteredQuantity || purchase.quantity || 1));
+
+      return {
+        productId: item.productId || purchase.productId,
+        productName: prodName,
+        sku: prodSku,
+        barcodeValue: prodBarcode,
+        barcodeType: prodBarcodeType,
+        quantityToPrint: qty,
+        copies: 1,
+        selected: true,
+      };
+    });
+
+    setPrintableItems(items);
+    setPendingBarcodePurchase(purchase);
+    setShowPrintOfferModal(false);
+    setShowBarcodePrintDialog(true);
+    setBatchProgress(null);
+  };
+
+  const executeBatchPrintForPurchase = async () => {
+    const selectedItems = printableItems.filter(item => item.selected && item.quantityToPrint > 0);
+    if (selectedItems.length === 0) return;
+
+    setIsPrintingBatch(true);
+    cancelBatchRef.current = false;
+
+    const totalLabels = selectedItems.reduce((sum, item) => sum + item.quantityToPrint, 0);
+    const startTime = Date.now();
+
+    setBatchProgress({
+      current: 0,
+      total: totalLabels,
+      statusMessage: 'Preparing labels...',
+      completed: 0,
+      failed: 0,
+      skipped: 0,
+      startTime,
+    });
+
+    let labelCounter = 0;
+    let completed = 0;
+    let failed = 0;
+    let skipped = 0;
+    let lastJobId = '';
+
+    const service = BarcodeExecutionService.getInstance();
+
+    for (const item of selectedItems) {
+      for (let q = 1; q <= item.quantityToPrint; q++) {
+        if (cancelBatchRef.current) {
+          skipped = totalLabels - labelCounter;
+          setBatchProgress(prev => prev ? {
+            ...prev,
+            statusMessage: 'Batch Printing Cancelled by User',
+            skipped,
+            endTime: Date.now(),
+          } : null);
+          break;
+        }
+
+        labelCounter++;
+        setBatchProgress(prev => prev ? {
+          ...prev,
+          current: labelCounter,
+          statusMessage: `Printing label ${labelCounter} / ${totalLabels}: ${item.productName}`,
+        } : null);
+
+        try {
+          const matchedProd = products.find(p => p.id === item.productId || p.sku === item.sku);
+          const categoryVal = matchedProd?.category;
+          const brandVal = matchedProd?.brand;
+          const unitVal = matchedProd?.unitCode || matchedProd?.unitName || 'PCS';
+          const whId = pendingBarcodePurchase?.warehouseId || 'WH-MAIN';
+          const whName = pendingBarcodePurchase?.warehouseName || 'Main Warehouse';
+
+          const result = await service.executePrintBarcode({
+            productId: item.productId,
+            sku: item.sku,
+            productName: item.productName,
+            barcodeValue: item.barcodeValue,
+            barcodeType: item.barcodeType,
+            category: categoryVal,
+            categoryName: categoryVal,
+            brand: brandVal,
+            brandName: brandVal,
+            unit: unitVal,
+            unitName: unitVal,
+            warehouse: whId,
+            warehouseName: whName,
+            printerName: selectedPrinter || 'MZ Thermal Printer ZD421',
+            labelTemplateId: selectedTemplate || 'STD_PRODUCT_38X25MM',
+            copies: Math.max(1, item.copies),
+            labelWidthMm: 38,
+            labelHeightMm: 25,
+            rotation: 0,
+            printDensity: 15,
+            labelType: 'GOODS_RECEIVING_LABEL',
+            originSource: 'PURCHASE_RECEIVING',
+            context: {
+              product: {
+                id: item.productId,
+                name: item.productName,
+                sku: item.sku,
+                barcode: item.barcodeValue,
+                barcodeType: item.barcodeType,
+                category: categoryVal,
+                brand: brandVal,
+                unit: unitVal,
+              },
+              supplier: pendingBarcodePurchase?.supplierSnapshot ? {
+                supplierId: pendingBarcodePurchase.supplierSnapshot.id,
+                supplierName: pendingBarcodePurchase.supplierSnapshot.name,
+              } : (pendingBarcodePurchase?.supplierName ? {
+                supplierId: pendingBarcodePurchase.supplierId,
+                supplierName: pendingBarcodePurchase.supplierName,
+              } : undefined),
+              purchaseOrder: pendingBarcodePurchase ? {
+                poId: pendingBarcodePurchase.id,
+                purchaseDate: pendingBarcodePurchase.purchaseDate,
+              } : undefined,
+              warehouse: {
+                warehouseId: 'WH-MAIN',
+                warehouseName: 'Main Warehouse',
+              },
+              user: {
+                userName: auth.currentUser?.email || 'admin_01@nexus.erp',
+                role: userRole,
+              },
+            },
+          });
+
+          if (result.success) {
+            completed++;
+            lastJobId = result.jobId || lastJobId;
+          } else {
+            failed++;
+          }
+        } catch {
+          failed++;
+        }
+
+        setBatchProgress(prev => prev ? {
+          ...prev,
+          completed,
+          failed,
+          skipped,
+          lastJobId,
+        } : null);
+      }
+
+      if (cancelBatchRef.current) break;
+    }
+
+    const endTime = Date.now();
+    setBatchProgress(prev => prev ? {
+      ...prev,
+      statusMessage: cancelBatchRef.current ? 'Batch Printing Cancelled' : 'Printing Complete',
+      endTime,
+    } : null);
+
+    setIsPrintingBatch(false);
+  };
+
   // --- Form States ---
   const [formData, setFormData] = useState({
     supplierId: '',
     productId: '',
     quantity: '1',
+    unitCode: '',
     purchasePrice: '',
     paymentType: 'Cash' as 'Cash' | 'Credit',
     purchaseDate: new Date().toISOString().split('T')[0]
@@ -88,6 +331,12 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
 
       const savedCOA = localStorage.getItem('nexus_chart_of_accounts');
       setCoa(savedCOA ? JSON.parse(savedCOA) : []);
+
+      const savedUnits = localStorage.getItem('inventory_units');
+      setUnits(savedUnits ? JSON.parse(savedUnits) : []);
+
+      const savedConversions = localStorage.getItem('inventory_conversions');
+      setConversions(savedConversions ? JSON.parse(savedConversions) : []);
 
       setLoading(false);
       return;
@@ -172,6 +421,29 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       console.error('Error syncing COA in procurement modal:', error);
     });
 
+    // 7. Sync Company Business Profile
+    const unsubCompany = onSnapshot(doc(db, 'businessProfile', 'config'), (docSnap) => {
+      if (docSnap.exists()) {
+        setCompanyProfile(prev => ({ ...prev, ...(docSnap.data() as Partial<CompanySnapshot>) }));
+      }
+    }, (error) => {
+      console.error('Error syncing company profile in procurement modal:', error);
+    });
+
+    // 8. Sync Units
+    const unsubUnits = onSnapshot(collection(db, 'units'), (snapshot) => {
+      const unitList: Unit[] = [];
+      snapshot.forEach((docSnap) => {
+        unitList.push(docSnap.data() as Unit);
+      });
+      setUnits(unitList);
+    });
+
+    // 9. Sync Unit Conversions
+    const unsubConversions = UnitConversionService.subscribeAllConversions((list) => {
+      setConversions(list);
+    });
+
     return () => {
       unsubPurchases();
       unsubSuppliers();
@@ -179,6 +451,9 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       unsubCashLedger();
       unsubCapital();
       unsubCOA();
+      unsubCompany();
+      unsubUnits();
+      unsubConversions();
     };
   }, []);
 
@@ -193,14 +468,21 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
     return () => window.removeEventListener('nexus-trigger-add-modal', handleTrigger);
   }, []);
 
-  // --- Form Helper: Pre-fill purchase price upon product selection ---
+  // --- Form Helper: Pre-fill purchase price and unit upon product selection ---
   const handleProductSelect = (selectedId: string) => {
     const selectedProd = products.find(p => p.id === selectedId);
     setFormData(prev => ({
       ...prev,
       productId: selectedId,
+      unitCode: selectedProd ? selectedProd.unitCode : '',
       purchasePrice: selectedProd ? selectedProd.purchasePrice.toString() : ''
     }));
+    setErrors(prev => {
+      const copy = { ...prev };
+      delete copy.productId;
+      delete copy.unitCode;
+      return copy;
+    });
   };
 
   // --- Open form in Create / Edit mode ---
@@ -211,7 +493,8 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       setFormData({
         supplierId: purchase.supplierId,
         productId: purchase.productId,
-        quantity: purchase.quantity.toString(),
+        quantity: (purchase.enteredQuantity ?? purchase.quantity).toString(),
+        unitCode: purchase.enteredUnitCode || purchase.unitCode,
         purchasePrice: purchase.purchasePrice.toString(),
         paymentType: purchase.paymentType,
         purchaseDate: purchase.purchaseDate.split('T')[0]
@@ -222,6 +505,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
         supplierId: '',
         productId: '',
         quantity: '1',
+        unitCode: '',
         purchasePrice: '',
         paymentType: 'Cash',
         purchaseDate: new Date().toISOString().split('T')[0]
@@ -265,7 +549,39 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
 
     const numQty = parseInt(formData.quantity);
     const numPrice = parseFloat(formData.purchasePrice);
-    const totalCalc = numQty * numPrice;
+    const selectedUnitCode = formData.unitCode || chosenProduct.unitCode || 'PCS';
+    const rawSelUnit = selectedUnitCode || '';
+    const safeSelUnit = typeof rawSelUnit === 'string' ? rawSelUnit : String(rawSelUnit || '');
+    const rawProdUnit = chosenProduct.unitCode || '';
+    const safeProdUnit = typeof rawProdUnit === 'string' ? rawProdUnit : String(rawProdUnit || '');
+
+    const isAlternateUnit = safeSelUnit.trim().toUpperCase() !== safeProdUnit.trim().toUpperCase();
+
+    let conversionFactor = 1;
+    let baseQty = numQty;
+
+    if (isAlternateUnit) {
+      const rule = conversions.find(c => {
+        if (!c || c.productId !== chosenProduct.id) return false;
+        const rawAlt = c.alternateUnitCode || '';
+        const altCode = typeof rawAlt === 'string' ? rawAlt : String(rawAlt || '');
+        return altCode.trim().toUpperCase() === safeSelUnit.trim().toUpperCase() && (c.status === 'active' || c.isActive);
+      });
+
+      if (!rule) {
+        setErrors(prev => ({ ...prev, unitCode: 'No conversion defined for this unit.' }));
+        setFeedback({ message: 'No conversion defined for this unit.', type: 'error' });
+        return;
+      }
+
+      conversionFactor = Number(rule.conversionFactor) || 1;
+      baseQty = convertToBase(numQty, rule.conversionFactor, rule.direction);
+    }
+
+    const subtotalCalc = numQty * numPrice;
+    const taxRatePercent = companyProfile.taxRatePercent ?? 15;
+    const vatCalc = (subtotalCalc * taxRatePercent) / 100;
+    const totalCalc = subtotalCalc + vatCalc;
 
     // --- Cash balance validation to prevent negative cash in hand ---
     if (formData.paymentType === 'Cash') {
@@ -283,12 +599,12 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
 
       if (totalCalc > effectiveCash) {
         setFeedback({
-          message: `Insufficient Cash Balance (Available Cash: $${effectiveCash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}, Required Payment: $${totalCalc.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}). Available Cash is lower than the payment amount. Please add business capital or use Credit Purchase.`,
+          message: `Insufficient Cash Balance (Available Cash: ${formatCurrency(effectiveCash)}, Required Payment: ${formatCurrency(totalCalc)}). Available Cash is lower than the payment amount. Please add business capital or use Credit Purchase.`,
           type: 'error'
         });
         setErrors(prev => ({
           ...prev,
-          paymentType: `Insufficient cash balance. Available: $${effectiveCash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}, Required: $${totalCalc.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
+          paymentType: `Insufficient cash balance. Available: ${formatCurrency(effectiveCash)}, Required: ${formatCurrency(totalCalc)}.`
         }));
         return;
       }
@@ -302,11 +618,47 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       supplierName: chosenSupplier.name,
       productId: chosenProduct.id,
       productName: chosenProduct.name,
-      quantity: numQty,
+      quantity: baseQty,
+      enteredQuantity: numQty,
+      enteredUnitCode: selectedUnitCode,
+      baseQuantity: baseQty,
+      baseUnitCode: chosenProduct.unitCode,
+      conversionFactor: conversionFactor,
+      isAlternateUnit: isAlternateUnit,
       purchasePrice: numPrice,
+      subtotal: subtotalCalc,
+      vatAmount: vatCalc,
+      taxAmount: vatCalc,
+      taxRatePercent: taxRatePercent,
       totalAmount: totalCalc,
       paymentType: formData.paymentType,
-      purchaseDate: new Date(formData.purchaseDate).toISOString()
+      purchaseDate: new Date(formData.purchaseDate).toISOString(),
+      companySnapshot: companyProfile,
+      supplierSnapshot: chosenSupplier,
+      productSnapshot: chosenProduct,
+      unitId: chosenProduct.unitId,
+      unitCode: selectedUnitCode,
+      unitName: chosenProduct.unitName,
+      items: [{
+        productId: chosenProduct.id,
+        productName: chosenProduct.name,
+        quantity: baseQty,
+        enteredQuantity: numQty,
+        enteredUnitCode: selectedUnitCode,
+        baseQuantity: baseQty,
+        baseUnitCode: chosenProduct.unitCode,
+        conversionFactor: conversionFactor,
+        isAlternateUnit: isAlternateUnit,
+        unitPrice: numPrice,
+        subtotal: subtotalCalc,
+        taxRatePercent: taxRatePercent,
+        taxAmount: vatCalc,
+        totalAmount: totalCalc,
+        unitId: chosenProduct.unitId,
+        unitCode: selectedUnitCode,
+        unitName: chosenProduct.unitName,
+        productSnapshot: chosenProduct
+      }]
     };
 
     setIsSaving(true);
@@ -335,33 +687,45 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
             return p;
           });
 
-          // Rollback old supplier due balance
-          if (editingPurchase.paymentType === 'Credit') {
-            suppliersList = suppliersList.map(s => {
-              if (s.id === editingPurchase.supplierId) {
-                return { ...s, dueBalance: Math.max(0, (s.dueBalance ?? 0) - editingPurchase.totalAmount) };
-              }
-              return s;
-            });
-          }
+          // Rollback old supplier metrics
+          suppliersList = suppliersList.map(s => {
+            if (s.id === editingPurchase.supplierId) {
+              const oldTotal = Math.max(0, (s.totalPurchase ?? 0) - editingPurchase.totalAmount);
+              const oldCount = Math.max(0, (s.purchaseCount ?? 0) - 1);
+              const oldDue = editingPurchase.paymentType === 'Credit' 
+                ? Math.max(0, (s.dueBalance ?? 0) - editingPurchase.totalAmount) 
+                : (s.dueBalance ?? 0);
+              return { ...s, totalPurchase: oldTotal, purchaseCount: oldCount, dueBalance: oldDue };
+            }
+            return s;
+          });
 
           // Apply current product stock
           productsList = productsList.map(p => {
             if (p.id === chosenProduct.id) {
-              return { ...p, currentStock: (p.currentStock ?? 0) + numQty };
+              return { ...p, currentStock: (p.currentStock ?? 0) + baseQty };
             }
             return p;
           });
 
-          // Apply current supplier due balance
-          if (formData.paymentType === 'Credit') {
-            suppliersList = suppliersList.map(s => {
-              if (s.id === chosenSupplier.id) {
-                return { ...s, dueBalance: (s.dueBalance ?? 0) + totalCalc };
-              }
-              return s;
-            });
-          }
+          // Apply current supplier metrics
+          suppliersList = suppliersList.map(s => {
+            if (s.id === chosenSupplier.id) {
+              const newTotal = (s.totalPurchase ?? 0) + totalCalc;
+              const newCount = (s.purchaseCount ?? 0) + 1;
+              const newDue = formData.paymentType === 'Credit' 
+                ? (s.dueBalance ?? 0) + totalCalc 
+                : (s.dueBalance ?? 0);
+              return {
+                ...s,
+                totalPurchase: newTotal,
+                purchaseCount: newCount,
+                lastPurchaseDate: formData.purchaseDate,
+                dueBalance: newDue
+              };
+            }
+            return s;
+          });
 
           // Update purchase in list
           purchasesList = purchasesList.map(p => p.id === purchaseId ? finalizedPurchaseData : p);
@@ -370,20 +734,29 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           // Increase product stock
           productsList = productsList.map(p => {
             if (p.id === chosenProduct.id) {
-              return { ...p, currentStock: (p.currentStock ?? 0) + numQty };
+              return { ...p, currentStock: (p.currentStock ?? 0) + baseQty };
             }
             return p;
           });
 
-          // If credit, increase supplier dueBalance
-          if (formData.paymentType === 'Credit') {
-            suppliersList = suppliersList.map(s => {
-              if (s.id === chosenSupplier.id) {
-                return { ...s, dueBalance: (s.dueBalance ?? 0) + totalCalc };
-              }
-              return s;
-            });
-          }
+          // Update supplier metrics (Total Purchase, Count, Last Date, Due Balance)
+          suppliersList = suppliersList.map(s => {
+            if (s.id === chosenSupplier.id) {
+              const newTotal = (s.totalPurchase ?? 0) + totalCalc;
+              const newCount = (s.purchaseCount ?? 0) + 1;
+              const newDue = formData.paymentType === 'Credit' 
+                ? (s.dueBalance ?? 0) + totalCalc 
+                : (s.dueBalance ?? 0);
+              return {
+                ...s,
+                totalPurchase: newTotal,
+                purchaseCount: newCount,
+                lastPurchaseDate: formData.purchaseDate,
+                dueBalance: newDue
+              };
+            }
+            return s;
+          });
 
           // Add to Cash Ledger if it was Cash
           if (formData.paymentType === 'Cash') {
@@ -421,6 +794,8 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
         });
         setIsFormOpen(false);
         setIsSaving(false);
+        setPendingBarcodePurchase(finalizedPurchaseData);
+        setShowPrintOfferModal(true);
         return;
       }
 
@@ -437,7 +812,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           if (editingPurchase.productId !== chosenProduct.id) {
             oldProductRef = doc(db, 'products', editingPurchase.productId);
           }
-          if (editingPurchase.paymentType === 'Credit' && editingPurchase.supplierId !== chosenSupplier.id) {
+          if (editingPurchase.supplierId !== chosenSupplier.id) {
             oldSupplierRef = doc(db, 'suppliers', editingPurchase.supplierId);
           }
         }
@@ -456,30 +831,20 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           oldSupplierSnap = await transaction.get(oldSupplierRef);
         }
 
-        // Single Sequence Counter Read for atomic sequence generation
-        const counterRef = doc(db, 'counters', 'posting_sequences');
-        const counterSnap = await transaction.get(counterRef);
-        
-        let currentSequences = { JV: 0, RV: 0, PV: 0, SV: 0, CV: 0 };
-        if (counterSnap.exists()) {
-          currentSequences = { ...currentSequences, ...counterSnap.data() };
-        }
-
         const transDateYear = new Date(formData.purchaseDate).getFullYear() || 2026;
         const voucherType = formData.paymentType === 'Cash' ? 'CV' : 'JV';
 
         // Resolve new entry sequence
-        const newNextVal = (currentSequences[voucherType] || 0) + 1;
-        const postingNumber = `${voucherType}-${transDateYear}-${String(newNextVal).padStart(6, '0')}`;
-        currentSequences[voucherType] = newNextVal;
+        const { postingNumber, nextVal: newNextVal } = await getNextPostingNumber(transaction, voucherType, transDateYear);
 
         // Resolve reversal entry sequence if editing
         let revPostingNumber = '';
+        let rNV = 0;
         if (editingPurchase) {
           const oldDateYear = new Date(editingPurchase.purchaseDate).getFullYear() || 2026;
-          const rNV = (currentSequences['JV'] || 0) + 1;
-          revPostingNumber = `JV-${oldDateYear}-${String(rNV).padStart(6, '0')}`;
-          currentSequences['JV'] = rNV;
+          const jvAlloc = await getNextPostingNumber(transaction, 'JV', oldDateYear);
+          revPostingNumber = jvAlloc.postingNumber;
+          rNV = jvAlloc.nextVal;
         }
 
         // --- 3. Perform writes ---
@@ -496,36 +861,55 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
             });
           }
 
-          // Roll back credit balance from the old supplier
-          if (editingPurchase.paymentType === 'Credit') {
-            const actualOldSupplierRef = oldSupplierRef || supplierRef;
-            const actualOldSupplierSnap = oldSupplierRef ? oldSupplierSnap : supplierSnap;
-            if (actualOldSupplierSnap && actualOldSupplierSnap.exists()) {
-              const oldSupplierData = actualOldSupplierSnap.data() as Supplier;
-              transaction.update(actualOldSupplierRef, {
-                dueBalance: Math.max(0, (oldSupplierData.dueBalance ?? 0) - editingPurchase.totalAmount)
-              });
-            }
+          // Roll back supplier metrics from the old supplier
+          const actualOldSupplierRef = oldSupplierRef || supplierRef;
+          const actualOldSupplierSnap = oldSupplierRef ? oldSupplierSnap : supplierSnap;
+          if (actualOldSupplierSnap && actualOldSupplierSnap.exists()) {
+            const oldSupplierData = actualOldSupplierSnap.data() as Supplier;
+            const updatedTotal = Math.max(0, (oldSupplierData.totalPurchase ?? 0) - editingPurchase.totalAmount);
+            const updatedCount = Math.max(0, (oldSupplierData.purchaseCount ?? 0) - 1);
+            const updatedDue = editingPurchase.paymentType === 'Credit' 
+              ? Math.max(0, (oldSupplierData.dueBalance ?? 0) - editingPurchase.totalAmount)
+              : (oldSupplierData.dueBalance ?? 0);
+            transaction.update(actualOldSupplierRef, {
+              totalPurchase: updatedTotal,
+              purchaseCount: updatedCount,
+              dueBalance: updatedDue
+            });
           }
 
           // --- REVERSAL LEDGER POSTING ---
           const invAcc = resolveSystemAccount('INVENTORY', coa);
+          const vatAcc = resolveSystemAccount('INPUT_VAT', coa);
           const contraAcc = editingPurchase.paymentType === 'Cash' 
             ? resolveSystemAccount('CASH', coa) 
             : resolveSystemAccount('ACCOUNTS_PAYABLE', coa);
 
+          const oldSubtotal = editingPurchase.subtotal ?? (editingPurchase.totalAmount - (editingPurchase.vatAmount ?? 0));
+          const oldVat = editingPurchase.vatAmount ?? 0;
+
           const revLines = [
-            // Credit: Inventory Asset (1300) is reversed with Credit
+            // Credit: Inventory Asset (1300) = oldSubtotal
             {
               accountId: invAcc.id,
               accountCode: invAcc.code,
               accountName: invAcc.name,
               debit: 0,
-              credit: editingPurchase.totalAmount,
+              credit: oldSubtotal,
               baseCurrencyDebit: 0,
-              baseCurrencyCredit: editingPurchase.totalAmount
+              baseCurrencyCredit: oldSubtotal
             },
-            // Debit: Cash (1100) or Accounts Payable (2100) is reversed with Debit
+            // Credit: Input VAT Receivable (1400) = oldVat (if > 0)
+            ...(oldVat > 0 ? [{
+              accountId: vatAcc.id,
+              accountCode: vatAcc.code,
+              accountName: vatAcc.name,
+              debit: 0,
+              credit: oldVat,
+              baseCurrencyDebit: 0,
+              baseCurrencyCredit: oldVat
+            }] : []),
+            // Debit: Cash (1100) or Accounts Payable (2100) = editingPurchase.totalAmount
             {
               accountId: contraAcc.id,
               accountCode: contraAcc.code,
@@ -549,7 +933,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
             fiscalYear: new Date(editingPurchase.purchaseDate).getFullYear() || 2026,
             accountingPeriod: oldAccountingPeriod,
             sourceModule: 'PROCUREMENT' as const,
-            postingStatus: 'REVERSED' as const,
+            postingStatus: 'POSTED' as const,
             currency: 'USD',
             exchangeRate: 1,
             baseCurrencyCode: 'USD',
@@ -561,8 +945,15 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
             createdAt: new Date().toISOString(),
             createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
             lines: revLines,
-            originalEntryId: `le-purchase-${editingPurchase.id}`
+            originalEntryId: `le-purchase-${editingPurchase.id}`,
+            isReversal: true,
+            reversesEntryId: `le-purchase-${editingPurchase.id}`,
+            supplierId: editingPurchase.supplierId,
+            supplierName: editingPurchase.supplierName
           };
+
+          // Mandatory Enterprise Journal Integrity Validation (Phase X)
+          validateJournalBalance(revLines);
 
           const revLedgerRef = doc(db, 'ledgerEntries', revEntryId);
           transaction.set(revLedgerRef, reversalLedgerEntry);
@@ -581,29 +972,40 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           initialStockForCalc = Math.max(0, initialStockForCalc - editingPurchase.quantity);
         }
 
-        const finalProductStock = initialStockForCalc + numQty;
+        const finalProductStock = initialStockForCalc + baseQty;
         transaction.update(productRef, {
           currentStock: finalProductStock
         });
 
-        // C. Update supplier accounts if credit purchase
-        if (formData.paymentType === 'Credit') {
-          if (!supplierSnap.exists()) {
-            throw new Error(`Standard account error: target supplier "${chosenSupplier.name}" is missing.`);
-          }
-          const currentSupplierData = supplierSnap.data() as Supplier;
-          let initialDueForCalc = currentSupplierData.dueBalance ?? 0;
+        // C. Update target supplier accounts (Total Purchase, Count, Last Date, Due Balance)
+        if (!supplierSnap.exists()) {
+          throw new Error(`Standard account error: target supplier "${chosenSupplier.name}" is missing.`);
+        }
+        const currentSupplierData = supplierSnap.data() as Supplier;
+        let initialDueForCalc = currentSupplierData.dueBalance ?? 0;
+        let initialTotalForCalc = currentSupplierData.totalPurchase ?? 0;
+        let initialCountForCalc = currentSupplierData.purchaseCount ?? 0;
 
-          // If this is an edit and it's the exact same supplier, factor in the rollback subtraction locally
-          if (editingPurchase && editingPurchase.supplierId === chosenSupplier.id && editingPurchase.paymentType === 'Credit') {
+        // If this is an edit and it's the exact same supplier, factor in the rollback subtraction locally
+        if (editingPurchase && editingPurchase.supplierId === chosenSupplier.id) {
+          initialTotalForCalc = Math.max(0, initialTotalForCalc - editingPurchase.totalAmount);
+          initialCountForCalc = Math.max(0, initialCountForCalc - 1);
+          if (editingPurchase.paymentType === 'Credit') {
             initialDueForCalc = Math.max(0, initialDueForCalc - editingPurchase.totalAmount);
           }
-
-          const finalSupplierDue = initialDueForCalc + totalCalc;
-          transaction.update(supplierRef, {
-            dueBalance: finalSupplierDue
-          });
         }
+
+        const finalSupplierDue = formData.paymentType === 'Credit' ? initialDueForCalc + totalCalc : initialDueForCalc;
+        const finalSupplierTotal = initialTotalForCalc + totalCalc;
+        const finalSupplierCount = initialCountForCalc + 1;
+        const purchaseDateStr = formData.purchaseDate || new Date().toISOString().split('T')[0];
+
+        transaction.update(supplierRef, {
+          dueBalance: finalSupplierDue,
+          totalPurchase: finalSupplierTotal,
+          purchaseCount: finalSupplierCount,
+          lastPurchaseDate: purchaseDateStr
+        });
 
         // D. Commit final purchase ledger
         transaction.set(purchaseRef, finalizedPurchaseData);
@@ -630,22 +1032,33 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
 
         // --- F. Double-Entry General Ledger Posting ---
         const invAcc = resolveSystemAccount('INVENTORY', coa);
+        const vatAcc = resolveSystemAccount('INPUT_VAT', coa);
         const contraAcc = formData.paymentType === 'Cash'
           ? resolveSystemAccount('CASH', coa)
           : resolveSystemAccount('ACCOUNTS_PAYABLE', coa);
 
         const lines = [
-          // Debit: Inventory Asset (1300)
+          // Debit: Inventory Asset (1300) = subtotalCalc
           {
             accountId: invAcc.id,
             accountCode: invAcc.code,
             accountName: invAcc.name,
-            debit: totalCalc,
+            debit: subtotalCalc,
             credit: 0,
-            baseCurrencyDebit: totalCalc,
+            baseCurrencyDebit: subtotalCalc,
             baseCurrencyCredit: 0
           },
-          // Credit: Cash in Hand (1100) or Accounts Payable (2100)
+          // Debit: Input VAT Receivable (1400) = vatCalc (if > 0)
+          ...(vatCalc > 0 ? [{
+            accountId: vatAcc.id,
+            accountCode: vatAcc.code,
+            accountName: vatAcc.name,
+            debit: vatCalc,
+            credit: 0,
+            baseCurrencyDebit: vatCalc,
+            baseCurrencyCredit: 0
+          }] : []),
+          // Credit: Cash in Hand (1100) or Accounts Payable (2100) = totalCalc
           {
             accountId: contraAcc.id,
             accountCode: contraAcc.code,
@@ -657,12 +1070,8 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           }
         ];
 
-        // Verify Debit == Credit
-        const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
-        const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
-        if (Math.abs(totalDebits - totalCredits) > 0.01) {
-          throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
-        }
+        // Mandatory Enterprise Journal Integrity Validation (Phase X)
+        validateJournalBalance(lines);
 
         const periodMonth = String(new Date(formData.purchaseDate).getMonth() + 1).padStart(2, '0');
         const accountingPeriod = `${transDateYear}-${periodMonth}`;
@@ -687,14 +1096,19 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           postingDate: new Date(formData.purchaseDate + 'T12:00:00Z').toISOString(),
           createdAt: new Date().toISOString(),
           createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
-          lines
+          lines,
+          supplierId: chosenSupplier.id,
+          supplierName: chosenSupplier.name
         };
 
         const ledgerEntryRef = doc(db, 'ledgerEntries', entryId);
         transaction.set(ledgerEntryRef, ledgerEntry);
 
         // Commit sequence counters
-        transaction.set(counterRef, currentSequences, { merge: true });
+        commitNextPostingNumber(transaction, voucherType, newNextVal);
+        if (editingPurchase && rNV > 0) {
+          commitNextPostingNumber(transaction, 'JV', rNV);
+        }
 
         // Ensure default system accounts exist in COA
         const currentCoaIds = coa.map(c => c.id);
@@ -724,12 +1138,12 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       if (editingPurchase) {
         await logSystemActivity(
           "Purchase Edited",
-          `Adjusted procurement ledger entry: x${numQty} units of "${chosenProduct.name}" from "${chosenSupplier.name}" (Subtotal: $${totalCalc.toFixed(2)}, Account: ${formData.paymentType})`
+          `Adjusted procurement ledger entry: x${numQty} units of "${chosenProduct.name}" from "${chosenSupplier.name}" (Subtotal: ${formatCurrency(totalCalc)}, Account: ${formData.paymentType})`
         );
       } else {
         await logSystemActivity(
           "Procurement recorded",
-          `Procured x${numQty} units of "${chosenProduct.name}" from "${chosenSupplier.name}" (Subtotal: $${totalCalc.toFixed(2)}, Account: ${formData.paymentType})`
+          `Procured x${numQty} units of "${chosenProduct.name}" from "${chosenSupplier.name}" (Subtotal: ${formatCurrency(totalCalc)}, Account: ${formData.paymentType})`
         );
       }
 
@@ -745,13 +1159,19 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
         type: 'success'
       });
       setIsFormOpen(false);
+      setPendingBarcodePurchase(finalizedPurchaseData);
+      setShowPrintOfferModal(true);
     } catch (err: any) {
       console.error("Procurement writing abort:", err);
-      let errMsg = 'Failed to execute transactional writes.';
-      try {
-        handleFirestoreError(err, OperationType.WRITE, `purchases/${purchaseId}`);
-      } catch (dbErr: any) {
-        errMsg = dbErr.message;
+      let errMsg = err.message || 'Failed to execute transactional writes.';
+      if (err.message && err.message.includes("Accounting validation failed")) {
+        setFeedback({ message: err.message, type: 'error' });
+      } else {
+        try {
+          handleFirestoreError(err, OperationType.WRITE, `purchases/${purchaseId}`);
+        } catch (dbErr: any) {
+          errMsg = dbErr.message;
+        }
       }
 
       // --- RUN TIME SEQUENTIAL DIAGNOSTIC TRACE ---
@@ -916,21 +1336,37 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           return p;
         });
 
-        if (purchase.paymentType === 'Credit') {
-          suppliersList = suppliersList.map(s => {
-            if (s.id === purchase.supplierId) {
-              return { ...s, dueBalance: Math.max(0, (s.dueBalance ?? 0) - purchase.totalAmount) };
-            }
-            return s;
-          });
-        }
+        suppliersList = suppliersList.map(s => {
+          if (s.id === purchase.supplierId) {
+            const oldTotal = Math.max(0, (s.totalPurchase ?? 0) - purchase.totalAmount);
+            const oldCount = Math.max(0, (s.purchaseCount ?? 0) - 1);
+            const oldDue = purchase.paymentType === 'Credit' 
+              ? Math.max(0, (s.dueBalance ?? 0) - purchase.totalAmount) 
+              : (s.dueBalance ?? 0);
+            return { ...s, totalPurchase: oldTotal, purchaseCount: oldCount, dueBalance: oldDue };
+          }
+          return s;
+        });
 
         purchasesList = purchasesList.map(p => p.id === purchase.id ? { ...p, status: 'VOID' } : p);
 
         if (purchase.paymentType === 'Cash') {
           const savedLedger = localStorage.getItem('inventory_cash_ledger') || '[]';
           let ledgerList = JSON.parse(savedLedger);
-          ledgerList = ledgerList.map((l: any) => l.id === `cl-${purchase.id}` ? { ...l, status: 'VOID' } : l);
+          const revCashEntry = {
+            id: `cl-rev-${purchase.id}`,
+            type: 'inflow',
+            source: 'procurement',
+            amount: purchase.totalAmount,
+            referenceId: purchase.id,
+            description: `Cash Reversal for Voided Purchase #${purchase.invoiceNumber || purchase.id}`,
+            timestamp: new Date().toISOString(),
+            status: 'active',
+            isReversal: true,
+            reversesCashEntryId: `cl-${purchase.id}`,
+            postingStatus: 'POSTED'
+          };
+          ledgerList.push(revCashEntry);
           localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
         }
 
@@ -955,25 +1391,11 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
 
         // -- 1. Gather all READS first --
         const productSnap = await transaction.get(productRef);
-        let supplierSnap = null;
-        if (purchase.paymentType === 'Credit') {
-          supplierSnap = await transaction.get(supplierRef);
-        }
-
-        // Single Sequence Counter Read for atomic sequence generation
-        const counterRef = doc(db, 'counters', 'posting_sequences');
-        const counterSnap = await transaction.get(counterRef);
-        
-        let currentSequences = { JV: 0, RV: 0, PV: 0, SV: 0, CV: 0 };
-        if (counterSnap.exists()) {
-          currentSequences = { ...currentSequences, ...counterSnap.data() };
-        }
+        const supplierSnap = await transaction.get(supplierRef);
 
         const purchaseDate = purchase.purchaseDate || new Date().toISOString().split('T')[0];
         const purchaseYear = new Date(purchaseDate).getFullYear() || 2026;
-        const jvNextVal = (currentSequences['JV'] || 0) + 1;
-        const jvPostingNumber = `JV-${purchaseYear}-${String(jvNextVal).padStart(6, '0')}`;
-        currentSequences['JV'] = jvNextVal;
+        const { postingNumber: jvPostingNumber, nextVal: jvNextVal } = await getNextPostingNumber(transaction, 'JV', purchaseYear);
 
         // -- 2. Perform WRITES --
         if (productSnap.exists()) {
@@ -983,26 +1405,52 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           });
         }
 
-        if (purchase.paymentType === 'Credit' && supplierSnap && supplierSnap.exists()) {
+        if (supplierSnap && supplierSnap.exists()) {
           const supplierData = supplierSnap.data() as Supplier;
+          const updatedTotal = Math.max(0, (supplierData.totalPurchase ?? 0) - purchase.totalAmount);
+          const updatedCount = Math.max(0, (supplierData.purchaseCount ?? 0) - 1);
+          const updatedDue = purchase.paymentType === 'Credit' 
+            ? Math.max(0, (supplierData.dueBalance ?? 0) - purchase.totalAmount) 
+            : (supplierData.dueBalance ?? 0);
           transaction.update(supplierRef, {
-            dueBalance: Math.max(0, (supplierData.dueBalance ?? 0) - purchase.totalAmount)
+            totalPurchase: updatedTotal,
+            purchaseCount: updatedCount,
+            dueBalance: updatedDue
           });
         }
 
         const purchaseRef = doc(db, 'purchases', purchase.id);
         transaction.update(purchaseRef, { status: 'VOID' });
 
+        // --- CASH LEDGER REVERSAL ---
+        // Original cash ledger entry remains immutable. Create a separate reversing cash entry.
         if (purchase.paymentType === 'Cash') {
-          const cashLedgerRef = doc(db, 'cashLedger', `cl-${purchase.id}`);
-          transaction.update(cashLedgerRef, { status: 'VOID' });
+          const revCashId = `cl-rev-${purchase.id}`;
+          const revCashRef = doc(db, 'cashLedger', revCashId);
+          transaction.set(revCashRef, {
+            id: revCashId,
+            type: 'inflow',
+            source: 'procurement',
+            amount: purchase.totalAmount,
+            referenceId: purchase.id,
+            description: `Cash Reversal for Voided Purchase #${purchase.invoiceNumber || purchase.id}`,
+            timestamp: new Date().toISOString(),
+            status: 'active',
+            isReversal: true,
+            reversesCashEntryId: `cl-${purchase.id}`,
+            postingStatus: 'POSTED'
+          });
         }
 
         // --- REVERSAL LEDGER POSTING ---
         const invAcc = resolveSystemAccount('INVENTORY', coa);
+        const vatAcc = resolveSystemAccount('INPUT_VAT', coa);
         const contraAcc = purchase.paymentType === 'Cash' 
           ? resolveSystemAccount('CASH', coa) 
           : resolveSystemAccount('ACCOUNTS_PAYABLE', coa);
+
+        const oldSubtotal = purchase.subtotal ?? (purchase.totalAmount - (purchase.vatAmount ?? 0));
+        const oldVat = purchase.vatAmount ?? 0;
 
         const revLines = [
           // Debit: Cash (1100) or Accounts Payable (2100) is debited to reverse credit
@@ -1015,21 +1463,42 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
             baseCurrencyDebit: purchase.totalAmount,
             baseCurrencyCredit: 0
           },
-          // Credit: Inventory Asset (1300) is credited to reverse stock addition
+          // Credit: Inventory Asset (1300) = oldSubtotal
           {
             accountId: invAcc.id,
             accountCode: invAcc.code,
             accountName: invAcc.name,
             debit: 0,
-            credit: purchase.totalAmount,
+            credit: oldSubtotal,
             baseCurrencyDebit: 0,
-            baseCurrencyCredit: purchase.totalAmount
-          }
+            baseCurrencyCredit: oldSubtotal
+          },
+          // Credit: Input VAT Receivable (1400) = oldVat (if > 0)
+          ...(oldVat > 0 ? [{
+            accountId: vatAcc.id,
+            accountCode: vatAcc.code,
+            accountName: vatAcc.name,
+            debit: 0,
+            credit: oldVat,
+            baseCurrencyDebit: 0,
+            baseCurrencyCredit: oldVat
+          }] : [])
         ];
 
         const periodMonth = String(new Date(purchaseDate).getMonth() + 1).padStart(2, '0');
         const accountingPeriod = `${purchaseYear}-${periodMonth}`;
         const revEntryId = `le-purchase-void-${purchase.id}`;
+        const origEntryId = `le-purchase-${purchase.id}`;
+
+        // Update metadata on original entry without modifying debit/credit lines
+        const origLedgerRef = doc(db, 'ledgerEntries', origEntryId);
+        transaction.set(origLedgerRef, {
+          isVoided: true,
+          voidedAt: new Date().toISOString(),
+          voidedBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+          voidReason: 'Procurement transaction voided',
+          reversalEntryId: revEntryId
+        }, { merge: true });
 
         const reversalLedgerEntry = {
           id: revEntryId,
@@ -1039,7 +1508,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           fiscalYear: purchaseYear,
           accountingPeriod,
           sourceModule: 'PROCUREMENT' as const,
-          postingStatus: 'REVERSED' as const,
+          postingStatus: 'POSTED' as const,
           currency: 'USD',
           exchangeRate: 1,
           baseCurrencyCode: 'USD',
@@ -1051,14 +1520,21 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
           createdAt: new Date().toISOString(),
           createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
           lines: revLines,
-          originalEntryId: `le-purchase-${purchase.id}`
+          originalEntryId: origEntryId,
+          isReversal: true,
+          reversesEntryId: origEntryId,
+          supplierId: purchase.supplierId,
+          supplierName: purchase.supplierName
         };
+
+        // Mandatory Enterprise Journal Integrity Validation (Phase X)
+        validateJournalBalance(revLines);
 
         const revLedgerRef = doc(db, 'ledgerEntries', revEntryId);
         transaction.set(revLedgerRef, reversalLedgerEntry);
 
         // Commit sequence counters
-        transaction.set(counterRef, currentSequences, { merge: true });
+        commitNextPostingNumber(transaction, 'JV', jvNextVal);
       });
 
       // Log financial Audit
@@ -1090,13 +1566,17 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       });
     } catch (err: any) {
       console.error("Void operations abort:", err);
-      let errMsg = 'Failed to void the transaction record.';
-      try {
-        handleFirestoreError(err, OperationType.UPDATE, `purchases/${purchase.id}`);
-      } catch (dbErr: any) {
-        errMsg = dbErr.message;
+      let errMsg = err.message || 'Failed to void the transaction record.';
+      if (err.message && err.message.includes("Accounting validation failed")) {
+        setFeedback({ message: err.message, type: 'error' });
+      } else {
+        try {
+          handleFirestoreError(err, OperationType.UPDATE, `purchases/${purchase.id}`);
+        } catch (dbErr: any) {
+          errMsg = dbErr.message;
+        }
+        setFeedback({ message: `Access Abort: ${errMsg}`, type: 'error' });
       }
-      setFeedback({ message: `Access Abort: ${errMsg}`, type: 'error' });
     }
   };
 
@@ -1155,74 +1635,68 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       </AnimatePresence>
 
       {/* METRIC BENTO CARDS */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:gap-6 sm:grid-cols-3">
         {/* Total Cost Outlaid */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Gross Procurement Budget</span>
-              <DollarSign className="h-4 w-4 text-indigo-505 text-indigo-600" />
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Gross Procurement Budget</span>
+              <DollarSign className="h-4 w-4 text-indigo-600 shrink-0" />
             </div>
             {loading ? (
-              <div className="h-9 w-28 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
+              <div className="h-8 w-28 bg-slate-100 rounded-lg animate-pulse"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-                ${totalPurchasesVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </p>
+              <ResponsiveKPIValue value={formatCurrency(totalPurchasesVolume)} className="text-slate-900" />
             )}
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center justify-between">
-            <span className="font-medium">Direct expense outlays</span>
+            <span className="font-medium truncate">Direct expense outlays</span>
             {loading ? (
               <div className="h-4 w-12 bg-slate-100 rounded animate-pulse"></div>
             ) : (
-              <span className="text-indigo-600 font-bold">{purchases.length} supplier orders completed</span>
+              <span className="text-indigo-600 font-bold shrink-0">{purchases.length} orders</span>
             )}
           </div>
         </div>
 
         {/* Total Received stock */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Total Units Procured</span>
-              <Box className="h-4 w-4 text-emerald-500" />
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Total Units Procured</span>
+              <Box className="h-4 w-4 text-emerald-500 shrink-0" />
             </div>
             {loading ? (
-              <div className="h-9 w-20 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
+              <div className="h-8 w-20 bg-slate-100 rounded-lg animate-pulse"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-                {totalUnitsProcured.toLocaleString()} Units
-              </p>
+              <ResponsiveKPIValue value={`${totalUnitsProcured.toLocaleString()} Units`} className="text-slate-900" />
             )}
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center justify-between">
-            <span>Seeded warehouse inputs</span>
+            <span className="truncate">Seeded warehouse inputs</span>
             {loading ? (
               <div className="h-4 w-16 bg-slate-100 rounded animate-pulse"></div>
             ) : (
-              <span className="text-emerald-600 font-semibold font-mono">+{totalUnitsProcured > 0 ? Math.round((filteredPurchases.reduce((sum, p) => sum + p.quantity, 0) / totalUnitsProcured) * 100) : 0}% active view</span>
+              <span className="text-emerald-600 font-semibold font-mono shrink-0">+{totalUnitsProcured > 0 ? Math.round((filteredPurchases.reduce((sum, p) => sum + p.quantity, 0) / totalUnitsProcured) * 100) : 0}% view</span>
             )}
           </div>
         </div>
 
         {/* Total Credit Accounts Due */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Outstanding Account Payables</span>
-              <Truck className="h-4 w-4 text-amber-500" />
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Outstanding Account Payables</span>
+              <Truck className="h-4 w-4 text-amber-500 shrink-0" />
             </div>
             {loading ? (
-              <div className="h-9 w-24 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
+              <div className="h-8 w-24 bg-slate-100 rounded-lg animate-pulse"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-                ${totalCreditDueOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </p>
+              <ResponsiveKPIValue value={formatCurrency(totalCreditDueOutstanding)} className="text-slate-900" />
             )}
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center justify-between">
-            <span>Supplier ledger debits</span>
+            <span className="truncate">Supplier ledger debits</span>
             {loading ? (
               <div className="h-4 w-16 bg-slate-100 rounded animate-pulse"></div>
             ) : (
@@ -1235,10 +1709,10 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
       </div>
 
       {/* FILTER CONTROL RAILS */}
-      <div className="bg-white border border-slate-200 rounded-[2rem] p-4 shadow-3xs flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div className="bg-white border border-slate-200 rounded-[2rem] p-4 shadow-3xs flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3 sm:gap-4 min-w-0 w-full">
         {/* Search */}
-        <div className="relative w-full md:max-w-md shrink-0">
-          <Search className="absolute left-4 top-3.5 h-4 w-4 text-slate-400" />
+        <div className="relative w-full xl:flex-1 xl:min-w-[280px] shrink-0 xl:shrink min-w-0">
+          <Search className="absolute left-4 top-3.5 h-4 w-4 text-slate-400 pointer-events-none" />
           <input 
             type="text"
             placeholder="Search by supplier, item description, payments..."
@@ -1249,17 +1723,17 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
         </div>
 
         {/* Tab filters and Action Button stacked on mobile, row on tablet/desktop */}
-        <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full md:w-auto font-sans">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between sm:justify-end gap-3 w-full xl:w-auto font-sans shrink-0 min-w-0">
           
-          <div className="w-full sm:flex-1 md:w-auto flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200/60 shrink-0 h-11">
+          <div className="w-full sm:w-auto flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200/60 shrink-0 h-11">
             {(['All', 'Cash', 'Credit'] as const).map((filter) => (
               <button
                 key={filter}
                 type="button"
                 onClick={() => setPaymentFilter(filter)}
-                className={`flex-1 md:flex-initial text-center px-4 py-2 text-xs md:text-[10px] md:px-3 md:py-1.5 font-extrabold rounded-lg uppercase tracking-widest transition cursor-pointer whitespace-nowrap min-h-[36px] flex items-center justify-center ${
+                className={`flex-1 sm:flex-initial text-center px-4 py-2 text-xs sm:text-[10px] sm:px-3 sm:py-1.5 font-extrabold rounded-lg uppercase tracking-widest transition cursor-pointer whitespace-nowrap min-h-[36px] flex items-center justify-center shrink-0 ${
                   paymentFilter === filter 
-                    ? 'bg-white text-indigo-650 text-indigo-600 shadow-2xs border border-slate-200/40' 
+                    ? 'bg-white text-indigo-600 shadow-2xs border border-slate-200/40' 
                     : 'text-slate-500 hover:text-slate-800'
                 }`}
               >
@@ -1272,10 +1746,10 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
             <button
               type="button"
               onClick={() => openForm()}
-              className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-1.5 cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-5 py-3 md:py-2.5 text-xs font-bold transition shadow-xs hover:shadow-sm"
+              className="w-full sm:w-auto h-11 min-h-[44px] inline-flex items-center justify-center gap-1.5 cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-5 py-2.5 text-xs font-bold transition shadow-xs hover:shadow-sm shrink-0 whitespace-nowrap min-w-[200px] sm:min-w-[210px]"
             >
-              <Plus className="h-4 w-4" />
-              <span>Enter Purchase Order</span>
+              <Plus className="h-4 w-4 shrink-0" />
+              <span className="whitespace-nowrap">Enter Purchase Order</span>
             </button>
           )}
         </div>
@@ -1400,17 +1874,22 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                         {purchase.supplierName}
                       </td>
                       <td className="py-3 px-4 sm:py-4 sm:px-5 whitespace-nowrap">
-                        <div className="font-bold text-slate-800">{purchase.productName}</div>
+                        <div className="font-bold text-slate-800 flex items-center gap-2">
+                          <span>{purchase.productName}</span>
+                          <UnitBadge unitCode={purchase.unitCode} unitName={purchase.unitName} size="sm" />
+                        </div>
                         <div className="font-mono text-[9px] text-slate-450 uppercase mt-0.5">Product ID: {purchase.productId.substring(0, 8)}</div>
                       </td>
                       <td className="py-3 px-4 sm:py-4 sm:px-5 text-center font-bold text-slate-800 font-mono whitespace-nowrap">
-                        ${purchase.purchasePrice.toFixed(2)}
+                        {formatUnitPrice(purchase.purchasePrice, purchase.unitCode)}
                       </td>
                       <td className="py-3 px-4 sm:py-4 sm:px-5 text-center font-bold text-slate-900 font-mono whitespace-nowrap">
-                        x{purchase.quantity}
+                        <span className="inline-flex items-center gap-1 bg-slate-100/80 px-2.5 py-1 rounded-lg text-slate-800 border border-slate-200/60">
+                          {formatQuantity(purchase.quantity, purchase.unitCode)}
+                        </span>
                       </td>
                       <td className="py-3 px-4 sm:py-4 sm:px-5 text-right whitespace-nowrap">
-                        <span className="text-slate-900 font-black font-mono font-sans block text-sm">${purchase.totalAmount.toFixed(2)}</span>
+                        <span className="text-slate-900 font-black font-mono font-sans block text-sm">{formatCurrency(purchase.totalAmount)}</span>
                         <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold border uppercase tracking-wider mt-1.5 ${
                           purchase.paymentType === 'Cash' 
                             ? 'bg-emerald-50 border-emerald-250/60 text-emerald-700 shadow-3xs' 
@@ -1427,6 +1906,22 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                           </span>
                         ) : (
                           <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedPurchaseForInvoice(purchase)}
+                              title="View and Print Purchase Invoice"
+                              className="p-2 text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 rounded-xl transition cursor-pointer"
+                            >
+                              <FileText className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openBarcodePrintForPurchase(purchase)}
+                              title="Print Barcode Labels for this purchase"
+                              className="p-2 text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 rounded-xl transition cursor-pointer"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                            </button>
                             {permissions.voidProcurement && (
                               <button
                                 type="button"
@@ -1554,9 +2049,9 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
                     {/* Unit Purchase Price */}
-                    <div className="relative w-full">
+                    <div className="relative w-full sm:col-span-1">
                       <span className="absolute left-3.5 top-[18px] text-slate-400 text-xs font-bold leading-none">$</span>
                       <input
                         type="number"
@@ -1585,7 +2080,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                     </div>
 
                     {/* Quantity Procured */}
-                    <div className="relative w-full">
+                    <div className="relative w-full sm:col-span-1">
                       <input
                         type="number"
                         min="1"
@@ -1611,7 +2106,106 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                         </div>
                       )}
                     </div>
+
+                    {/* Purchase Unit Selection */}
+                    <div className="relative w-full sm:col-span-1">
+                      <select
+                        id="form-procurement-unit-field"
+                        disabled={isSaving || !formData.productId}
+                        value={formData.unitCode}
+                        onChange={(e) => {
+                          setFormData({ ...formData, unitCode: e.target.value });
+                          setErrors(prev => {
+                            const copy = { ...prev };
+                            delete copy.unitCode;
+                            return copy;
+                          });
+                        }}
+                        className={`peer w-full rounded-xl border px-3.5 pt-5 pb-1.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 disabled:opacity-60 disabled:bg-slate-50 h-[52px] appearance-none bg-white ${
+                          errors.unitCode 
+                            ? 'border-rose-300 text-rose-800 bg-rose-50/10 focus:border-rose-455' 
+                            : 'border-slate-200 focus:border-indigo-605'
+                        }`}
+                      >
+                        {(() => {
+                          const prod = products.find(p => p && p.id === formData.productId);
+                          const baseCode = prod?.unitCode || 'PCS';
+                          const prodConversions = conversions.filter(c => c && c.productId === formData.productId && (c.status === 'active' || c.isActive));
+                          const altCodes = prodConversions.map(c => {
+                            const raw = c.alternateUnitCode || '';
+                            return typeof raw === 'string' ? raw : String(raw || '');
+                          });
+                          const allSystemUnits = units.map(u => {
+                            const raw = u?.code || '';
+                            return typeof raw === 'string' ? raw : String(raw || '');
+                          });
+                          const uniqueUnits = Array.from(new Set([baseCode, ...altCodes, ...allSystemUnits].filter(Boolean)));
+                          return uniqueUnits.map(code => (
+                            <option key={code} value={code}>
+                              {code} {code === baseCode ? '(Base Unit)' : altCodes.includes(code) ? '(Alternate Unit)' : ''}
+                            </option>
+                          ));
+                        })()}
+                      </select>
+                      <label htmlFor="form-procurement-unit-field" className="absolute left-3.5 top-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pointer-events-none origin-left peer-focus:text-indigo-600">
+                        Purchase Unit <span className="text-rose-500 font-extrabold">*</span>
+                      </label>
+                      {errors.unitCode && (
+                        <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                          <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
+                          <span>{errors.unitCode}</span>
+                        </div>
+                      )}
+                    </div>
                   </div>
+
+                  {/* Multi-Unit Conversion Impact Banner */}
+                  {(() => {
+                    if (!formData.productId) return null;
+                    const prod = products.find(p => p && p.id === formData.productId);
+                    if (!prod) return null;
+
+                    const rawSelUnit = formData.unitCode || prod.unitCode || '';
+                    const selUnit = typeof rawSelUnit === 'string' ? rawSelUnit : String(rawSelUnit || '');
+                    const rawProdUnit = prod.unitCode || '';
+                    const prodUnit = typeof rawProdUnit === 'string' ? rawProdUnit : String(rawProdUnit || '');
+
+                    const isAlt = selUnit.trim().toUpperCase() !== prodUnit.trim().toUpperCase();
+                    if (!isAlt) return null;
+
+                    const rule = conversions.find(c => {
+                      if (!c || c.productId !== prod.id) return false;
+                      const rawAlt = c.alternateUnitCode || '';
+                      const altCode = typeof rawAlt === 'string' ? rawAlt : String(rawAlt || '');
+                      return altCode.trim().toUpperCase() === selUnit.trim().toUpperCase() && (c.status === 'active' || c.isActive);
+                    });
+
+                    const qty = parseInt(formData.quantity) || 1;
+
+                    if (!rule) {
+                      return (
+                        <div className="mt-3 bg-rose-50 border border-rose-200 text-rose-800 p-3 rounded-xl text-xs font-semibold flex items-center gap-2">
+                          <AlertTriangle className="h-4 w-4 text-rose-500 shrink-0" />
+                          <span>No conversion defined for this unit.</span>
+                        </div>
+                      );
+                    }
+
+                    const baseVal = convertToBase(qty, rule.conversionFactor, rule.direction);
+                    return (
+                      <div className="mt-3 bg-indigo-50/80 border border-indigo-200/80 text-indigo-900 p-3 rounded-xl text-xs font-bold flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Box className="h-4 w-4 text-indigo-600 shrink-0" />
+                          <span>
+                            Conversion Impact: <strong className="text-indigo-700">{qty} {selUnit}</strong> = <strong className="text-indigo-700">{baseVal} {prod.unitCode}</strong>
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono text-indigo-600 bg-indigo-100/80 px-2 py-0.5 rounded-md">
+                          ({formatConversionText(rule)})
+                        </span>
+                      </div>
+                    );
+                  })()}
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                     {/* Payment Account Type */}
@@ -1681,15 +2275,21 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                         </span>
                       </div>
                       <div className="flex justify-between items-center text-xs">
-                        <span className="text-slate-500 font-bold uppercase tracking-wider">Purchase margin:</span>
-                        <span className="font-extrabold text-slate-500">
-                          Retail selling is ${selectedProductDetails?.sellingPrice.toFixed(2) || '0.00'}
+                        <span className="text-slate-500 font-bold uppercase tracking-wider">Subtotal (Excl. VAT):</span>
+                        <span className="font-extrabold text-slate-700 font-mono">
+                          {formatCurrency((parseInt(formData.quantity) || 1) * (parseFloat(formData.purchasePrice) || 0))}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center text-xs">
+                        <span className="text-slate-500 font-bold uppercase tracking-wider">Input VAT ({companyProfile.taxRatePercent ?? 15}%):</span>
+                        <span className="font-extrabold text-indigo-600 font-mono">
+                          +{formatCurrency(((parseInt(formData.quantity) || 1) * (parseFloat(formData.purchasePrice) || 0) * (companyProfile.taxRatePercent ?? 15)) / 100)}
                         </span>
                       </div>
                       <div className="border-t border-slate-200/60 my-2 pt-2 flex justify-between items-center">
-                        <span className="text-xs font-black text-slate-900 uppercase tracking-wider">Gross debit sum:</span>
+                        <span className="text-xs font-black text-slate-900 uppercase tracking-wider">Gross Debit Sum (Incl. VAT):</span>
                         <span className="text-sm font-black text-indigo-600 font-mono">
-                          ${((parseInt(formData.quantity) || 1) * (parseFloat(formData.purchasePrice) || 0)).toFixed(2)}
+                          {formatCurrency(((parseInt(formData.quantity) || 1) * (parseFloat(formData.purchasePrice) || 0)) * (1 + (companyProfile.taxRatePercent ?? 15) / 100))}
                         </span>
                       </div>
                     </motion.div>
@@ -1804,7 +2404,7 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                     <div><span className="font-bold">Purchase ID:</span> {voidConfirmationPurchase.id}</div>
                     <div><span className="font-bold">Product Name:</span> {voidConfirmationPurchase.productName} (x{voidConfirmationPurchase.quantity})</div>
                     <div><span className="font-bold">Log Date:</span> {new Date(voidConfirmationPurchase.purchaseDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</div>
-                    <div><span className="font-bold">Grand Total:</span> ${voidConfirmationPurchase.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                    <div><span className="font-bold">Grand Total:</span> {formatCurrency(voidConfirmationPurchase.totalAmount)}</div>
                   </div>
                 </div>
               </div>
@@ -1826,6 +2426,306 @@ export default function ProcurementManagement({ userRole = 'admin' }: { userRole
                   className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 transition cursor-pointer shadow-xs"
                 >
                   Yes, Void Procurement
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Purchase Saved Successfully Modal (Sprint 11.0A Enterprise Standard) */}
+      <AnimatePresence>
+        {showPrintOfferModal && pendingBarcodePurchase && (
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-lg rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-2xl"
+            >
+              <div className="flex items-start gap-4">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600 border border-emerald-100">
+                  <CheckCircle2 className="h-6 w-6" />
+                </div>
+                <div className="space-y-1.5 flex-1">
+                  <h3 className="font-sans text-lg font-extrabold tracking-tight text-slate-900">
+                    Purchase Saved Successfully
+                  </h3>
+                  <p className="text-xs font-semibold text-slate-500">
+                    PO #{pendingBarcodePurchase.invoiceNumber || pendingBarcodePurchase.id.substring(0, 12)} • Product: {pendingBarcodePurchase.productName} ({pendingBarcodePurchase.quantity} units)
+                  </p>
+                  <p className="text-sm font-medium text-slate-700 pt-2 border-t border-slate-100 mt-2">
+                    What would you like to print?
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-6 flex flex-wrap items-center justify-end gap-2.5 pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPrintOfferModal(false);
+                    setPendingBarcodePurchase(null);
+                  }}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const p = pendingBarcodePurchase;
+                    setShowPrintOfferModal(false);
+                    setSelectedPurchaseForInvoice(p);
+                  }}
+                  className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100 transition cursor-pointer shadow-xs flex items-center gap-2"
+                >
+                  <FileText className="w-4 h-4 text-indigo-600" />
+                  <span>🖨 Print Purchase Invoice</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const p = pendingBarcodePurchase;
+                    setShowPrintOfferModal(false);
+                    openBarcodePrintForPurchase(p);
+                  }}
+                  className="rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition cursor-pointer shadow-xs flex items-center gap-2"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>🏷 Print Barcode Labels</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Render Purchase Detail Modal (Invoice View / Print) */}
+      {selectedPurchaseForInvoice && (
+        <PurchaseDetailModal
+          purchase={selectedPurchaseForInvoice}
+          suppliers={suppliers}
+          products={products}
+          companyProfile={companyProfile}
+          onClose={() => setSelectedPurchaseForInvoice(null)}
+        />
+      )}
+
+      {/* Main Barcode Print Dialog Modal */}
+      <AnimatePresence>
+        {showBarcodePrintDialog && pendingBarcodePurchase && (
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-sm overflow-y-auto">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-3xl rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-2xl my-8"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between pb-5 border-b border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600 border border-indigo-100">
+                    <Printer className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-extrabold text-slate-900">Purchase Barcode Print Dialog</h2>
+                    <p className="text-xs text-slate-500">
+                      PO #{pendingBarcodePurchase.id.substring(0, 15)} • Supplier: {pendingBarcodePurchase.supplierName}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isPrintingBatch) cancelBatchRef.current = true;
+                    setShowBarcodePrintDialog(false);
+                  }}
+                  className="p-2 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Printing Parameters Bar */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 my-5 bg-slate-50 p-4 rounded-2xl border border-slate-200/80">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">Target Printer</label>
+                  <input
+                    type="text"
+                    value={selectedPrinter}
+                    onChange={(e) => setSelectedPrinter(e.target.value)}
+                    placeholder="MZ Thermal Printer ZD421"
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">Label Template</label>
+                  <select
+                    value={selectedTemplate}
+                    onChange={(e) => setSelectedTemplate(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="STD_PRODUCT_38X25MM">Standard Product Label (38x25mm)</option>
+                    <option value="COMPACT_PRICE_25X15MM">Compact Price Tag (25x15mm)</option>
+                    <option value="SHIPPING_TAG_50X30MM">Shipping Tag (50x30mm)</option>
+                    <option value="LARGE_PALLET_100X150MM">Large Pallet Label (100x150mm)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Products Selection List */}
+              <div className="space-y-3 mb-6">
+                <div className="flex items-center justify-between px-1">
+                  <span className="text-xs font-bold text-slate-700">Products in Purchase Voucher</span>
+                  <div className="flex gap-2 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setPrintableItems(prev => prev.map(i => ({ ...i, selected: true })))}
+                      className="text-indigo-600 hover:underline font-semibold cursor-pointer"
+                    >
+                      Select All
+                    </button>
+                    <span className="text-slate-300">•</span>
+                    <button
+                      type="button"
+                      onClick={() => setPrintableItems(prev => prev.map(i => ({ ...i, selected: false })))}
+                      className="text-slate-500 hover:underline font-semibold cursor-pointer"
+                    >
+                      Deselect All
+                    </button>
+                  </div>
+                </div>
+
+                <div className="border border-slate-200 rounded-2xl overflow-hidden divide-y divide-slate-100 max-h-60 overflow-y-auto">
+                  {printableItems.map((item, idx) => (
+                    <div key={idx} className={`p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition ${item.selected ? 'bg-indigo-50/20' : 'bg-white opacity-60'}`}>
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={item.selected}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            setPrintableItems(prev => prev.map((it, i) => i === idx ? { ...it, selected: checked } : it));
+                          }}
+                          className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300 cursor-pointer"
+                        />
+                        <div>
+                          <div className="text-xs font-extrabold text-slate-900">{item.productName} <span className="text-[10px] font-mono text-slate-400">(Read Only)</span></div>
+                          <div className="flex items-center gap-3 text-[10px] font-mono text-slate-500 mt-0.5">
+                            <span>SKU: {item.sku}</span>
+                            <span>•</span>
+                            <span>Barcode: {item.barcodeValue}</span>
+                            <span>•</span>
+                            <span className="bg-slate-100 px-1.5 py-0.5 rounded text-slate-700 font-bold">{item.barcodeType}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-3 shrink-0 ml-7 sm:ml-0">
+                        <div>
+                          <label className="block text-[9px] font-bold text-slate-500 uppercase">Quantity</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={item.quantityToPrint}
+                            onChange={(e) => {
+                              const val = Math.max(1, parseInt(e.target.value) || 1);
+                              setPrintableItems(prev => prev.map((it, i) => i === idx ? { ...it, quantityToPrint: val } : it));
+                            }}
+                            className="w-20 bg-white border border-slate-200 rounded-lg px-2.5 py-1 text-xs font-bold text-slate-800 text-center"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[9px] font-bold text-slate-500 uppercase">Copies</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={item.copies}
+                            onChange={(e) => {
+                              const val = Math.max(1, parseInt(e.target.value) || 1);
+                              setPrintableItems(prev => prev.map((it, i) => i === idx ? { ...it, copies: val } : it));
+                            }}
+                            className="w-16 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs font-bold text-slate-800 text-center"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Batch Execution Live Progress Feedback */}
+              {batchProgress && (
+                <div className="mb-6 p-4 rounded-2xl bg-slate-900 text-white space-y-3">
+                  <div className="flex items-center justify-between text-xs font-bold">
+                    <span className="text-indigo-400 flex items-center gap-1.5">
+                      {isPrintingBatch && <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-400" />}
+                      {batchProgress.statusMessage}
+                    </span>
+                    <span className="font-mono">{batchProgress.current} / {batchProgress.total}</span>
+                  </div>
+
+                  {/* Progress bar */}
+                  <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                    <div
+                      className="bg-indigo-500 h-full transition-all duration-200"
+                      style={{ width: `${batchProgress.total > 0 ? (batchProgress.current / batchProgress.total) * 100 : 0}%` }}
+                    />
+                  </div>
+
+                  {/* Stats Grid */}
+                  <div className="grid grid-cols-4 gap-2 text-center text-[10px] font-mono pt-1 border-t border-slate-800">
+                    <div>
+                      <span className="text-slate-400 block uppercase">Requested</span>
+                      <span className="text-slate-200 font-bold">{batchProgress.total}</span>
+                    </div>
+                    <div>
+                      <span className="text-emerald-400 block uppercase">Completed</span>
+                      <span className="text-emerald-400 font-bold">{batchProgress.completed}</span>
+                    </div>
+                    <div>
+                      <span className="text-rose-400 block uppercase">Failed</span>
+                      <span className="text-rose-400 font-bold">{batchProgress.failed}</span>
+                    </div>
+                    <div>
+                      <span className="text-amber-400 block uppercase">Elapsed</span>
+                      <span className="text-amber-300 font-bold">{((batchProgress.endTime || Date.now()) - batchProgress.startTime)}ms</span>
+                    </div>
+                  </div>
+
+                  {isPrintingBatch && (
+                    <div className="flex justify-end pt-1">
+                      <button
+                        type="button"
+                        onClick={() => { cancelBatchRef.current = true; }}
+                        className="text-[10px] bg-rose-600/80 hover:bg-rose-600 text-white font-bold px-3 py-1 rounded-lg transition cursor-pointer"
+                      >
+                        Cancel Remaining
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Footer Action Controls */}
+              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isPrintingBatch}
+                  onClick={() => setShowBarcodePrintDialog(false)}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer disabled:opacity-50"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  disabled={isPrintingBatch || printableItems.filter(i => i.selected).length === 0}
+                  onClick={executeBatchPrintForPurchase}
+                  className="rounded-xl bg-indigo-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition cursor-pointer shadow-xs disabled:opacity-50 flex items-center gap-2"
+                >
+                  {isPrintingBatch ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Printer className="w-4 h-4" />}
+                  <span>Print Selected Labels ({printableItems.filter(i => i.selected).reduce((s, i) => s + i.quantityToPrint, 0)})</span>
                 </button>
               </div>
             </motion.div>

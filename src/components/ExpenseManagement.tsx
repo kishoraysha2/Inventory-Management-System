@@ -19,8 +19,10 @@ import {
   logFinancialAudit 
 } from '../lib/firebase';
 import { Expense, ExpenseCategory } from '../types';
-import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveExpenseAccount, resolveSystemAccount } from '../lib/postingEngine';
+import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveExpenseAccount, resolveSystemAccount, validateJournalBalance } from '../lib/postingEngine';
 import { AppPermissions, UserRole } from '../hooks/usePermission';
+import { formatCurrency } from '../utils/currencyFormatter';
+import { ResponsiveKPIValue } from './MetricCard';
 import { 
   Plus, 
   Search, 
@@ -93,6 +95,9 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
   const [formVendor, setFormVendor] = useState('');
   const [formDescription, setFormDescription] = useState('');
   const [formAmount, setFormAmount] = useState('');
+  const [formTaxRatePercent, setFormTaxRatePercent] = useState<number>(15);
+  const [formHasVat, setFormHasVat] = useState<boolean>(true);
+  const [formIsVatInclusive, setFormIsVatInclusive] = useState<boolean>(true);
   const [formPaymentMethod, setFormPaymentMethod] = useState('Cash');
   const [formReference, setFormReference] = useState('');
   const [formNotes, setFormNotes] = useState('');
@@ -189,6 +194,23 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
       return;
     }
 
+    const taxRateNum = formHasVat ? formTaxRatePercent : 0;
+    let subtotalNum = amountNum;
+    let vatAmountNum = 0;
+    let totalGrossNum = amountNum;
+
+    if (formHasVat && taxRateNum > 0) {
+      if (formIsVatInclusive) {
+        totalGrossNum = amountNum;
+        subtotalNum = parseFloat((amountNum / (1 + taxRateNum / 100)).toFixed(2));
+        vatAmountNum = parseFloat((totalGrossNum - subtotalNum).toFixed(2));
+      } else {
+        subtotalNum = amountNum;
+        vatAmountNum = parseFloat((amountNum * (taxRateNum / 100)).toFixed(2));
+        totalGrossNum = parseFloat((subtotalNum + vatAmountNum).toFixed(2));
+      }
+    }
+
     try {
       const currentUserEmail = auth.currentUser?.email || 'admin_01@nexus.erp';
       const timestamp = new Date().toISOString();
@@ -208,7 +230,11 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
           category: formCategory,
           vendor: formVendor,
           description: formDescription,
-          amount: amountNum,
+          amount: totalGrossNum,
+          subtotal: subtotalNum,
+          taxAmount: vatAmountNum,
+          vatAmount: vatAmountNum,
+          taxRatePercent: taxRateNum,
           paymentMethod: formPaymentMethod,
           referenceNumber: formReference,
           notes: formNotes,
@@ -231,9 +257,9 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
 
         // Void the previous cash ledger entry if the previous payment method was Cash
         if (oldExpense.paymentMethod === 'Cash') {
-          batch.update(doc(db, 'cashLedger', oldCashLedgerId), {
+          batch.set(doc(db, 'cashLedger', oldCashLedgerId), {
             status: 'VOID'
-          });
+          }, { merge: true });
         }
 
         let finalCashLedgerId: string | null = null;
@@ -243,7 +269,7 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
             id: newCashLedgerId,
             type: 'outflow' as const,
             source: 'expense' as const,
-            amount: amountNum,
+            amount: totalGrossNum,
             referenceId: expenseId,
             description: `Expense [${formCategory}] - ${formVendor}: ${formDescription}`,
             timestamp: new Date(formDate + 'T12:00:00Z').toISOString(),
@@ -257,7 +283,7 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
           action: "Expense Updated",
           user: currentUserEmail,
           timestamp,
-          details: `Updated Expense record ${oldExpense.expenseNumber}: Category changed from [${oldExpense.category}] to [${formCategory}], Amount from $${oldExpense.amount} to $${amountNum}.`
+          details: `Updated Expense record ${oldExpense.expenseNumber}: Category [${formCategory}], Net: $${subtotalNum}, Input VAT: $${vatAmountNum}, Total: $${totalGrossNum}.`
         };
         batch.set(doc(db, 'Logs', syslogId), syslogPayload);
 
@@ -273,11 +299,11 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
           customerId: null,
           supplierId: null,
           productId: null,
-          amount: amountNum,
+          amount: totalGrossNum,
           paymentType: formPaymentMethod,
           previousState: JSON.stringify(oldExpense),
           newState: JSON.stringify({ ...oldExpense, ...updatedData }),
-          notes: `Updated Expense ${oldExpense.expenseNumber} to $${amountNum}`
+          notes: `Updated Expense ${oldExpense.expenseNumber} to $${totalGrossNum} (Net: $${subtotalNum}, VAT: $${vatAmountNum})`
         };
         batch.set(doc(db, 'financialLogs', finlogId), finlogPayload);
 
@@ -301,7 +327,11 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
           category: formCategory,
           vendor: formVendor,
           description: formDescription,
-          amount: amountNum,
+          amount: totalGrossNum,
+          subtotal: subtotalNum,
+          taxAmount: vatAmountNum,
+          vatAmount: vatAmountNum,
+          taxRatePercent: taxRateNum,
           paymentMethod: formPaymentMethod,
           referenceNumber: formReference,
           status: 'active',
@@ -320,7 +350,7 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
           action: "Expense Recorded",
           user: currentUserEmail,
           timestamp,
-          details: `Successfully registered expenditure receipt ${expenseNumber} of $${amountNum} under category [${formCategory}] to payee "${formVendor}".`
+          details: `Successfully registered expenditure receipt ${expenseNumber} (Net: $${subtotalNum}, VAT 1400: $${vatAmountNum}, Total: $${totalGrossNum}) under category [${formCategory}] to payee "${formVendor}".`
         };
 
         const finlogPayload = {
@@ -335,122 +365,181 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
           customerId: null,
           supplierId: null,
           productId: null,
-          amount: amountNum,
+          amount: totalGrossNum,
           paymentType: formPaymentMethod,
           previousState: JSON.stringify({}),
           newState: JSON.stringify(newExpense),
           notes: `Recorded expenditure ${expenseNumber} paid to ${formVendor}`
         };
 
-        await runTransaction(db, async (transaction) => {
-          // A. READ phase: Retrieve posting number sequence (Voucher type: CV)
-          const year = new Date(formDate).getFullYear() || 2026;
-          const { postingNumber, nextVal } = await getNextPostingNumber(transaction, 'CV', year);
+        let writeCount = 0;
+        let lastQueuedPath = "None";
+        let nextAttemptPath = "None";
 
-          // B. WRITE phase
-          transaction.set(doc(db, 'expenses', expenseId), newExpense);
+        const queueWrite = (path: string, payload: any, setFn: () => void) => {
+          writeCount++;
+          nextAttemptPath = path;
+          console.log(`====================================================`);
+          console.log(`WRITE #${writeCount}`);
+          console.log(`Document Path:`, path);
+          console.log(`Payload:`, payload);
+          console.log(`====================================================`);
+          setFn();
+          lastQueuedPath = path;
+          nextAttemptPath = "None";
+          console.log("WRITE QUEUED");
+        };
 
-          if (formPaymentMethod === 'Cash') {
-            const ledgerPayload = {
-              id: cashLedgerId,
-              type: 'outflow' as const,
-              source: 'expense' as const,
-              amount: amountNum,
-              referenceId: expenseId,
-              description: `Expense [${formCategory}] - ${formVendor}: ${formDescription}`,
-              timestamp: new Date(formDate + 'T12:00:00Z').toISOString(),
-              status: 'active'
+        try {
+          await runTransaction(db, async (transaction) => {
+            // A. READ phase: Retrieve posting number sequence (Voucher type: CV)
+            const year = new Date(formDate).getFullYear() || 2026;
+            const { postingNumber, nextVal } = await getNextPostingNumber(transaction, 'CV', year);
+
+            // B. WRITE phase
+            const expDocRef = doc(db, 'expenses', expenseId);
+            queueWrite(expDocRef.path, newExpense, () => {
+              transaction.set(expDocRef, newExpense);
+            });
+
+            if (formPaymentMethod === 'Cash') {
+              const ledgerPayload = {
+                id: cashLedgerId,
+                type: 'outflow' as const,
+                source: 'expense' as const,
+                amount: totalGrossNum,
+                referenceId: expenseId,
+                description: `Expense [${formCategory}] - ${formVendor}: ${formDescription}`,
+                timestamp: new Date(formDate + 'T12:00:00Z').toISOString(),
+                status: 'active'
+              };
+              const cashDocRef = doc(db, 'cashLedger', cashLedgerId);
+              queueWrite(cashDocRef.path, ledgerPayload, () => {
+                transaction.set(cashDocRef, ledgerPayload);
+              });
+            }
+
+            // --- AUTOMATIC LEDGER POSTING (CV) ---
+            const periodMonth = String(new Date(formDate).getMonth() + 1).padStart(2, '0');
+            const accountingPeriod = `${year}-${periodMonth}`;
+            const expAccount = resolveExpenseAccount(formCategory, coa);
+            const inputVatAcc = resolveSystemAccount('INPUT_VAT', coa);
+
+            const lines = [];
+
+            // Debit: Expense Account (Net Amount)
+            lines.push({
+              accountId: expAccount.id,
+              accountCode: expAccount.code,
+              accountName: expAccount.name,
+              debit: subtotalNum,
+              credit: 0,
+              baseCurrencyDebit: subtotalNum,
+              baseCurrencyCredit: 0
+            });
+
+            // Debit: Input VAT Receivable (1400) (if vatAmountNum > 0)
+            if (vatAmountNum > 0) {
+              lines.push({
+                accountId: inputVatAcc.id,
+                accountCode: inputVatAcc.code,
+                accountName: inputVatAcc.name,
+                debit: vatAmountNum,
+                credit: 0,
+                baseCurrencyDebit: vatAmountNum,
+                baseCurrencyCredit: 0
+              });
+            }
+
+            // Credit: Cash in Hand (if Cash) or Accounts Payable (if Credit/Other)
+            if (formPaymentMethod === 'Cash') {
+              const cashAcc = resolveSystemAccount('CASH', coa);
+              lines.push({
+                accountId: cashAcc.id,
+                accountCode: cashAcc.code,
+                accountName: cashAcc.name,
+                debit: 0,
+                credit: totalGrossNum,
+                baseCurrencyDebit: 0,
+                baseCurrencyCredit: totalGrossNum
+              });
+            } else {
+              const apAcc = resolveSystemAccount('ACCOUNTS_PAYABLE', coa);
+              lines.push({
+                accountId: apAcc.id,
+                accountCode: apAcc.code,
+                accountName: apAcc.name,
+                debit: 0,
+                credit: totalGrossNum,
+                baseCurrencyDebit: 0,
+                baseCurrencyCredit: totalGrossNum
+              });
+            }
+
+            // Mandatory Enterprise Journal Integrity Validation (Phase X)
+            validateJournalBalance(lines);
+
+            const entryId = `le-expense-${expenseId}`;
+            const ledgerEntry = {
+              id: entryId,
+              postingNumber,
+              companyId: 'comp-default',
+              branchId: 'branch-main',
+              fiscalYear: year,
+              accountingPeriod,
+              sourceModule: 'EXPENSE' as const,
+              postingStatus: 'POSTED' as const,
+              currency: 'USD',
+              exchangeRate: 1,
+              baseCurrencyCode: 'USD',
+              version: 1,
+              narration: `Recorded Expense: [${formCategory}] to "${formVendor}". Ref: ${formReference} (Net: $${subtotalNum}, VAT 1400: $${vatAmountNum})`,
+              createdFrom: expenseId,
+              approvalStatus: 'APPROVED' as const,
+              postingDate: new Date(formDate + 'T12:00:00Z').toISOString(),
+              createdAt: new Date().toISOString(),
+              createdBy: currentUserEmail,
+              lines
             };
-            transaction.set(doc(db, 'cashLedger', cashLedgerId), ledgerPayload);
-          }
 
-          // --- AUTOMATIC LEDGER POSTING (CV) ---
-          const periodMonth = String(new Date(formDate).getMonth() + 1).padStart(2, '0');
-          const accountingPeriod = `${year}-${periodMonth}`;
-          const expAccount = resolveExpenseAccount(formCategory, coa);
+            const ledgerRef = doc(db, 'ledgerEntries', entryId);
+            queueWrite(ledgerRef.path, ledgerEntry, () => {
+              transaction.set(ledgerRef, ledgerEntry);
+            });
 
-          const lines = [];
+            // Update sequence counter
+            commitNextPostingNumber(transaction, 'CV', nextVal, queueWrite);
 
-          // Debit: Expense Account (dynamically resolved)
-          lines.push({
-            accountId: expAccount.id,
-            accountCode: expAccount.code,
-            accountName: expAccount.name,
-            debit: amountNum,
-            credit: 0,
-            baseCurrencyDebit: amountNum,
-            baseCurrencyCredit: 0
+            // Ensure default system accounts exist
+            const currentCoaIds = coa.map(c => c.id);
+            await ensureSystemAccountsExist(transaction, currentCoaIds, queueWrite);
+
+            // Log activities
+            const sysDocRef = doc(db, 'Logs', syslogId);
+            queueWrite(sysDocRef.path, syslogPayload, () => {
+              transaction.set(sysDocRef, syslogPayload);
+            });
+
+            const finDocRef = doc(db, 'financialLogs', finlogId);
+            queueWrite(finDocRef.path, finlogPayload, () => {
+              transaction.set(finDocRef, finlogPayload);
+            });
           });
-
-          // Credit: Cash in Hand (if Cash) or Accounts Payable (if Credit/Other)
-          if (formPaymentMethod === 'Cash') {
-            const cashAcc = resolveSystemAccount('CASH', coa);
-            lines.push({
-              accountId: cashAcc.id,
-              accountCode: cashAcc.code,
-              accountName: cashAcc.name,
-              debit: 0,
-              credit: amountNum,
-              baseCurrencyDebit: 0,
-              baseCurrencyCredit: amountNum
-            });
-          } else {
-            const apAcc = resolveSystemAccount('ACCOUNTS_PAYABLE', coa);
-            lines.push({
-              accountId: apAcc.id,
-              accountCode: apAcc.code,
-              accountName: apAcc.name,
-              debit: 0,
-              credit: amountNum,
-              baseCurrencyDebit: 0,
-              baseCurrencyCredit: amountNum
-            });
+        } catch (txError: any) {
+          console.log("----------------------------------------------------");
+          console.log("Transaction Failed");
+          console.log("----------------------------------------------------");
+          console.error(txError);
+          if (txError) {
+            console.log("error.code:", txError.code);
+            console.log("error.message:", txError.message);
+            console.log("error.customData:", txError.customData);
+            console.log("error.stack:", txError.stack);
           }
-
-          // Validate double entry
-          const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
-          const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
-          if (Math.abs(totalDebits - totalCredits) > 0.01) {
-            throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
-          }
-
-          const entryId = `le-expense-${expenseId}`;
-          const ledgerEntry = {
-            id: entryId,
-            postingNumber,
-            companyId: 'comp-default',
-            branchId: 'branch-main',
-            fiscalYear: year,
-            accountingPeriod,
-            sourceModule: 'EXPENSE' as const,
-            postingStatus: 'POSTED' as const,
-            currency: 'USD',
-            exchangeRate: 1,
-            baseCurrencyCode: 'USD',
-            version: 1,
-            narration: `Recorded Expense: [${formCategory}] to "${formVendor}". Ref: ${formReference}`,
-            createdFrom: expenseId,
-            approvalStatus: 'APPROVED' as const,
-            postingDate: new Date(formDate + 'T12:00:00Z').toISOString(),
-            createdAt: new Date().toISOString(),
-            createdBy: currentUserEmail,
-            lines
-          };
-
-          const ledgerRef = doc(db, 'ledgerEntries', entryId);
-          transaction.set(ledgerRef, ledgerEntry);
-
-          // Update sequence counter
-          commitNextPostingNumber(transaction, 'CV', nextVal);
-
-          // Ensure default system accounts exist
-          const currentCoaIds = coa.map(c => c.id);
-          await ensureSystemAccountsExist(transaction, currentCoaIds);
-
-          // Log activities
-          transaction.set(doc(db, 'Logs', syslogId), syslogPayload);
-          transaction.set(doc(db, 'financialLogs', finlogId), finlogPayload);
-        });
+          console.log("The LAST successfully queued document path:", lastQueuedPath);
+          console.log("The NEXT document path that was about to be written:", nextAttemptPath);
+          throw txError;
+        }
       }
 
       // Reset state and close modal
@@ -458,8 +547,12 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
       resetForm();
     } catch (err: any) {
       console.error("Failed to save expense:", err);
-      handleFirestoreError(err, OperationType.WRITE, `batch_write/expense`);
-      alert(`Failed to save expense: ${err?.message || "Check network or credentials"}`);
+      if (err.message && err.message.includes("Accounting validation failed")) {
+        alert(err.message);
+      } else {
+        handleFirestoreError(err, OperationType.WRITE, `batch_write/expense`);
+        alert(`Failed to save expense: ${err?.message || "Check network or credentials"}`);
+      }
     }
   };
 
@@ -470,6 +563,9 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
     setFormVendor('');
     setFormDescription('');
     setFormAmount('');
+    setFormTaxRatePercent(15);
+    setFormHasVat(true);
+    setFormIsVatInclusive(true);
     setFormPaymentMethod('Cash');
     setFormReference('');
     setFormNotes('');
@@ -485,7 +581,10 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
     setFormCategory(expense.category);
     setFormVendor(expense.vendor);
     setFormDescription(expense.description);
-    setFormAmount(expense.amount.toString());
+    setFormAmount((expense.amount || 0).toString());
+    setFormTaxRatePercent(expense.taxRatePercent !== undefined ? expense.taxRatePercent : 15);
+    setFormHasVat(expense.taxRatePercent !== undefined ? expense.taxRatePercent > 0 : true);
+    setFormIsVatInclusive(expense.subtotal !== undefined ? (expense.amount !== expense.subtotal) : true);
     setFormPaymentMethod(expense.paymentMethod);
     setFormReference(expense.referenceNumber || '');
     setFormNotes(expense.notes || '');
@@ -554,8 +653,20 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
         });
 
         if (expense.paymentMethod === 'Cash') {
-          transaction.update(doc(db, 'cashLedger', activeCashLedgerId), {
-            status: 'VOID'
+          const revCashId = `cl-rev-${expense.id}`;
+          const revCashRef = doc(db, 'cashLedger', revCashId);
+          transaction.set(revCashRef, {
+            id: revCashId,
+            type: 'inflow',
+            source: 'expense',
+            amount: expense.amount,
+            referenceId: expense.id,
+            description: `Cash Reversal for Voided Expense #${expense.expenseNumber || expense.id}`,
+            timestamp: new Date().toISOString(),
+            status: 'active',
+            isReversal: true,
+            reversesCashEntryId: activeCashLedgerId,
+            postingStatus: 'POSTED'
           });
         }
 
@@ -563,6 +674,11 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
         const periodMonth = String(new Date(expense.expenseDate).getMonth() + 1).padStart(2, '0');
         const accountingPeriod = `${year}-${periodMonth}`;
         const expAccount = resolveExpenseAccount(expense.category, coa);
+        const inputVatAcc = resolveSystemAccount('INPUT_VAT', coa);
+
+        const vatAmount = expense.taxAmount !== undefined ? expense.taxAmount : (expense.vatAmount !== undefined ? expense.vatAmount : 0);
+        const grossAmount = expense.amount;
+        const netAmount = expense.subtotal !== undefined ? expense.subtotal : (grossAmount - vatAmount);
 
         const lines = [];
 
@@ -573,9 +689,9 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
             accountId: cashAcc.id,
             accountCode: cashAcc.code,
             accountName: cashAcc.name,
-            debit: expense.amount,
+            debit: grossAmount,
             credit: 0,
-            baseCurrencyDebit: expense.amount,
+            baseCurrencyDebit: grossAmount,
             baseCurrencyCredit: 0
           });
         } else {
@@ -584,32 +700,53 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
             accountId: apAcc.id,
             accountCode: apAcc.code,
             accountName: apAcc.name,
-            debit: expense.amount,
+            debit: grossAmount,
             credit: 0,
-            baseCurrencyDebit: expense.amount,
+            baseCurrencyDebit: grossAmount,
             baseCurrencyCredit: 0
           });
         }
 
-        // Credit: Expense Account (dynamically resolved)
+        // Credit: Expense Account (Net Amount)
         lines.push({
           accountId: expAccount.id,
           accountCode: expAccount.code,
           accountName: expAccount.name,
           debit: 0,
-          credit: expense.amount,
+          credit: netAmount,
           baseCurrencyDebit: 0,
-          baseCurrencyCredit: expense.amount
+          baseCurrencyCredit: netAmount
         });
 
-        // Validate double entry
-        const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
-        const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
-        if (Math.abs(totalDebits - totalCredits) > 0.01) {
-          throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
+        // Credit: Input VAT Receivable (1400) (if vatAmount > 0)
+        if (vatAmount > 0) {
+          lines.push({
+            accountId: inputVatAcc.id,
+            accountCode: inputVatAcc.code,
+            accountName: inputVatAcc.name,
+            debit: 0,
+            credit: vatAmount,
+            baseCurrencyDebit: 0,
+            baseCurrencyCredit: vatAmount
+          });
         }
 
+        // Mandatory Enterprise Journal Integrity Validation (Phase X)
+        validateJournalBalance(lines);
+
         const entryId = `le-void-expense-${expense.id}`;
+        const origEntryId = `le-expense-${expense.id}`;
+
+        // Update metadata on original entry
+        const origLedgerRef = doc(db, 'ledgerEntries', origEntryId);
+        transaction.set(origLedgerRef, {
+          isVoided: true,
+          voidedAt: new Date().toISOString(),
+          voidedBy: currentUserEmail,
+          voidReason: 'Expense record voided',
+          reversalEntryId: entryId
+        }, { merge: true });
+
         const ledgerEntry = {
           id: entryId,
           postingNumber: jvPostingNumber,
@@ -618,7 +755,7 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
           fiscalYear: year,
           accountingPeriod,
           sourceModule: 'EXPENSE' as const,
-          postingStatus: 'REVERSED' as const,
+          postingStatus: 'POSTED' as const,
           currency: 'USD',
           exchangeRate: 1,
           baseCurrencyCode: 'USD',
@@ -630,7 +767,9 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
           createdAt: new Date().toISOString(),
           createdBy: currentUserEmail,
           lines,
-          originalEntryId: `le-expense-${expense.id}`
+          originalEntryId: origEntryId,
+          isReversal: true,
+          reversesEntryId: origEntryId
         };
 
         const ledgerRef = doc(db, 'ledgerEntries', entryId);
@@ -646,8 +785,12 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
 
     } catch (err: any) {
       console.error("Failed to void expense:", err);
-      handleFirestoreError(err, OperationType.WRITE, `batch_void/expense`);
-      alert(`Error processing void transaction: ${err?.message || "Check network or credentials"}`);
+      if (err.message && err.message.includes("Accounting validation failed")) {
+        alert(err.message);
+      } else {
+        handleFirestoreError(err, OperationType.WRITE, `batch_void/expense`);
+        alert(`Error processing void transaction: ${err?.message || "Check network or credentials"}`);
+      }
     }
   };
 
@@ -908,54 +1051,60 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
       {/* Analytics Widgets */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Today's Expense */}
-        <div className="bg-white p-5 rounded-xl border border-slate-200/80 shadow-sm flex items-center justify-between">
-          <div className="space-y-1">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Today's Outlay</span>
-            <h3 className="text-2xl font-bold text-slate-800">${stats.today.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</h3>
-            <p className="text-[11px] text-slate-400 flex items-center gap-1">
-              <Calendar className="w-3 h-3" /> Standard cash & digital outlays
+        <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200/90 shadow-2xs flex items-center justify-between min-w-0 w-full">
+          <div className="space-y-1 min-w-0 flex-1 pr-2">
+            <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wider text-slate-400 block truncate">Today's Outlay</span>
+            <div className="min-w-0">
+              <ResponsiveKPIValue value={formatCurrency(stats.today)} className="text-slate-800" />
+            </div>
+            <p className="text-[11px] text-slate-400 flex items-center gap-1 truncate">
+              <Calendar className="w-3 h-3 shrink-0" /> Standard outlays
             </p>
           </div>
-          <div className="p-3 bg-amber-50 text-amber-600 rounded-xl">
-            <TrendingDown className="w-6 h-6" />
+          <div className="p-2.5 sm:p-3 bg-amber-50 text-amber-600 rounded-xl shrink-0 flex items-center justify-center">
+            <TrendingDown className="w-5 h-5 sm:w-6 sm:h-6" />
           </div>
         </div>
 
         {/* Monthly Expense */}
-        <div className="bg-white p-5 rounded-xl border border-slate-200/80 shadow-sm flex items-center justify-between">
-          <div className="space-y-1">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Monthly Sum</span>
-            <h3 className="text-2xl font-bold text-slate-800">${stats.monthly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</h3>
-            <p className="text-[11px] text-slate-400">Current calendar cycle tracking</p>
+        <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200/90 shadow-2xs flex items-center justify-between min-w-0 w-full">
+          <div className="space-y-1 min-w-0 flex-1 pr-2">
+            <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wider text-slate-400 block truncate">Monthly Sum</span>
+            <div className="min-w-0">
+              <ResponsiveKPIValue value={formatCurrency(stats.monthly)} className="text-slate-800" />
+            </div>
+            <p className="text-[11px] text-slate-400 truncate">Current cycle tracking</p>
           </div>
-          <div className="p-3 bg-rose-50 text-rose-600 rounded-xl">
-            <TrendingDown className="w-6 h-6" />
+          <div className="p-2.5 sm:p-3 bg-rose-50 text-rose-600 rounded-xl shrink-0 flex items-center justify-center">
+            <TrendingDown className="w-5 h-5 sm:w-6 sm:h-6" />
           </div>
         </div>
 
         {/* Yearly Expense */}
-        <div className="bg-white p-5 rounded-xl border border-slate-200/80 shadow-sm flex items-center justify-between">
-          <div className="space-y-1">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Yearly Total</span>
-            <h3 className="text-2xl font-bold text-slate-800">${stats.yearly.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</h3>
-            <p className="text-[11px] text-slate-400">Annual operation expenditures</p>
+        <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200/90 shadow-2xs flex items-center justify-between min-w-0 w-full">
+          <div className="space-y-1 min-w-0 flex-1 pr-2">
+            <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wider text-slate-400 block truncate">Yearly Total</span>
+            <div className="min-w-0">
+              <ResponsiveKPIValue value={formatCurrency(stats.yearly)} className="text-slate-800" />
+            </div>
+            <p className="text-[11px] text-slate-400 truncate">Annual operation expenditures</p>
           </div>
-          <div className="p-3 bg-blue-50 text-blue-600 rounded-xl">
-            <TrendingDown className="w-6 h-6" />
+          <div className="p-2.5 sm:p-3 bg-blue-50 text-blue-600 rounded-xl shrink-0 flex items-center justify-center">
+            <TrendingDown className="w-5 h-5 sm:w-6 sm:h-6" />
           </div>
         </div>
 
         {/* Top Expense Category */}
-        <div className="bg-white p-5 rounded-xl border border-slate-200/80 shadow-sm flex items-center justify-between">
-          <div className="space-y-1">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Top Outflow Category</span>
-            <h3 className="text-lg font-bold text-slate-800 truncate max-w-[150px]">{stats.topCategory}</h3>
-            <p className="text-[11px] text-slate-400">
-              Total: ${stats.topCategoryVal.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+        <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200/90 shadow-2xs flex items-center justify-between min-w-0 w-full">
+          <div className="space-y-1 min-w-0 flex-1 pr-2">
+            <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wider text-slate-400 block truncate">Top Outflow Category</span>
+            <h3 className="text-base sm:text-lg font-bold text-slate-800 truncate">{stats.topCategory}</h3>
+            <p className="text-[11px] text-slate-400 truncate">
+              Total: {formatCurrency(stats.topCategoryVal)}
             </p>
           </div>
-          <div className="p-3 bg-purple-50 text-purple-600 rounded-xl">
-            <Tag className="w-6 h-6" />
+          <div className="p-2.5 sm:p-3 bg-purple-50 text-purple-600 rounded-xl shrink-0 flex items-center justify-center">
+            <Tag className="w-5 h-5 sm:w-6 sm:h-6" />
           </div>
         </div>
       </div>
@@ -1120,7 +1269,7 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
                         {expense.description}
                       </td>
                       <td className="py-4 px-4 text-right font-mono font-bold text-slate-900">
-                        ${expense.amount.toFixed(2)}
+                        {formatCurrency(expense.amount)}
                       </td>
                       <td className="py-4 px-4 whitespace-nowrap text-xs flex items-center gap-1.5 mt-2.5">
                         <CreditCard className="w-3.5 h-3.5 text-slate-400" />
@@ -1233,7 +1382,7 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Expense Amount ($) *</label>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Expense Amount *</label>
                   <input
                     type="number"
                     step="0.01"
@@ -1245,6 +1394,93 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
                     className="px-3 py-2 w-full text-sm font-mono font-semibold border border-slate-200 rounded-lg focus:ring-1 focus:ring-rose-500 focus:outline-none"
                   />
                 </div>
+              </div>
+
+              {/* VAT ACCOUNTING CONFIGURATION */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={formHasVat}
+                      onChange={(e) => setFormHasVat(e.target.checked)}
+                      className="w-4 h-4 text-indigo-600 rounded focus:ring-indigo-500 border-slate-300"
+                    />
+                    <span className="text-xs font-bold text-slate-700">Separate Input VAT Receivable (1400)</span>
+                  </label>
+                  {formHasVat && (
+                    <span className="text-[10px] font-bold text-indigo-700 font-mono bg-indigo-100/60 px-2 py-0.5 rounded">
+                      Account 1400 Active
+                    </span>
+                  )}
+                </div>
+
+                {formHasVat && (
+                  <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-200/60">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-500 uppercase mb-1">VAT Rate %</label>
+                      <select
+                        value={formTaxRatePercent}
+                        onChange={(e) => setFormTaxRatePercent(parseFloat(e.target.value) || 0)}
+                        className="px-3 py-1.5 w-full text-xs font-mono font-semibold border border-slate-200 rounded-lg bg-white focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                      >
+                        <option value={15}>15% (Standard VAT)</option>
+                        <option value={5}>5% (Reduced VAT)</option>
+                        <option value={0}>0% (Zero Rated)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-500 uppercase mb-1">Calculation Mode</label>
+                      <select
+                        value={formIsVatInclusive ? 'inclusive' : 'exclusive'}
+                        onChange={(e) => setFormIsVatInclusive(e.target.value === 'inclusive')}
+                        className="px-3 py-1.5 w-full text-xs font-semibold border border-slate-200 rounded-lg bg-white focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                      >
+                        <option value="inclusive">Tax Inclusive (Gross Entered)</option>
+                        <option value="exclusive">Tax Exclusive (Net Entered)</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+
+                {/* VAT LIVE BREAKDOWN BOX */}
+                {formHasVat && formAmount && parseFloat(formAmount) > 0 && (
+                  <div className="bg-white border border-indigo-100 rounded-lg p-3 text-xs space-y-1 font-mono">
+                    {(() => {
+                      const amountInput = parseFloat(formAmount) || 0;
+                      const rate = formTaxRatePercent;
+                      let net = amountInput;
+                      let vat = 0;
+                      let gross = amountInput;
+                      if (formIsVatInclusive) {
+                        gross = amountInput;
+                        net = parseFloat((amountInput / (1 + rate / 100)).toFixed(2));
+                        vat = parseFloat((gross - net).toFixed(2));
+                      } else {
+                        net = amountInput;
+                        vat = parseFloat((amountInput * (rate / 100)).toFixed(2));
+                        gross = parseFloat((net + vat).toFixed(2));
+                      }
+                      return (
+                        <>
+                          <div className="flex justify-between text-slate-600">
+                            <span>Operating Expense (Net):</span>
+                            <span className="font-bold text-slate-900">{formatCurrency(net)}</span>
+                          </div>
+                          <div className="flex justify-between text-indigo-700 font-semibold">
+                            <span>Input VAT Receivable (1400):</span>
+                            <span className="font-bold">{formatCurrency(vat)}</span>
+                          </div>
+                          <div className="flex justify-between border-t border-slate-100 pt-1 font-bold text-slate-900">
+                            <span>Total Cash / AP Outlay:</span>
+                            <span className="text-emerald-600">{formatCurrency(gross)}</span>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1300,7 +1536,7 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
                 <div className="p-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-lg flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
                   <div>
-                    <span className="font-semibold">Cash Ledger Synchronization:</span> Recording this transaction as Cash will automatically allocate and reflect a corresponding <strong>outflow</strong> of ${formAmount || '0.00'} inside the corporate Cash Ledger.
+                    <span className="font-semibold">Cash Ledger Synchronization:</span> Recording this transaction as Cash will automatically allocate and reflect a corresponding <strong>outflow</strong> of {formatCurrency(parseFloat(formAmount) || 0)} inside the corporate Cash Ledger.
                   </div>
                 </div>
               )}
@@ -1434,7 +1670,7 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
               <div className="flex items-center justify-between bg-slate-50 p-4 rounded-xl border border-slate-200/60">
                 <div>
                   <span className="text-xs text-slate-400 font-semibold block uppercase">Total Amount</span>
-                  <span className="text-3xl font-mono font-extrabold text-slate-950">${viewingExpense.amount.toFixed(2)}</span>
+                  <span className="text-3xl font-mono font-extrabold text-slate-950">{formatCurrency(viewingExpense.amount)}</span>
                 </div>
                 <div className="text-right">
                   <span className="text-xs text-slate-400 font-semibold block uppercase">Status</span>
@@ -1449,6 +1685,26 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
                   )}
                 </div>
               </div>
+
+              {/* VAT Breakdown if present */}
+              {((viewingExpense.taxAmount || 0) > 0 || (viewingExpense.vatAmount || 0) > 0) && (
+                <div className="bg-indigo-50/50 border border-indigo-150 rounded-xl p-3 text-xs space-y-1.5 font-mono">
+                  <div className="flex justify-between text-slate-600">
+                    <span>Operating Expense (Net):</span>
+                    <span className="font-bold text-slate-900">
+                      {formatCurrency(viewingExpense.subtotal !== undefined ? viewingExpense.subtotal : (viewingExpense.amount - (viewingExpense.taxAmount || viewingExpense.vatAmount || 0)))}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-indigo-700 font-semibold">
+                    <span>Input VAT Receivable (1400) [{viewingExpense.taxRatePercent || 15}%]:</span>
+                    <span className="font-bold">{formatCurrency(viewingExpense.taxAmount || viewingExpense.vatAmount || 0)}</span>
+                  </div>
+                  <div className="flex justify-between border-t border-indigo-100 pt-1 font-bold text-slate-900">
+                    <span>Gross Cash Outlay:</span>
+                    <span className="text-emerald-700">{formatCurrency(viewingExpense.amount)}</span>
+                  </div>
+                </div>
+              )}
 
               {/* Key fields */}
               <div className="grid grid-cols-2 gap-x-4 gap-y-3 pt-2">
@@ -1537,7 +1793,7 @@ export default function ExpenseManagement({ userRole, permissions }: ExpenseMana
                     <div><span className="font-bold">Expense ID:</span> {voidConfirmationExpense.id}</div>
                     <div><span className="font-bold">Category:</span> {voidConfirmationExpense.category}</div>
                     <div><span className="font-bold">Vendor:</span> {voidConfirmationExpense.vendor}</div>
-                    <div><span className="font-bold">Amount:</span> ${voidConfirmationExpense.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                    <div><span className="font-bold">Amount:</span> {formatCurrency(voidConfirmationExpense.amount)}</div>
                   </div>
                 </div>
               </div>

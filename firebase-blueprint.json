@@ -100,7 +100,23 @@
         "email": { "type": "string" },
         "website": { "type": "string" },
         "logo": { "type": "string" },
-        "taxRatePercent": { "type": "number" }
+        "taxRatePercent": { "type": "number" },
+        "currency": { "type": "string" },
+        "timezone": { "type": "string" },
+        "businessType": { "type": "string" },
+        "country": { "type": "string" },
+        "accentColor": { "type": "string" },
+        "theme": { "type": "string" },
+        "dateFormat": { "type": "string" },
+        "numberFormat": { "type": "string" },
+        "language": { "type": "string" },
+        "currencyName": { "type": "string" },
+        "currencyCode": { "type": "string" },
+        "currencySymbol": { "type": "string" },
+        "currencyPosition": { "type": "string" },
+        "thousandsSeparator": { "type": "string" },
+        "decimalSeparator": { "type": "string" },
+        "decimalPrecision": { "type": "number" }
       },
       "required": ["name", "taxRegistrationId", "address", "phone"]
     },
@@ -163,9 +179,18 @@
         "productName": { "type": "string" },
         "quantity": { "type": "number" },
         "purchasePrice": { "type": "number" },
+        "subtotal": { "type": "number" },
+        "vatAmount": { "type": "number" },
+        "taxAmount": { "type": "number" },
+        "taxRatePercent": { "type": "number" },
         "totalAmount": { "type": "number" },
         "paymentType": { "type": "string", "enum": ["Cash", "Credit"] },
-        "purchaseDate": { "type": "string" }
+        "purchaseDate": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "discountAmount": { "type": "number" },
+        "supplierSnapshot": { "type": "object" },
+        "productSnapshot": { "type": "object" },
+        "companySnapshot": { "type": "object" }
       },
       "required": ["id", "supplierId", "supplierName", "productId", "productName", "quantity", "purchasePrice", "totalAmount", "paymentType", "purchaseDate"]
     },
@@ -281,6 +306,10 @@
         "vendor": { "type": "string" },
         "description": { "type": "string" },
         "amount": { "type": "number" },
+        "subtotal": { "type": "number" },
+        "taxAmount": { "type": "number" },
+        "vatAmount": { "type": "number" },
+        "taxRatePercent": { "type": "number" },
         "paymentMethod": { "type": "string" },
         "referenceNumber": { "type": "string" },
         "status": { "type": "string", "enum": ["active", "void"] },
@@ -341,6 +370,7 @@
         "status": { "type": "string", "enum": ["active", "inactive"] },
         "isSystem": { "type": "boolean" },
         "editable": { "type": "boolean" },
+        "systemRole": { "type": "string" },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
@@ -372,7 +402,7 @@
         "branchId": { "type": "string" },
         "fiscalYear": { "type": "integer" },
         "accountingPeriod": { "type": "string" },
-        "sourceModule": { "type": "string", "enum": ["SALES", "PROCUREMENT", "EXPENSE", "CUSTOMER_PAYMENT", "SUPPLIER_PAYMENT", "CAPITAL", "OPENING_BALANCE", "STOCK_ADJUSTMENT", "MANUAL_JOURNAL", "YEAR_CLOSING", "SYSTEM"] },
+        "sourceModule": { "type": "string", "enum": ["SALES", "PROCUREMENT", "EXPENSE", "CUSTOMER_PAYMENT", "SUPPLIER_PAYMENT", "CAPITAL", "OPENING_BALANCE", "STOCK_ADJUSTMENT", "MANUAL_JOURNAL", "YEAR_CLOSING", "SYSTEM", "TAX"] },
         "postingStatus": { "type": "string", "enum": ["POSTED", "REVERSED", "PENDING", "FAILED", "LOCKED"] },
         "currency": { "type": "string" },
         "exchangeRate": { "type": "number" },
@@ -415,9 +445,51 @@
         "validationResult": { "type": "object" }
       },
       "required": ["id", "timestamp", "operatorUid", "operatorEmail", "operationType", "restoreMode", "affectedModules", "documentCounts", "status", "duration", "validationResult"]
+    },
+    "SequenceCounter": {
+      "title": "SequenceCounter",
+      "description": "Dedicated sequence counter document per voucher type.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "prefix": { "type": "string" },
+        "lastSequence": { "type": "integer" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "prefix", "lastSequence", "updatedAt"]
+    },
+    "Unit": {
+      "title": "Unit",
+      "description": "Master unit of measurement definition.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "unitName": { "type": "string" },
+        "unitCode": { "type": "string" },
+        "symbol": { "type": "string" },
+        "category": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "inactive", "archived"] },
+        "description": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "isSystem": { "type": "boolean" },
+        "isDefault": { "type": "boolean" },
+        "sortOrder": { "type": "number" },
+        "allowDecimal": { "type": "boolean" },
+        "decimalPlaces": { "type": "number" },
+        "badgeColor": { "type": "string" },
+        "icon": { "type": "string" },
+        "translations": { "type": "object" }
+      },
+      "required": ["id", "unitName", "unitCode", "category", "status", "isSystem", "allowDecimal", "decimalPlaces"]
     }
   },
   "firestore": {
+    "units": {
+      "schema": "Unit",
+      "description": "Store master units of measurement for enterprise inventory and trading operations."
+    },
     "users": {
       "schema": "User",
       "description": "User profiles tracking Role-Based Access Control permissions."
@@ -501,6 +573,10 @@
     "restoreAuditTrail": {
       "schema": "RestoreAuditTrail",
       "description": "Store backup restoration result history and metadata verification status."
+    },
+    "sequences": {
+      "schema": "SequenceCounter",
+      "description": "Store isolated posting sequence counter documents per voucher type."
     }
   }
 }

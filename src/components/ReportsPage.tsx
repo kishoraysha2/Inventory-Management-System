@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { formatCurrency } from '../utils/currencyFormatter';
+import { applyEnterprisePdfFont, setPdfFont, formatPdfText, formatPdfCurrency, safePdfString } from '../utils/pdfHelper';
 import { calculateCustomerLedger, calculateSupplierLedger, isVoidStatus, isInactiveStatus } from '../lib/utils';
 import { 
   Calendar, 
@@ -39,6 +41,10 @@ import { Sale, Customer, Product, Supplier, getNormalizedItems, getSaleSummary, 
 import { INITIAL_CHART_OF_ACCOUNTS } from '../data';
 import TaxInvoiceModal from './TaxInvoiceModal';
 import { PurchaseDetailModal } from './PurchaseDetailModal';
+import VatSettlementModal from './VatSettlementModal';
+import { ProfitLossView } from '../features/reports/components/ProfitLossView';
+import { BalanceSheetView } from '../features/reports/components/BalanceSheetView';
+import { ExpenseAnalyticsView } from '../features/reports/components/ExpenseAnalyticsView';
 
 import { AppPermissions, usePermission, UserRole } from '../hooks/usePermission';
 
@@ -48,6 +54,24 @@ interface ReportsPageProps {
   userRole?: UserRole;
   permissions?: AppPermissions;
 }
+
+// --- Helper functions for dynamic local dates ---
+const getTodayStr = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const getDaysAgoStr = (days: number) => {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 export default function ReportsPage({ userRole, permissions: propPermissions }: ReportsPageProps = {}) {
   const { permissions: hookPermissions } = usePermission({ role: userRole || 'viewer' });
@@ -95,6 +119,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
   const [salesDatePreset, setSalesDatePreset] = useState<string>('all_time');
   const [salesActiveSubTab, setSalesActiveSubTab] = useState<'register' | 'analytics'>('register');
   const [selectedSaleForInvoice, setSelectedSaleForInvoice] = useState<Sale | null>(null);
+  const [isVatSettlementOpen, setIsVatSettlementOpen] = useState<boolean>(false);
 
   // --- Enterprise Purchase Register Filters & States ---
   const [purchasesSupplierFilter, setPurchasesSupplierFilter] = useState<string>('');
@@ -236,56 +261,90 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
     });
   }, [customersState, sales, customerPayments]);
 
-  // --- Date Range Constants & States (Reference date 2026-06-01) ---
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
+  // Auto-select first customer & supplier for statements if not selected
+  useEffect(() => {
+    if (customers.length > 0 && !selectedCustomerId) {
+      setSelectedCustomerId(customers[0].id);
+    }
+  }, [customers, selectedCustomerId]);
+
+  useEffect(() => {
+    if (suppliers.length > 0 && !selectedSupplierId) {
+      setSelectedSupplierId(suppliers[0].id);
+    }
+  }, [suppliers, selectedSupplierId]);
+
+  // --- Date Range Constants & States (Dynamic default: 30 days before Today -> Today) ---
+  const [startDate, setStartDate] = useState(() => getDaysAgoStr(30));
+  const [endDate, setEndDate] = useState(() => getTodayStr());
   const [searchQuery, setSearchQuery] = useState('');
 
   // Debugging log for Reports Sales Data
   console.log("Reports Sales Data:", sales);
 
   const setQuickRange = (range: '30_days' | '90_days' | 'this_year' | 'all_time') => {
-    const end = "2026-06-01";
-    let start = "2026-05-01";
+    const today = getTodayStr();
     if (range === '90_days') {
-      start = "2026-03-01";
-      setStartDate(start);
-      setEndDate(end);
+      setStartDate(getDaysAgoStr(90));
+      setEndDate(today);
     } else if (range === 'this_year') {
-      start = "2026-01-01";
-      setStartDate(start);
-      setEndDate(end);
+      const currentYear = new Date().getFullYear();
+      setStartDate(`${currentYear}-01-01`);
+      setEndDate(today);
     } else if (range === 'all_time') {
       setStartDate("");
       setEndDate("");
     } else {
-      setStartDate(start);
-      setEndDate(end);
+      setStartDate(getDaysAgoStr(30));
+      setEndDate(today);
     }
   };
 
   // --- Enterprise Sales Register Date Preset Handler ---
   const handleSalesDatePresetChange = (preset: string) => {
     setSalesDatePreset(preset);
-    const end = "2026-06-01"; // Reference today's date
+    const today = getTodayStr();
     if (preset === 'today') {
-      setStartDate("2026-06-01");
-      setEndDate("2026-06-01");
+      setStartDate(today);
+      setEndDate(today);
     } else if (preset === 'yesterday') {
-      setStartDate("2026-05-31");
-      setEndDate("2026-05-31");
+      const yest = getDaysAgoStr(1);
+      setStartDate(yest);
+      setEndDate(yest);
     } else if (preset === 'this_week') {
-      setStartDate("2026-05-25");
-      setEndDate("2026-06-01");
+      const now = new Date();
+      const dayOfWeek = now.getDay();
+      const diffToMon = (dayOfWeek === 0 ? 6 : dayOfWeek - 1);
+      const monday = new Date(now);
+      monday.setDate(now.getDate() - diffToMon);
+      const sunday = new Date(monday);
+      sunday.setDate(monday.getDate() + 6);
+      
+      const monStr = `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`;
+      const sunStr = `${sunday.getFullYear()}-${String(sunday.getMonth() + 1).padStart(2, '0')}-${String(sunday.getDate()).padStart(2, '0')}`;
+      setStartDate(monStr);
+      setEndDate(sunStr);
     } else if (preset === 'this_month') {
-      setStartDate("2026-06-01");
-      setEndDate("2026-06-30");
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, '0');
+      const lastDay = new Date(year, now.getMonth() + 1, 0).getDate();
+      setStartDate(`${year}-${month}-01`);
+      setEndDate(`${year}-${month}-${String(lastDay).padStart(2, '0')}`);
     } else if (preset === 'this_quarter') {
-      setStartDate("2026-04-01");
-      setEndDate("2026-06-30");
+      const now = new Date();
+      const year = now.getFullYear();
+      const quarter = Math.floor(now.getMonth() / 3);
+      const startMonth = String(quarter * 3 + 1).padStart(2, '0');
+      const endMonthNum = quarter * 3 + 3;
+      const endMonth = String(endMonthNum).padStart(2, '0');
+      const lastDay = new Date(year, endMonthNum, 0).getDate();
+      setStartDate(`${year}-${startMonth}-01`);
+      setEndDate(`${year}-${endMonth}-${String(lastDay).padStart(2, '0')}`);
     } else if (preset === 'this_year') {
-      setStartDate("2026-01-01");
-      setEndDate("2026-12-31");
+      const year = new Date().getFullYear();
+      setStartDate(`${year}-01-01`);
+      setEndDate(`${year}-12-31`);
     } else if (preset === 'all_time') {
       setStartDate("");
       setEndDate("");
@@ -547,7 +606,8 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
       totalPurchases += amt;
       quantityPurchased += p.quantity || 0;
       
-      const vat = p.vatAmount ?? (amt * 15 / 115);
+      const pRate = p.taxRatePercent ?? companyProfile?.taxRatePercent ?? 15;
+      const vat = p.vatAmount ?? (amt - (p.subtotal ?? (amt / (1 + pRate / 100))));
       totalVAT += vat;
       totalDiscount += p.discountAmount ?? 0;
 
@@ -653,7 +713,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
   }, [activeRegisterPurchases, products]);
 
   // Local settings for VAT calculation model
-  const defaultVatRate = 15; // standard VAT percentage
+  const defaultVatRate = companyProfile?.taxRatePercent ?? 15; // dynamic business profile VAT percentage
 
   // --- Real-Time Sync Streams ---
   useEffect(() => {
@@ -860,43 +920,65 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
   }, [coa, selectedGlAccountId]);
 
   const applyGlDatePreset = (preset: string) => {
-    // Current local date in Houston/USA: 2026-07-15
+    const today = getTodayStr();
+    const now = new Date();
     switch (preset) {
       case 'today':
-        setStartDate("2026-07-15");
-        setEndDate("2026-07-15");
+        setStartDate(today);
+        setEndDate(today);
         break;
-      case 'yesterday':
-        setStartDate("2026-07-14");
-        setEndDate("2026-07-14");
+      case 'yesterday': {
+        const yest = getDaysAgoStr(1);
+        setStartDate(yest);
+        setEndDate(yest);
         break;
-      case 'this_week':
-        setStartDate("2026-07-13"); // Monday of current week
-        setEndDate("2026-07-19");   // Sunday of current week
+      }
+      case 'this_week': {
+        const dayOfWeek = now.getDay();
+        const diffToMon = (dayOfWeek === 0 ? 6 : dayOfWeek - 1);
+        const monday = new Date(now);
+        monday.setDate(now.getDate() - diffToMon);
+        const sunday = new Date(monday);
+        sunday.setDate(monday.getDate() + 6);
+        
+        const monStr = `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`;
+        const sunStr = `${sunday.getFullYear()}-${String(sunday.getMonth() + 1).padStart(2, '0')}-${String(sunday.getDate()).padStart(2, '0')}`;
+        setStartDate(monStr);
+        setEndDate(sunStr);
         break;
-      case 'this_month':
-        setStartDate("2026-07-01");
-        setEndDate("2026-07-31");
+      }
+      case 'this_month': {
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const lastDay = new Date(year, now.getMonth() + 1, 0).getDate();
+        setStartDate(`${year}-${month}-01`);
+        setEndDate(`${year}-${month}-${String(lastDay).padStart(2, '0')}`);
         break;
-      case 'this_quarter':
-        setStartDate("2026-07-01");
-        setEndDate("2026-09-30");
+      }
+      case 'this_quarter': {
+        const year = now.getFullYear();
+        const quarter = Math.floor(now.getMonth() / 3);
+        const startMonth = String(quarter * 3 + 1).padStart(2, '0');
+        const endMonthNum = quarter * 3 + 3;
+        const endMonth = String(endMonthNum).padStart(2, '0');
+        const lastDay = new Date(year, endMonthNum, 0).getDate();
+        setStartDate(`${year}-${startMonth}-01`);
+        setEndDate(`${year}-${endMonth}-${String(lastDay).padStart(2, '0')}`);
         break;
+      }
       case 'this_year':
-        setStartDate("2026-01-01");
-        setEndDate("2026-12-31");
+      case 'fiscal_year': {
+        const year = now.getFullYear();
+        setStartDate(`${year}-01-01`);
+        setEndDate(`${year}-12-31`);
         break;
-      case 'fiscal_year':
-        setStartDate("2026-01-01");
-        setEndDate("2026-12-31");
-        break;
+      }
       case 'custom':
-        // Keep the custom selection active
         break;
       case 'all_time':
       default:
-        setStartDate("2020-01-01");
-        setEndDate("2026-12-31");
+        setStartDate("");
+        setEndDate("");
         break;
     }
   };
@@ -1342,7 +1424,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
     };
   }, [coa, ledgerBalancesReport]);
 
-  // 7. Customer Statement Report Math
+  // 7. Customer Statement Report Math (GL-Driven Accounts Receivable Engine)
   const currentCustomer = useMemo(() => {
     return customers.find(c => c.id === selectedCustomerId);
   }, [customers, selectedCustomerId]);
@@ -1355,57 +1437,124 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
   const customerLedgerEntries = useMemo(() => {
     if (!selectedCustomerId) return [];
 
-    // 1. Credit Sales
-    const customerSales = sales.filter(s => 
-      s.customerId === selectedCustomerId && 
-      s.paymentType?.toLowerCase() === 'credit'
-    ).map(s => {
-      const isVoid = isVoidStatus(s.status);
-      const isAdjustment = s.status?.toLowerCase() === 'adjustment';
-      const txType = isAdjustment ? 'Adjustment' : (isVoid ? 'Void Sale' : 'Sale');
+    // 1. Check if GL entries exist for Account 1200 (Accounts Receivable) for this customer
+    const arGlEntries = ledgerEntries.filter(entry => {
+      if (entry.postingStatus && entry.postingStatus !== 'POSTED') return false;
+      const hasArLine = entry.lines?.some(l => l.accountCode === '1200');
+      if (!hasArLine) return false;
 
-      return {
-        date: s.saleDate,
-        ref: s.id,
-        invoiceNumber: s.invoiceNumber || s.id.substring(s.id.length - 8).toUpperCase(),
-        receiptNumber: '-',
-        type: txType,
-        description: getSaleDescription(s),
-        debit: s.totalAmount,
-        credit: 0,
-        status: s.status || 'Active'
-      };
+      // Primary: Direct document-level customerId metadata check
+      if (entry.customerId) {
+        return entry.customerId === selectedCustomerId;
+      }
+
+      // Fallback 1: Source record lookup
+      const sale = sales.find(s => s.id === entry.createdFrom);
+      if (sale && sale.customerId === selectedCustomerId) return true;
+
+      const payment = customerPayments.find(p => p.id === entry.createdFrom);
+      if (payment && payment.customerId === selectedCustomerId) return true;
+
+      // Fallback 2: Narration parsing
+      if (entry.narration && currentCustomer?.name && entry.narration.toLowerCase().includes(currentCustomer.name.toLowerCase())) {
+        return true;
+      }
+      return false;
     });
 
-    // 2. Customer Payments
-    const paymentsForUser = customerPayments.filter(p => 
-      p.customerId === selectedCustomerId
-    ).map(p => {
-      const isVoid = isVoidStatus(p.status);
-      const isAdjustment = p.status?.toLowerCase() === 'adjustment';
-      const txType = isAdjustment ? 'Adjustment' : (isVoid ? 'Void Payment' : 'Payment');
+    let combinedEntries: Array<{
+      date: string;
+      ref: string;
+      invoiceNumber: string;
+      receiptNumber: string;
+      type: string;
+      description: string;
+      debit: number;
+      credit: number;
+      status: string;
+    }> = [];
 
-      return {
-        date: p.paymentDate,
-        ref: p.id,
-        invoiceNumber: '-',
-        receiptNumber: p.receiptNumber || '-',
-        type: txType,
-        description: getPaymentDescription(p),
-        debit: 0,
-        credit: p.amountPaid,
-        status: p.status || 'Active'
-      };
-    });
+    if (arGlEntries.length > 0) {
+      combinedEntries = arGlEntries.map(entry => {
+        const arLine = entry.lines.find(l => l.accountCode === '1200')!;
+        const sale = sales.find(s => s.id === entry.createdFrom);
+        const payment = customerPayments.find(p => p.id === entry.createdFrom);
 
-    // Combine and sort chronologically (oldest first)
-    const combined = [...customerSales, ...paymentsForUser].sort((a, b) => 
-      new Date(a.date).getTime() - new Date(b.date).getTime()
-    );
+        let type = 'Journal Entry';
+        if (entry.isReversal) {
+          type = 'Reversal Journal';
+        } else if (entry.sourceModule === 'SALES') {
+          type = 'Sale Invoice';
+        } else if (entry.sourceModule === 'CUSTOMER_PAYMENT') {
+          type = 'Customer Payment';
+        } else if (entry.sourceModule === 'MANUAL_JOURNAL') {
+          type = 'Manual Journal';
+        }
 
-    // Calculate Running Balance sequentially
+        return {
+          date: entry.postingDate || entry.createdAt,
+          ref: entry.postingNumber || entry.id,
+          invoiceNumber: sale?.invoiceNumber || (sale ? sale.id.substring(sale.id.length - 8).toUpperCase() : '-'),
+          receiptNumber: payment?.receiptNumber || '-',
+          type,
+          description: entry.narration || (entry.sourceModule === 'SALES' ? (sale ? getSaleDescription(sale) : 'Credit Sale Invoice') : (payment ? getPaymentDescription(payment) : 'Customer Settlement')),
+          debit: arLine.debit || 0,
+          credit: arLine.credit || 0,
+          status: entry.postingStatus || 'POSTED'
+        };
+      });
+    } else {
+      // Operational fallback if GL postings not present yet
+      const customerSales = sales.filter(s => 
+        s.customerId === selectedCustomerId && 
+        s.paymentType?.toLowerCase() === 'credit'
+      ).map(s => {
+        const isVoid = isVoidStatus(s.status);
+        const isAdjustment = s.status?.toLowerCase() === 'adjustment';
+        const txType = isAdjustment ? 'Adjustment' : (isVoid ? 'Void Sale' : 'Sale Invoice');
+
+        return {
+          date: s.saleDate,
+          ref: s.id,
+          invoiceNumber: s.invoiceNumber || s.id.substring(s.id.length - 8).toUpperCase(),
+          receiptNumber: '-',
+          type: txType,
+          description: getSaleDescription(s),
+          debit: isVoid ? 0 : s.totalAmount,
+          credit: isVoid ? s.totalAmount : 0,
+          status: s.status || 'Active'
+        };
+      });
+
+      const paymentsForUser = customerPayments.filter(p => 
+        p.customerId === selectedCustomerId
+      ).map(p => {
+        const isVoid = isVoidStatus(p.status);
+        const isAdjustment = p.status?.toLowerCase() === 'adjustment';
+        const txType = isAdjustment ? 'Adjustment' : (isVoid ? 'Void Payment' : 'Customer Payment');
+
+        return {
+          date: p.paymentDate,
+          ref: p.id,
+          invoiceNumber: '-',
+          receiptNumber: p.receiptNumber || '-',
+          type: txType,
+          description: getPaymentDescription(p),
+          debit: isVoid ? p.amountPaid : 0,
+          credit: isVoid ? 0 : p.amountPaid,
+          status: p.status || 'Active'
+        };
+      });
+
+      combinedEntries = [...customerSales, ...paymentsForUser];
+    }
+
+    // Sort chronologically (oldest first)
+    combinedEntries.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    // Calculate sequential Running Balance (Debit increases AR, Credit decreases AR)
     let currentBal = initialOpeningBalance;
-    return combined.map(entry => {
+    return combinedEntries.map(entry => {
       const isVoid = isVoidStatus(entry.status);
       const effectiveDebit = isVoid ? 0 : entry.debit;
       const effectiveCredit = isVoid ? 0 : entry.credit;
@@ -1415,7 +1564,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
         runningBalance: currentBal
       };
     });
-  }, [selectedCustomerId, sales, customerPayments, initialOpeningBalance]);
+  }, [selectedCustomerId, ledgerEntries, sales, customerPayments, initialOpeningBalance, currentCustomer]);
 
   const totalSalesDebit = useMemo(() => {
     return customerLedgerEntries.reduce((sum, item) => sum + (isVoidStatus(item.status) ? 0 : item.debit), 0);
@@ -1430,7 +1579,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
   }, [initialOpeningBalance, totalSalesDebit, totalPaymentsCredit]);
 
   const salesInvoicesCount = useMemo(() => {
-    return customerLedgerEntries.filter(item => item.type === 'Sale').length;
+    return customerLedgerEntries.filter(item => item.type === 'Sale Invoice' || item.type === 'Sale').length;
   }, [customerLedgerEntries]);
 
   const latestTxDate = useMemo(() => {
@@ -1449,7 +1598,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
     );
   }, [customerLedgerEntries, searchQuery]);
 
-  // --- 8. Supplier Statement Report Math ---
+  // --- 8. Supplier Statement Report Math (GL-Driven Accounts Payable Engine) ---
   const currentSupplier = useMemo(() => {
     return suppliers.find(s => s.id === selectedSupplierId);
   }, [suppliers, selectedSupplierId]);
@@ -1462,50 +1611,116 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
   const supplierLedgerEntries = useMemo(() => {
     if (!selectedSupplierId) return [];
 
-    // 1. Credit Purchases (Credits - increases our liability)
-    const supplierPurchases = purchases.filter(p =>
-      p.supplierId === selectedSupplierId &&
-      !isVoidStatus(p.status) &&
-      p.paymentType?.toLowerCase() === 'credit'
-    ).map(p => ({
-      date: p.purchaseDate || p.createdDate,
-      ref: p.id,
-      type: 'Purchase Invoice',
-      description: p.productName ? `Procured x${p.quantity} "${p.productName}"` : `Bulk Procured Items`,
-      debit: 0,
-      credit: Number(p.totalAmount) || 0,
-      status: p.status || 'Active'
-    }));
+    // 1. Check if GL entries exist for Account 2100 (Accounts Payable) for this supplier
+    const apGlEntries = ledgerEntries.filter(entry => {
+      if (entry.postingStatus && entry.postingStatus !== 'POSTED') return false;
+      const hasApLine = entry.lines?.some(l => l.accountCode === '2100');
+      if (!hasApLine) return false;
 
-    // 2. Supplier Payments (Debits - decreases our liability)
-    const paymentsForSupplier = supplierPayments.filter(sp =>
-      sp.supplierId === selectedSupplierId &&
-      !isVoidStatus(sp.status)
-    ).map(sp => ({
-      date: sp.paymentDate,
-      ref: sp.id,
-      type: 'Supplier Payment',
-      description: sp.notes ? `Payment via ${sp.notes}` : 'Supplier payment settlement',
-      debit: Number(sp.amountPaid) || 0,
-      credit: 0,
-      status: sp.status || 'Active'
-    }));
+      // Primary: Direct document-level supplierId metadata check
+      if (entry.supplierId) {
+        return entry.supplierId === selectedSupplierId;
+      }
 
-    // Combine and sort chronologically (oldest first)
-    const combined = [...supplierPurchases, ...paymentsForSupplier].sort((a, b) =>
-      new Date(a.date).getTime() - new Date(b.date).getTime()
-    );
+      // Fallback 1: Source record lookup
+      const purchase = purchases.find(p => p.id === entry.createdFrom);
+      if (purchase && purchase.supplierId === selectedSupplierId) return true;
 
-    // Calculate Running Balance sequentially
+      const payment = supplierPayments.find(sp => sp.id === entry.createdFrom);
+      if (payment && payment.supplierId === selectedSupplierId) return true;
+
+      // Fallback 2: Narration parsing
+      if (entry.narration && currentSupplier?.name && entry.narration.toLowerCase().includes(currentSupplier.name.toLowerCase())) {
+        return true;
+      }
+      return false;
+    });
+
+    let combinedEntries: Array<{
+      date: string;
+      ref: string;
+      type: string;
+      description: string;
+      debit: number;
+      credit: number;
+      status: string;
+    }> = [];
+
+    if (apGlEntries.length > 0) {
+      combinedEntries = apGlEntries.map(entry => {
+        const apLine = entry.lines.find(l => l.accountCode === '2100')!;
+        const purchase = purchases.find(p => p.id === entry.createdFrom);
+        const payment = supplierPayments.find(sp => sp.id === entry.createdFrom);
+
+        let type = 'Journal Entry';
+        if (entry.isReversal) {
+          type = 'Reversal Journal';
+        } else if (entry.sourceModule === 'PROCUREMENT') {
+          type = 'Purchase Invoice';
+        } else if (entry.sourceModule === 'SUPPLIER_PAYMENT') {
+          type = 'Supplier Payment';
+        } else if (entry.sourceModule === 'MANUAL_JOURNAL') {
+          type = 'Manual Journal';
+        }
+
+        return {
+          date: entry.postingDate || entry.createdAt,
+          ref: entry.postingNumber || entry.id,
+          type,
+          description: entry.narration || (entry.sourceModule === 'PROCUREMENT' ? (purchase ? (purchase.productName ? `Procured x${purchase.quantity} "${purchase.productName}"` : 'Bulk Purchase Invoice') : 'Credit Purchase') : (payment ? (payment.notes ? `Payment via ${payment.notes}` : 'Supplier Settlement') : 'Supplier Payment')),
+          debit: apLine.debit || 0,
+          credit: apLine.credit || 0,
+          status: entry.postingStatus || 'POSTED'
+        };
+      });
+    } else {
+      // Operational fallback if GL postings not present yet
+      const supplierPurchases = purchases.filter(p =>
+        p.supplierId === selectedSupplierId &&
+        !isVoidStatus(p.status) &&
+        p.paymentType?.toLowerCase() === 'credit'
+      ).map(p => ({
+        date: p.purchaseDate || p.createdDate,
+        ref: p.id,
+        type: 'Purchase Invoice',
+        description: p.productName ? `Procured x${p.quantity} "${p.productName}"` : `Bulk Procured Items`,
+        debit: 0,
+        credit: Number(p.totalAmount) || 0,
+        status: p.status || 'Active'
+      }));
+
+      const paymentsForSupplier = supplierPayments.filter(sp =>
+        sp.supplierId === selectedSupplierId &&
+        !isVoidStatus(sp.status)
+      ).map(sp => ({
+        date: sp.paymentDate,
+        ref: sp.id,
+        type: 'Supplier Payment',
+        description: sp.notes ? `Payment via ${sp.notes}` : 'Supplier payment settlement',
+        debit: Number(sp.amountPaid) || 0,
+        credit: 0,
+        status: sp.status || 'Active'
+      }));
+
+      combinedEntries = [...supplierPurchases, ...paymentsForSupplier];
+    }
+
+    // Sort chronologically (oldest first)
+    combinedEntries.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    // Calculate sequential Running Balance (Credit increases AP liability, Debit decreases AP liability)
     let currentBal = initialSupplierOpeningBalance;
-    return combined.map(entry => {
-      currentBal = currentBal + entry.credit - entry.debit;
+    return combinedEntries.map(entry => {
+      const isVoid = isVoidStatus(entry.status);
+      const effectiveDebit = isVoid ? 0 : entry.debit;
+      const effectiveCredit = isVoid ? 0 : entry.credit;
+      currentBal = currentBal + effectiveCredit - effectiveDebit;
       return {
         ...entry,
         runningBalance: currentBal
       };
     });
-  }, [selectedSupplierId, purchases, supplierPayments, initialSupplierOpeningBalance]);
+  }, [selectedSupplierId, ledgerEntries, purchases, supplierPayments, initialSupplierOpeningBalance, currentSupplier]);
 
   const totalSupplierPurchasesCredit = useMemo(() => {
     return supplierLedgerEntries.reduce((sum, item) => sum + item.credit, 0);
@@ -2195,7 +2410,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
         id: "diag-tb",
         category: "Critical",
         checkName: "Trial Balance Imbalance",
-        message: `General Ledger is out of balance by $${trialBalanceData.difference.toLocaleString(undefined, { minimumFractionDigits: 2 })}.`,
+        message: `General Ledger is out of balance by ${formatCurrency(trialBalanceData.difference)}.`,
         details: "The Trial Balance debit and credit columns contain unequal sums. Double-entry integrity has been violated.",
         remediation: "Verify manual journals and ensure all ledgerEntries have matching debits and credits."
       });
@@ -2206,8 +2421,8 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
         id: "diag-bs",
         category: "Critical",
         checkName: "Balance Sheet Out of Balance",
-        message: `Assets do not equal Liabilities + Equity (Variance: $${balanceSheetDifference.toLocaleString(undefined, { minimumFractionDigits: 2 })}).`,
-        details: `Assets sum to $${totalAssets.toLocaleString(undefined, { minimumFractionDigits: 2 })}. Liabilities + Equity sums to $${(totalLiabilities + totalEquity).toLocaleString(undefined, { minimumFractionDigits: 2 })}.`,
+        message: `Assets do not equal Liabilities + Equity (Variance: ${formatCurrency(balanceSheetDifference)}).`,
+        details: `Assets sum to ${formatCurrency(totalAssets)}. Liabilities + Equity sums to ${formatCurrency(totalLiabilities + totalEquity)}.`,
         remediation: "Audit classifications for any custom Chart of Accounts codes added directly to ledger transactions."
       });
     }
@@ -2217,7 +2432,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
         id: "diag-cf",
         category: "Warning",
         checkName: "Cash Flow Ending cash mismatch",
-        message: `Calculated ending cash is $${endingCashSum.toLocaleString(undefined, { minimumFractionDigits: 2 })} while Ledger Cash is $${glEndingCashSum.toLocaleString(undefined, { minimumFractionDigits: 2 })} (Variance: $${cashFlowDifference.toLocaleString(undefined, { minimumFractionDigits: 2 })}).`,
+        message: `Calculated ending cash is ${formatCurrency(endingCashSum)} while Ledger Cash is ${formatCurrency(glEndingCashSum)} (Variance: ${formatCurrency(cashFlowDifference)}).`,
         details: "Indicates some Cash journal lines cannot be matched against standard operating, investing, or financing counterparts.",
         remediation: "Audit any unusual manual adjustments or cash-to-cash/equity transfer postings."
       });
@@ -2229,7 +2444,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
           id: `diag-neg-asset-${acc.code}`,
           category: "Warning",
           checkName: `Negative Asset Balance: ${acc.name}`,
-          message: `Account ${acc.code} has a negative debit-normal balance of $${acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}.`,
+          message: `Account ${acc.code} has a negative debit-normal balance of ${formatCurrency(acc.balance)}.`,
           details: "Asset accounts are debit-normal; negative values indicate excessive credit postings or wrong classifications.",
           remediation: "Audit credit vouchers, refunds, or depreciation adjustments targeting this asset."
         });
@@ -2241,7 +2456,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
         id: "diag-neg-cash",
         category: "Critical",
         checkName: "Negative Bank Liquidity Balance",
-        message: `Aggregated cash & bank ledger accounts indicate overdraft: $${glEndingCashSum.toLocaleString(undefined, { minimumFractionDigits: 2 })}.`,
+        message: `Aggregated cash & bank ledger accounts indicate overdraft: ${formatCurrency(glEndingCashSum)}.`,
         details: "Cash reserves are negative, suggesting critical liquidity or solvency concerns.",
         remediation: "Review accounts receivable collections or secure short-term bridge financing."
       });
@@ -2253,7 +2468,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
           id: `diag-orphan-revenue-${acc.code}`,
           category: "Warning",
           checkName: `Atypical Revenue Debit: ${acc.name}`,
-          message: `Revenue account ${acc.code} has a debit-style balance of $${Math.abs(acc.balance).toLocaleString(undefined, { minimumFractionDigits: 2 })}.`,
+          message: `Revenue account ${acc.code} has a debit-style balance of ${formatCurrency(Math.abs(acc.balance))}.`,
           details: "Revenue accounts are credit-normal. Net debit balances represent heavy sales return volumes or journal errors.",
           remediation: "Check return vouchers or manual corrections on sales ledger accounts."
         });
@@ -2266,7 +2481,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
           id: `diag-orphan-expense-${acc.code}`,
           category: "Warning",
           checkName: `Atypical Expense Credit: ${acc.name}`,
-          message: `Expense account ${acc.code} has a credit-style balance of $${Math.abs(acc.balance).toLocaleString(undefined, { minimumFractionDigits: 2 })}.`,
+          message: `Expense account ${acc.code} has a credit-style balance of ${formatCurrency(Math.abs(acc.balance))}.`,
           details: "Expense accounts are debit-normal. Net credit balances indicate unclassified refunds or write-offs.",
           remediation: "Audit manual journal credits made to expense accounts."
         });
@@ -2392,8 +2607,8 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
         addIssue(
           'Critical',
           'Unbalanced Journal Entry',
-          `Voucher ${entry.postingNumber || entry.id} is out of balance by $${diff.toFixed(2)}`,
-          `Total Debits: $${sumDebits.toFixed(2)} | Total Credits: $${sumCredits.toFixed(2)}. In a double-entry accounting system, total debits must equal total credits.`,
+          `Voucher ${entry.postingNumber || entry.id} is out of balance by ${formatCurrency(diff)}`,
+          `Total Debits: ${formatCurrency(sumDebits)} | Total Credits: ${formatCurrency(sumCredits)}. In a double-entry accounting system, total debits must equal total credits.`,
           {
             sourceModule: entry.sourceModule,
             voucherType,
@@ -2426,7 +2641,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
           'Critical',
           'Missing Debit Leg',
           `Voucher ${entry.postingNumber || entry.id} contains only Credits.`,
-          `Total Credit: $${sumCredits.toFixed(2)} but total Debit is $0.00.`,
+          `Total Credit: ${formatCurrency(sumCredits)} but total Debit is $0.00.`,
           {
             sourceModule: entry.sourceModule,
             postingNumber: entry.postingNumber,
@@ -2442,7 +2657,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
           'Critical',
           'Missing Credit Leg',
           `Voucher ${entry.postingNumber || entry.id} contains only Debits.`,
-          `Total Debit: $${sumDebits.toFixed(2)} but total Credit is $0.00.`,
+          `Total Debit: ${formatCurrency(sumDebits)} but total Credit is $0.00.`,
           {
             sourceModule: entry.sourceModule,
             postingNumber: entry.postingNumber,
@@ -2592,7 +2807,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
         addIssue(
           'Warning',
           'Negative Inventory Asset Balance',
-          `Inventory account (${row.code}) has a negative ending balance: $${row.endingBalance.toFixed(2)}`,
+          `Inventory account (${row.code}) has a negative ending balance: ${formatCurrency(row.endingBalance)}`,
           `Asset balances are normally positive. A negative ending inventory balance implies an error in unit costing or stock ledger adjustments.`,
           {
             accountCode: row.code,
@@ -2605,7 +2820,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
         addIssue(
           'Warning',
           'Negative Cash Balance',
-          `Cash account (${row.code}) is overdrawn: $${row.endingBalance.toFixed(2)}`,
+          `Cash account (${row.code}) is overdrawn: ${formatCurrency(row.endingBalance)}`,
           `Cash is an asset with a normal Debit balance. A negative cash balance indicates a cash deficit or unregistered receipts.`,
           {
             accountCode: row.code,
@@ -2618,7 +2833,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
         addIssue(
           'Warning',
           'Negative Capital Balance',
-          `Equity / Capital account (${row.code}) has negative balance: $${row.endingBalance.toFixed(2)}`,
+          `Equity / Capital account (${row.code}) has negative balance: ${formatCurrency(row.endingBalance)}`,
           `Capital is normally a Credit balance. Negative capital implies accumulated deficits exceeding initial investments.`,
           {
             accountCode: row.code,
@@ -2712,9 +2927,10 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
     const glCashAcc = trialBalanceData.rows.find(r => r.code === '1010');
     const glCashBalance = glCashAcc ? glCashAcc.endingBalance : 0;
     const operationalCashBalance = cashLedger.reduce((sum, item) => {
+      if (isVoidStatus((item as any).status)) return sum;
       const type = (item.type || 'receipt').toLowerCase();
       const amt = Number(item.amount) || 0;
-      return type === 'receipt' || type === 'deposit' || type === 'in' ? sum + amt : sum - amt;
+      return type === 'receipt' || type === 'deposit' || type === 'in' || type === 'inflow' ? sum + amt : sum - amt;
     }, 0);
 
     // 2. Accounts Receivable (1200)
@@ -2818,7 +3034,8 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
           const prodMatch = products.find(p => p.id === item.productId);
           const sku = prodMatch?.sku || "N/A";
           const rowSubtotal = isVoid ? 0 : (item.quantity * item.unitPrice);
-          const rowTax = isVoid ? 0 : (rowSubtotal * 0.15);
+          const rowTaxRate = item.taxRatePercent ?? s.taxRatePercent ?? companyProfile?.taxRatePercent ?? 15;
+          const rowTax = isVoid ? 0 : (rowSubtotal * rowTaxRate / 100);
           const rowTotal = isVoid ? 0 : (rowSubtotal + rowTax);
           csvContent += `"${s.id}","${s.invoiceNumber || ''}","${s.customerId}","${s.customerName.replace(/"/g, '""')}","${customerType}","${sku}","${item.productName.replace(/"/g, '""')}",${item.quantity},${item.unitPrice},${rowSubtotal},${rowTax},${rowTotal},"${s.paymentType}","${s.status}","${s.saleDate}"\n`;
         });
@@ -2826,21 +3043,23 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
       csvContent += `\nSUMMARY,Total Audited Transactions,${filteredRegisterSales.length},Total Revenue,${registerSummary.totalRevenue},Items Sold,${registerSummary.totalItemsSold},Cash Amount,${registerSummary.cashSalesTotal},Credit Amount,${registerSummary.creditSalesTotal}\n`;
     } 
     else if (activeReport === 'purchases') {
-      csvContent = "Purchase Invoice Number,Purchase Date,Supplier,Supplier Type,Product Summary,Quantity,Subtotal ($),VAT (15%) ($),Discount ($),Grand Total ($),Payment Type,Status,Created By\n";
+      const activeTaxRate = companyProfile?.taxRatePercent ?? 15;
+      csvContent = `Purchase Invoice Number,Purchase Date,Supplier,Supplier Type,Product Summary,Quantity,Subtotal ($),VAT (${activeTaxRate}%) ($),Discount ($),Grand Total ($),Payment Type,Status,Created By\n`;
       filteredRegisterPurchases.forEach(p => {
         const isVoid = isVoidStatus(p.status);
         const invoiceNum = p.invoiceNumber || `PIN-${p.id.substring(p.id.length - 8).toUpperCase()}`;
         const pDate = p.purchaseDate.split('T')[0];
         const sType = suppliers.find(s => s.id === p.supplierId)?.category || "Standard";
-        const vat = p.vatAmount ?? (p.totalAmount * 15 / 115);
-        const sub = p.totalAmount - vat;
+        const pRate = p.taxRatePercent ?? companyProfile?.taxRatePercent ?? 15;
+        const sub = p.subtotal ?? (p.totalAmount / (1 + pRate / 100));
+        const vat = p.vatAmount ?? (p.totalAmount - sub);
         const disc = p.discountAmount ?? 0;
         const logMatch = systemLogs.find(l => l.entityId === p.id && l.action.includes('PROCUREMENT'));
         const createdBy = p.createdBy || (logMatch ? logMatch.user : "System Admin");
         
-        csvContent += `"${invoiceNum}","${pDate}","${p.supplierName.replace(/"/g, '""')}","${sType}","${p.productName.replace(/"/g, '""')}",${p.quantity},${sub.toFixed(2)},${vat.toFixed(2)},${disc.toFixed(2)},${p.totalAmount.toFixed(2)},"${p.paymentType}","${isVoid ? 'Voided' : 'Active'}","${createdBy}"\n`;
+        csvContent += `"${invoiceNum}","${pDate}","${p.supplierName.replace(/"/g, '""')}","${sType}","${p.productName.replace(/"/g, '""')}",${p.quantity},${formatCurrency(sub)},${formatCurrency(vat)},${formatCurrency(disc)},${formatCurrency(p.totalAmount)},"${p.paymentType}","${isVoid ? 'Voided' : 'Active'}","${createdBy}"\n`;
       });
-      csvContent += `\nSUMMARY,Total Audited Purchases,${filteredRegisterPurchases.length},Grand Total Value,${purchasesSummary.totalPurchases.toFixed(2)},Cash Purchases,${purchasesSummary.cashPurchases.toFixed(2)},Credit Purchases,${purchasesSummary.creditPurchases.toFixed(2)},Quantity Purchased,${purchasesSummary.quantityPurchased}\n`;
+      csvContent += `\nSUMMARY,Total Audited Purchases,${filteredRegisterPurchases.length},Grand Total Value,${formatCurrency(purchasesSummary.totalPurchases)},Cash Purchases,${formatCurrency(purchasesSummary.cashPurchases)},Credit Purchases,${formatCurrency(purchasesSummary.creditPurchases)},Quantity Purchased,${purchasesSummary.quantityPurchased}\n`;
     } 
     else if (activeReport === 'profit_loss') {
       csvContent = "Financial Indicator Metric,Calculated Value ($),Proportion Ratio (%)\n";
@@ -2848,7 +3067,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
       csvContent += `"Cost of Goods Sold (COGS)",${costOfGoodsSold},${totalSubtotal > 0 ? ((costOfGoodsSold / totalSubtotal) * 100).toFixed(1) : '0'}%\n`;
       csvContent += `"Gross Profit Margin",${grossProfit},${totalSubtotal > 0 ? ((grossProfit / totalSubtotal) * 100).toFixed(1) : '0'}%\n`;
       csvContent += `"Operating Expenses (OpEx)",${totalExpensesAmt},${totalSubtotal > 0 ? ((totalExpensesAmt / totalSubtotal) * 100).toFixed(1) : '0'}%\n`;
-      csvContent += `"Net Operating Profit Margin",${netProfit},${marginPercentage.toFixed(1)}%\n`;
+      csvContent += `"Net Operating Profit Margin",${netProfit},${formatCurrency(marginPercentage)}%\n`;
       csvContent += `"Asset Stock Value Added",${totalPurchaseValue},-\n`;
     } 
     else if (activeReport === 'customer_due') {
@@ -2920,24 +3139,24 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
       csvContent += `Generated On: ${new Date().toLocaleDateString()}, Range: ${startDate || 'All-time'} to ${endDate || 'All-time'}\n\n`;
       
       csvContent += "METRICS SUMMARY\n";
-      csvContent += `Total Reconciled Active Expense,${expenseAnalyticsSummary.total.toFixed(2)}\n`;
-      csvContent += `Average Expense Cost,${expenseAnalyticsSummary.avg.toFixed(2)}\n`;
-      csvContent += `Largest Single Outflow,${expenseAnalyticsSummary.largest.toFixed(2)}\n`;
+      csvContent += `Total Reconciled Active Expense,${formatCurrency(expenseAnalyticsSummary.total)}\n`;
+      csvContent += `Average Expense Cost,${formatCurrency(expenseAnalyticsSummary.avg)}\n`;
+      csvContent += `Largest Single Outflow,${formatCurrency(expenseAnalyticsSummary.largest)}\n`;
       csvContent += `Transaction Count,${expenseAnalyticsSummary.count}\n`;
-      csvContent += `Cash Outflow,${cashImpactAnalysis.cashOpex.toFixed(2)}\n`;
-      csvContent += `Credit/Deferred Outflow,${cashImpactAnalysis.nonCashOpex.toFixed(2)}\n\n`;
+      csvContent += `Cash Outflow,${formatCurrency(cashImpactAnalysis.cashOpex)}\n`;
+      csvContent += `Credit/Deferred Outflow,${formatCurrency(cashImpactAnalysis.nonCashOpex)}\n\n`;
 
       csvContent += "CATEGORY BREAKDOWN\n";
       csvContent += "Category Name,Transaction Count,Total Expense ($),Budget Percentage (%)\n";
       categoryExpensesReport.forEach(c => {
-        csvContent += `"${c.category}",${c.count},${c.total.toFixed(2)},${c.percentage.toFixed(1)}%\n`;
+        csvContent += `"${c.category}",${c.count},${formatCurrency(c.total)},${formatCurrency(c.percentage)}%\n`;
       });
       csvContent += "\n";
 
       csvContent += "VENDOR BREAKDOWN\n";
       csvContent += "Vendor Name,Transaction Count,Average Expense ($),Total Expense ($)\n";
       vendorExpensesReport.forEach(v => {
-        csvContent += `"${v.vendor}",${v.count},${v.avg.toFixed(2)},${v.total.toFixed(2)}\n`;
+        csvContent += `"${v.vendor}",${v.count},${formatCurrency(v.avg)},${formatCurrency(v.total)}\n`;
       });
       csvContent += "\n";
 
@@ -2951,10 +3170,10 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
       csvContent = "Account Code,Account Name,Account Type,Normal Balance,Parent Account Code,User Editable,Status,Is System,Live Balance ($)\n";
       coa.forEach(a => {
         const bal = getCOAAccountLiveBalance(a.code);
-        csvContent += `"${a.code}","${a.name.replace(/"/g, '""')}","${a.type}","${a.normalBalance}","${a.parentAccount || ''}","${a.editable ? 'Yes' : 'No'}","${a.status}","${a.isSystem ? 'Yes' : 'No'}",${bal.toFixed(2)}\n`;
+        csvContent += `"${a.code}","${a.name.replace(/"/g, '""')}","${a.type}","${a.normalBalance}","${a.parentAccount || ''}","${a.editable ? 'Yes' : 'No'}","${a.status}","${a.isSystem ? 'Yes' : 'No'}",${formatCurrency(bal)}\n`;
       });
       csvContent += `\nSUMMARY,Total Accounts Registered,${coaSummaryStats.totalAccounts},Active Accounts,${coaSummaryStats.activeAccounts},System Accounts,${coaSummaryStats.systemAccounts},Custom Accounts,${coaSummaryStats.customAccounts}\n`;
-      csvContent += `BALANCES,Total Assets,${coaSummaryStats.assetsBalance.toFixed(2)},Total Liabilities,${coaSummaryStats.liabilitiesBalance.toFixed(2)},Total Equity,${coaSummaryStats.equityBalance.toFixed(2)},Total Revenue,${coaSummaryStats.revenueBalance.toFixed(2)},Total Expenses,${coaSummaryStats.expensesBalance.toFixed(2)}\n`;
+      csvContent += `BALANCES,Total Assets,${formatCurrency(coaSummaryStats.assetsBalance)},Total Liabilities,${formatCurrency(coaSummaryStats.liabilitiesBalance)},Total Equity,${formatCurrency(coaSummaryStats.equityBalance)},Total Revenue,${formatCurrency(coaSummaryStats.revenueBalance)},Total Expenses,${formatCurrency(coaSummaryStats.expensesBalance)}\n`;
     }
     else if (activeReport === 'general_ledger') {
       const selectedAcc = coa.find(a => a.code === selectedGlAccountId || a.id === selectedGlAccountId);
@@ -2964,29 +3183,29 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
       csvContent += "Posting Date,Posting Number,Voucher Type,Source Module,Reference,Narration,Debit ($),Credit ($),Running Balance ($),Created By\n";
       
       // Opening Balance Row
-      csvContent += `"-","-","Opening Balance","-","-","Starting Balance before selected date",0,0,${generalLedgerData.openingBalance.toFixed(2)},"System"\n`;
+      csvContent += `"-","-","Opening Balance","-","-","Starting Balance before selected date",0,0,${formatCurrency(generalLedgerData.openingBalance)},"System"\n`;
       
       generalLedgerData.entries.forEach(e => {
-        csvContent += `"${e.postingDate.split('T')[0]}","${e.postingNumber}","${e.voucherType}","${e.sourceModule}","${e.reference}","${e.narration.replace(/"/g, '""')}",${e.debit},${e.credit},${e.runningBalance.toFixed(2)},"${e.createdBy}"\n`;
+        csvContent += `"${e.postingDate.split('T')[0]}","${e.postingNumber}","${e.voucherType}","${e.sourceModule}","${e.reference}","${e.narration.replace(/"/g, '""')}",${e.debit},${e.credit},${formatCurrency(e.runningBalance)},"${e.createdBy}"\n`;
       });
       
-      csvContent += `\nSUMMARY,Opening Balance,${generalLedgerData.openingBalance.toFixed(2)},Total Debits,${generalLedgerData.totalDebits.toFixed(2)},Total Credits,${generalLedgerData.totalCredits.toFixed(2)},Closing Balance,${generalLedgerData.closingBalance.toFixed(2)},Transaction Count,${generalLedgerData.entries.length}\n`;
+      csvContent += `\nSUMMARY,Opening Balance,${formatCurrency(generalLedgerData.openingBalance)},Total Debits,${formatCurrency(generalLedgerData.totalDebits)},Total Credits,${formatCurrency(generalLedgerData.totalCredits)},Closing Balance,${formatCurrency(generalLedgerData.closingBalance)},Transaction Count,${generalLedgerData.entries.length}\n`;
     }
     else if (activeReport === 'trial_balance') {
       csvContent = "NEXUS ERP ENTERPRISE TRIAL BALANCE REPORT\n";
       csvContent += `Generated On: ${new Date().toLocaleDateString()}, Range: ${startDate || 'All-time'} to ${endDate || 'All-time'}\n\n`;
       csvContent += "SUMMARY METRICS\n";
       csvContent += `Total Accounts,${trialBalanceData.totalAccounts}\n`;
-      csvContent += `Total Debit Column Sum,${trialBalanceData.totalDebitColumnSum.toFixed(2)}\n`;
-      csvContent += `Total Credit Column Sum,${trialBalanceData.totalCreditColumnSum.toFixed(2)}\n`;
-      csvContent += `Difference,${trialBalanceData.difference.toFixed(2)}\n`;
+      csvContent += `Total Debit Column Sum,${formatCurrency(trialBalanceData.totalDebitColumnSum)}\n`;
+      csvContent += `Total Credit Column Sum,${formatCurrency(trialBalanceData.totalCreditColumnSum)}\n`;
+      csvContent += `Difference,${formatCurrency(trialBalanceData.difference)}\n`;
       csvContent += `Balanced Status,${trialBalanceData.isBalanced ? 'BALANCED' : 'OUT OF BALANCE'}\n`;
       csvContent += `Last Posting Date,${trialBalanceData.lastPostingDate || 'N/A'}\n\n`;
 
       csvContent += "ACCOUNT CODES AND PERIOD BALANCES\n";
       csvContent += "Account Code,Account Name,Account Type,Normal Balance,Opening Balance,Period Debit,Period Credit,Debit Column (Ending),Credit Column (Ending)\n";
       trialBalanceData.rows.forEach(r => {
-        csvContent += `"${r.code}","${r.name.replace(/"/g, '""')}","${r.type}","${r.normalBalance}",${r.openingBalance.toFixed(2)},${r.periodDebit.toFixed(2)},${r.periodCredit.toFixed(2)},${r.debitColumnValue.toFixed(2)},${r.creditColumnValue.toFixed(2)}\n`;
+        csvContent += `"${r.code}","${r.name.replace(/"/g, '""')}","${r.type}","${r.normalBalance}",${formatCurrency(r.openingBalance)},${formatCurrency(r.periodDebit)},${formatCurrency(r.periodCredit)},${formatCurrency(r.debitColumnValue)},${formatCurrency(r.creditColumnValue)}\n`;
       });
 
       if (!trialBalanceData.isBalanced) {
@@ -3009,6 +3228,39 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
     document.body.removeChild(link);
   };
 
+  // Filter lists inside display screens based on search query
+  const searchableSales = filteredSales.filter(s => {
+    const items = getNormalizedItems(s);
+    const hasMatchingProduct = items.some(item => item.productName.toLowerCase().includes(searchQuery.toLowerCase()));
+    return s.customerName.toLowerCase().includes(searchQuery.toLowerCase()) || 
+           hasMatchingProduct || 
+           s.id.toLowerCase().includes(searchQuery.toLowerCase());
+  });
+
+  const searchablePurchases = filteredRegisterPurchases.filter(p => {
+    return p.supplierName.toLowerCase().includes(searchQuery.toLowerCase()) || 
+           p.productName.toLowerCase().includes(searchQuery.toLowerCase()) || 
+           p.id.toLowerCase().includes(searchQuery.toLowerCase());
+  });
+
+  const searchableCOA = coa.filter(a => {
+    return a.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+           a.code.toLowerCase().includes(searchQuery.toLowerCase()) || 
+           a.type.toLowerCase().includes(searchQuery.toLowerCase());
+  });
+
+  const searchableExpenses = filteredExpensesList.filter(e => {
+    return (e.category || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
+           (e.vendorName || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
+           (e.id || '').toLowerCase().includes(searchQuery.toLowerCase());
+  });
+
+  const searchableTrialBalanceRows = trialBalanceData.rows.filter(r => {
+    return r.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+           r.code.toLowerCase().includes(searchQuery.toLowerCase()) || 
+           r.type.toLowerCase().includes(searchQuery.toLowerCase());
+  });
+
   // --- Action: Modern Vector PDF Generator using jsPDF ---
   const handleExportPDF = () => {
     if (permissions?.viewProductCost === false && (activeReport === 'purchases' || activeReport === 'profit_loss')) {
@@ -3019,828 +3271,1100 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
       unit: 'mm',
       format: 'a4'
     });
-
-    // 1. High-end Aesthetic Corporate Header Banner
-    doc.setFillColor(30, 41, 59); // Primary Slate block
-    doc.rect(0, 0, 210, 10, 'F'); // Top ribbon tag
     
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(20);
-    doc.setTextColor(15, 23, 42); // slate-900
-    doc.text("NEXUS ENTERPRISE LEDGER", 15, 25);
-    
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8.5);
-    doc.setTextColor(100, 116, 139); // slate-500
-    doc.text(`Generated by: ${auth.currentUser?.email || 'System Admin'}  |  Audit Date: ${new Date().toLocaleDateString()}`, 15, 30);
-    doc.text(`Specified Reporting Filters: ${startDate} to ${endDate}`, 15, 34);
+    applyEnterprisePdfFont(doc);
+    let pageNumber = 1;
 
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(14);
-    doc.setTextColor(79, 70, 229); // Indigo theme banner
-    doc.text(`${activeReport.replace('_', ' ').toUpperCase()} REPORT`, 140, 25);
-
-    doc.setDrawColor(226, 232, 240);
-    doc.setLineWidth(0.4);
-    doc.line(15, 38, 195, 38);
-
-    let startY = 46;
-
-    // 2. Populate tables dynamically inside PDF template
-    if (activeReport === 'sales') {
-      doc.setFillColor(248, 250, 252); // slate-50 metrics card
-      doc.rect(15, startY, 180, 20, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
-      doc.text("ENTERPRISE SALES AUDIT REGISTER SUMMARY:", 20, startY + 6);
-
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8.5);
-      doc.setTextColor(15, 23, 42);
-      doc.text(`Total Realised Value: $${registerSummary.totalRevenue.toFixed(2)}`, 20, startY + 14);
-      doc.text(`Average Basket Ticket: $${registerSummary.avgOrderValue.toFixed(2)}`, 85, startY + 14);
-      doc.text(`Total Dispatched Items: ${registerSummary.totalItemsSold} Units`, 150, startY + 14);
-
-      // Table Header
+    const addPdfHeader = (title: string) => {
       doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 26, 180, 8, 'F');
+      doc.rect(0, 0, 210, 8, 'F');
       
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(16);
+      doc.setTextColor(15, 23, 42);
+      doc.text(formatPdfText("NEXUS ENTERPRISE LEDGER"), 15, 20);
+      
+      setPdfFont(doc, 'normal');
       doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text("INVOICE / DATE", 18, startY + 31.5);
-      doc.text("CUSTOMER NAME", 55, startY + 31.5);
-      doc.text("ITEMS DISPATCHED", 100, startY + 31.5);
-      doc.text("QTY", 145, startY + 31.5);
-      doc.text("STATUS", 158, startY + 31.5);
-      doc.text("TOTAL ($)", 180, startY + 31.5);
+      doc.setTextColor(100, 116, 139);
+      doc.text(formatPdfText(`Generated by: ${auth.currentUser?.email || 'System Admin'}  |  Audit Date: ${new Date().toLocaleDateString()} ${startDate ? '| Filter: ' + startDate + ' to ' + endDate : ''}`), 15, 25);
 
-      // Table data
-      let rowY = startY + 38;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(11);
+      doc.setTextColor(79, 70, 229);
+      doc.text(formatPdfText(title.toUpperCase()), 125, 20);
+
+      doc.setDrawColor(226, 232, 240);
+      doc.setLineWidth(0.4);
+      doc.line(15, 28, 195, 28);
+    };
+
+    const addPdfFooter = () => {
+      setPdfFont(doc, 'normal');
       doc.setFontSize(7.5);
+      doc.setTextColor(148, 163, 184);
+      doc.setDrawColor(226, 232, 240);
+      doc.setLineWidth(0.4);
+      doc.line(15, 280, 195, 280);
+      doc.text(formatPdfText("Official Certified Ledger Balance Report Sheet • Restricted Trade Intel"), 15, 284);
+      doc.text(formatPdfText(`Page ${pageNumber}`), 180, 284);
+    };
 
-      filteredRegisterSales.slice(0, 18).forEach(s => {
-        if (rowY > 260) return; // safeguard page overflow
-        const items = getNormalizedItems(s);
-        let displayProdName = "";
-        let displayQty = 0;
-        if (items.length === 1) {
-          displayProdName = items[0].productName;
-          displayQty = items[0].quantity;
-        } else if (items.length > 1) {
-          displayProdName = `${items[0].productName} + ${items.length - 1} items`;
-          displayQty = items.reduce((acc, item) => acc + item.quantity, 0);
+    let currentY = 34;
+
+    const checkPageBreak = (neededHeight: number = 10): boolean => {
+      if (currentY + neededHeight > 272) {
+        addPdfFooter();
+        doc.addPage();
+        pageNumber++;
+        applyEnterprisePdfFont(doc);
+        
+        doc.setFillColor(30, 41, 59);
+        doc.rect(0, 0, 210, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(8.5);
+        doc.setTextColor(100, 116, 139);
+        doc.text(formatPdfText(`NEXUS ENTERPRISE LEDGER - ${activeReport.replace('_', ' ').toUpperCase()} (Contd.)`), 15, 14);
+        doc.setDrawColor(226, 232, 240);
+        doc.line(15, 16, 195, 16);
+        
+        currentY = 22;
+        return true;
+      }
+      return false;
+    };
+
+    addPdfHeader(`${activeReport.replace('_', ' ')} Report`);
+
+    // 1. SALES REGISTER
+    if (activeReport === 'sales') {
+      doc.setFillColor(248, 250, 252);
+      doc.rect(15, currentY, 180, 18, 'F');
+      
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(8.5);
+      doc.setTextColor(71, 85, 105);
+      doc.text(formatPdfText("ENTERPRISE SALES AUDIT REGISTER SUMMARY:"), 18, currentY + 5);
+
+      setPdfFont(doc, 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(15, 23, 42);
+      doc.text(formatPdfText(`Total Revenue: ${formatPdfCurrency(registerSummary.totalRevenue)}`), 18, currentY + 12);
+      doc.text(formatPdfText(`Avg Basket Ticket: ${formatPdfCurrency(registerSummary.avgOrderValue)}`), 85, currentY + 12);
+      doc.text(formatPdfText(`Total Dispatched Items: ${registerSummary.totalItemsSold} Units`), 150, currentY + 12);
+
+      currentY += 24;
+
+      const drawSalesHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("INVOICE / DATE"), 18, currentY + 5.5);
+        doc.text(formatPdfText("CUSTOMER NAME"), 58, currentY + 5.5);
+        doc.text(formatPdfText("ITEMS DISPATCHED"), 105, currentY + 5.5);
+        doc.text(formatPdfText("QTY"), 148, currentY + 5.5);
+        doc.text(formatPdfText("STATUS"), 160, currentY + 5.5);
+        doc.text(formatPdfText("TOTAL"), 180, currentY + 5.5);
+        currentY += 10;
+      };
+
+      drawSalesHeader();
+
+      const salesList = searchQuery.trim() ? searchableSales : filteredRegisterSales;
+      salesList.forEach(s => {
+        if (checkPageBreak(8)) {
+          drawSalesHeader();
         }
+        const items = getNormalizedItems(s);
+        let displayProdName = items.length === 1 ? items[0].productName : `${items[0]?.productName || 'Items'} + ${items.length - 1} items`;
+        let displayQty = items.reduce((acc, item) => acc + item.quantity, 0);
         const isVoid = isVoidStatus(s.status);
         const invoiceNum = s.invoiceNumber || s.id.substring(s.id.length - 8).toUpperCase();
-        
-        doc.text(`${invoiceNum} | ${s.saleDate.split('T')[0]}`, 18, rowY);
-        doc.text(s.customerName.length > 18 ? s.customerName.substring(0, 18) + '...' : s.customerName, 55, rowY);
-        doc.text(displayProdName.length > 20 ? displayProdName.substring(0, 20) + '...' : displayProdName, 100, rowY);
-        doc.text(displayQty.toString(), 145, rowY);
-        doc.text(isVoid ? 'Voided' : 'Active', 158, rowY);
-        doc.text(`$${s.totalAmount.toFixed(2)}`, 180, rowY);
-        rowY += 6;
+
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(51, 65, 85);
+
+        doc.text(formatPdfText(`${invoiceNum} | ${s.saleDate.split('T')[0]}`), 18, currentY);
+        doc.text(formatPdfText(s.customerName.length > 20 ? s.customerName.substring(0, 20) + '...' : s.customerName), 58, currentY);
+        doc.text(formatPdfText(displayProdName.length > 22 ? displayProdName.substring(0, 22) + '...' : displayProdName), 105, currentY);
+        doc.text(displayQty.toString(), 148, currentY);
+        doc.text(isVoid ? 'Voided' : 'Active', 160, currentY);
+        doc.text(formatPdfCurrency(s.totalAmount), 180, currentY);
+        currentY += 6;
       });
-    } 
+    }
+    // 2. PURCHASES REGISTER
     else if (activeReport === 'purchases') {
       doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 20, 'F');
+      doc.rect(15, currentY, 180, 18, 'F');
       
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
-      doc.text("ENTERPRISE PURCHASE REGISTER SUMMARY:", 20, startY + 6);
-
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(8.5);
-      doc.setTextColor(15, 23, 42);
-      doc.text(`Total Purchases: $${purchasesSummary.totalPurchases.toFixed(2)}`, 20, startY + 14);
-      doc.text(`Cash Settlements: $${purchasesSummary.cashPurchases.toFixed(2)}`, 85, startY + 14);
-      doc.text(`Credit Settlements: $${purchasesSummary.creditPurchases.toFixed(2)}`, 140, startY + 14);
+      doc.setTextColor(71, 85, 105);
+      doc.text(formatPdfText("ENTERPRISE PURCHASE REGISTER SUMMARY:"), 18, currentY + 5);
 
-      // Table Header
-      doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 26, 180, 8, 'F');
-      
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'normal');
       doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text("INVOICE NO", 18, startY + 31.5);
-      doc.text("DATE", 42, startY + 31.5);
-      doc.text("SUPPLIER", 62, startY + 31.5);
-      doc.text("PRODUCT SUMMARY", 102, startY + 31.5);
-      doc.text("QTY", 142, startY + 31.5);
-      doc.text("PAYMENT", 152, startY + 31.5);
-      doc.text("GRAND TOTAL", 172, startY + 31.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text(formatPdfText(`Total Purchases: ${formatPdfCurrency(purchasesSummary.totalPurchases)}`), 18, currentY + 12);
+      doc.text(formatPdfText(`Cash Settlements: ${formatPdfCurrency(purchasesSummary.cashPurchases)}`), 85, currentY + 12);
+      doc.text(formatPdfText(`Credit Settlements: ${formatPdfCurrency(purchasesSummary.creditPurchases)}`), 145, currentY + 12);
 
-      let rowY = startY + 38;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
-      doc.setFontSize(7.5);
+      currentY += 24;
 
-      filteredRegisterPurchases.slice(0, 18).forEach(p => {
-        if (rowY > 260) return;
+      const drawPurchasesHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("INVOICE NO"), 18, currentY + 5.5);
+        doc.text(formatPdfText("DATE"), 45, currentY + 5.5);
+        doc.text(formatPdfText("SUPPLIER"), 68, currentY + 5.5);
+        doc.text(formatPdfText("PRODUCT SUMMARY"), 110, currentY + 5.5);
+        doc.text(formatPdfText("QTY"), 148, currentY + 5.5);
+        doc.text(formatPdfText("PAYMENT"), 158, currentY + 5.5);
+        doc.text(formatPdfText("GRAND TOTAL"), 175, currentY + 5.5);
+        currentY += 10;
+      };
+
+      drawPurchasesHeader();
+
+      const purchasesList = searchQuery.trim() ? searchablePurchases : filteredRegisterPurchases;
+      purchasesList.forEach(p => {
+        if (checkPageBreak(8)) {
+          drawPurchasesHeader();
+        }
         const isVoid = isVoidStatus(p.status);
         const invoiceNum = p.invoiceNumber || `PIN-${p.id.substring(p.id.length - 8).toUpperCase()}`;
         const pDate = p.purchaseDate.split('T')[0];
-        
-        doc.text(invoiceNum, 18, rowY);
-        doc.text(pDate, 42, rowY);
-        doc.text(p.supplierName.length > 20 ? p.supplierName.substring(0, 20) + '...' : p.supplierName, 62, rowY);
-        doc.text(p.productName.length > 20 ? p.productName.substring(0, 20) + '...' : p.productName, 102, rowY);
-        doc.text(p.quantity.toString(), 142, rowY);
-        doc.text(p.paymentType, 152, rowY);
-        
+
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(51, 65, 85);
+
+        doc.text(formatPdfText(invoiceNum), 18, currentY);
+        doc.text(pDate, 45, currentY);
+        doc.text(formatPdfText(p.supplierName.length > 20 ? p.supplierName.substring(0, 20) + '...' : p.supplierName), 68, currentY);
+        doc.text(formatPdfText(p.productName.length > 22 ? p.productName.substring(0, 22) + '...' : p.productName), 110, currentY);
+        doc.text(p.quantity.toString(), 148, currentY);
+        doc.text(formatPdfText(p.paymentType), 158, currentY);
+
         if (isVoid) {
           doc.setTextColor(220, 38, 38);
-          doc.text("Voided", 172, rowY);
-          doc.setTextColor(51, 65, 85);
+          doc.text("Voided", 175, currentY);
         } else {
-          doc.text(`$${p.totalAmount.toFixed(2)}`, 172, rowY);
+          doc.text(formatPdfCurrency(p.totalAmount), 175, currentY);
         }
-        
-        rowY += 6;
+        currentY += 6;
       });
-    } 
+    }
+    // 3. PROFIT & LOSS STATEMENT
     else if (activeReport === 'profit_loss') {
       doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 15, 'F');
+      doc.rect(15, currentY, 180, 15, 'F');
       
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9.5);
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(9);
       doc.setTextColor(71, 85, 105);
-      doc.text("PROFIT & LOSS BREAKDOWN STATEMENTS:", 20, startY + 9.5);
+      doc.text(formatPdfText("PROFIT & LOSS STATEMENT SUMMARY:"), 18, currentY + 9);
 
-      let statY = startY + 28;
-      doc.setDrawColor(241, 245, 249);
-      doc.setFillColor(255, 255, 255);
+      currentY += 20;
 
-      const items = [
+      const pnlSummary = [
         { label: "1. Gross Corporate Revenue (Excluding Tax)", value: totalSubtotal, color: [15, 23, 42] },
         { label: "2. Cost of Goods Sold (COGS)", value: -costOfGoodsSold, color: [225, 29, 72] },
-        { label: "3. Gross Profit Margin", value: grossProfit, color: [5, 150, 105] },
+        { label: "3. Gross Profit Margin", value: grossProfit, color: [5, 150, 105], bold: true },
         { label: "4. Operating Expenses (OpEx)", value: -totalExpensesAmt, color: [225, 29, 72] },
         { label: "5. Net Margins / Operating Profits", value: netProfit, color: [5, 150, 105], bold: true },
-        { label: "6. Internal Inventory Active Purchase Stock Assets", value: totalPurchaseValue, color: [71, 85, 105] }
+        { label: "6. Active Stock Purchase Assets", value: totalPurchaseValue, color: [71, 85, 105] }
       ];
 
-      items.forEach((item) => {
-        doc.rect(15, statY, 180, 12, 'S');
-        if (item.bold) {
-          doc.setFont('helvetica', 'bold');
-          doc.setFillColor(243, 244, 246);
-          doc.rect(15, statY, 180, 12, 'F');
-        } else {
-          doc.setFont('helvetica', 'normal');
-        }
-        
-        doc.setFontSize(9);
-        doc.setTextColor(15, 23, 42);
-        doc.text(item.label, 20, statY + 8);
+      pnlSummary.forEach(item => {
+        if (checkPageBreak(12)) {}
+        doc.setDrawColor(226, 232, 240);
+        doc.setFillColor(item.bold ? 243 : 255, item.bold ? 244 : 255, item.bold ? 246 : 255);
+        doc.rect(15, currentY, 180, 10, 'FD');
 
-        doc.setFont('helvetica', 'bold');
+        setPdfFont(doc, item.bold ? 'bold' : 'normal');
+        doc.setFontSize(8);
+        doc.setTextColor(15, 23, 42);
+        doc.text(formatPdfText(item.label), 18, currentY + 6.5);
+
+        setPdfFont(doc, 'bold');
         doc.setTextColor(item.color[0], item.color[1], item.color[2]);
-        doc.text(`${item.value < 0 ? '-' : ''}$${Math.abs(item.value).toFixed(2)}`, 165, statY + 8);
-        
-        statY += 15;
+        const formattedVal = formatPdfCurrency(item.value);
+        doc.text(formattedVal, 160, currentY + 6.5);
+
+        currentY += 12;
       });
 
-      doc.setFont('helvetica', 'italic');
+      currentY += 6;
+
+      // Revenue Breakdown
+      if (financialStatements.revenueAccounts.length > 0) {
+        if (checkPageBreak(25)) {}
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(30, 41, 59);
+        doc.text(formatPdfText("REVENUE ACCOUNTS BREAKDOWN"), 15, currentY);
+        currentY += 4;
+
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 7, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("CODE"), 18, currentY + 5);
+        doc.text(formatPdfText("ACCOUNT NAME"), 45, currentY + 5);
+        doc.text(formatPdfText("BALANCE"), 165, currentY + 5);
+        currentY += 9;
+
+        financialStatements.revenueAccounts.forEach(acc => {
+          if (checkPageBreak(7)) {}
+          setPdfFont(doc, 'normal');
+          doc.setFontSize(7.5);
+          doc.setTextColor(51, 65, 85);
+          doc.text(acc.code, 18, currentY);
+          doc.text(formatPdfText(acc.name), 45, currentY);
+          doc.text(formatPdfCurrency(acc.balance), 165, currentY);
+          currentY += 6;
+        });
+        currentY += 6;
+      }
+
+      // OpEx Breakdown
+      if (financialStatements.opexAccounts.length > 0) {
+        if (checkPageBreak(25)) {}
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(30, 41, 59);
+        doc.text(formatPdfText("OPERATING EXPENSES BREAKDOWN"), 15, currentY);
+        currentY += 4;
+
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 7, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("CODE"), 18, currentY + 5);
+        doc.text(formatPdfText("ACCOUNT NAME"), 45, currentY + 5);
+        doc.text(formatPdfText("BALANCE"), 165, currentY + 5);
+        currentY += 9;
+
+        financialStatements.opexAccounts.forEach(acc => {
+          if (checkPageBreak(7)) {}
+          setPdfFont(doc, 'normal');
+          doc.setFontSize(7.5);
+          doc.setTextColor(51, 65, 85);
+          doc.text(acc.code, 18, currentY);
+          doc.text(formatPdfText(acc.name), 45, currentY);
+          doc.text(formatPdfCurrency(acc.balance), 165, currentY);
+          currentY += 6;
+        });
+      }
+    }
+    // 4. BALANCE SHEET
+    else if (activeReport === 'balance_sheet') {
+      doc.setFillColor(financialStatements.isBsBalanced ? 240 : 254, financialStatements.isBsBalanced ? 253 : 242, financialStatements.isBsBalanced ? 244 : 242);
+      doc.rect(15, currentY, 180, 16, 'F');
+      
+      setPdfFont(doc, 'bold');
       doc.setFontSize(8.5);
-      doc.setTextColor(148, 163, 184);
-      doc.text("* Net Margins are generated dynamically by reconciling actual transaction counts with registered stock prices in real-time.", 15, statY + 12);
-    } 
+      doc.setTextColor(financialStatements.isBsBalanced ? 16 : 220, financialStatements.isBsBalanced ? 185 : 38, financialStatements.isBsBalanced ? 129 : 38);
+      doc.text(formatPdfText(`BALANCE SHEET AUDIT: ${financialStatements.isBsBalanced ? '✓ PERFECTLY BALANCED' : '⚠️ VARIANCE DETECTED (' + formatPdfCurrency(financialStatements.balanceSheetDifference) + ')'}`), 18, currentY + 6);
+
+      setPdfFont(doc, 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(15, 23, 42);
+      doc.text(formatPdfText(`Total Assets: ${formatPdfCurrency(financialStatements.totalAssets)}  |  Total Liabilities & Equity: ${formatPdfCurrency(financialStatements.totalLiabilities + financialStatements.totalEquity)}`), 18, currentY + 12);
+
+      currentY += 22;
+
+      // Section Renderer Helper
+      const renderBsSection = (title: string, accounts: Array<{ code: string; name: string; balance: number }>, subtotal: number) => {
+        if (checkPageBreak(20)) {}
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 7, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(8);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText(title.toUpperCase()), 18, currentY + 5);
+        doc.text(formatPdfText("BALANCE"), 165, currentY + 5);
+        currentY += 9;
+
+        accounts.forEach(acc => {
+          if (checkPageBreak(7)) {}
+          setPdfFont(doc, 'normal');
+          doc.setFontSize(7.5);
+          doc.setTextColor(51, 65, 85);
+          doc.text(acc.code, 18, currentY);
+          doc.text(formatPdfText(acc.name.length > 40 ? acc.name.substring(0, 40) + '...' : acc.name), 45, currentY);
+          doc.text(formatPdfCurrency(acc.balance), 165, currentY);
+          currentY += 6;
+        });
+
+        if (checkPageBreak(8)) {}
+        doc.setFillColor(243, 244, 246);
+        doc.rect(15, currentY, 180, 6, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(15, 23, 42);
+        doc.text(formatPdfText(`TOTAL ${title.toUpperCase()}`), 18, currentY + 4.5);
+        doc.text(formatPdfCurrency(subtotal), 165, currentY + 4.5);
+        currentY += 10;
+      };
+
+      renderBsSection("Current Assets", financialStatements.currentAssetAccounts, financialStatements.totalCurrentAssets);
+      renderBsSection("Non-Current Assets", financialStatements.nonCurrentAssetAccounts, financialStatements.totalNonCurrentAssets);
+      renderBsSection("Current Liabilities", financialStatements.currentLiabilityAccounts, financialStatements.totalCurrentLiabilities);
+      renderBsSection("Long-Term Liabilities", financialStatements.longTermLiabilityAccounts, financialStatements.totalLongTermLiabilities);
+      renderBsSection("Equity & Retained Earnings", financialStatements.equityAccounts, financialStatements.baseEquityValue);
+    }
+    // 5. STATEMENT OF CASH FLOWS
+    else if (activeReport === 'cash_flow') {
+      doc.setFillColor(248, 250, 252);
+      doc.rect(15, currentY, 180, 18, 'F');
+      
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(8.5);
+      doc.setTextColor(71, 85, 105);
+      doc.text(formatPdfText("STATEMENT OF CASH FLOWS (DIRECT METHOD):"), 18, currentY + 5);
+
+      setPdfFont(doc, 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(15, 23, 42);
+      doc.text(formatPdfText(`Net Operating: ${formatPdfCurrency(financialStatements.totalOperatingActivities)}  |  Investing: ${formatPdfCurrency(financialStatements.totalInvestingActivities)}  |  Financing: ${formatPdfCurrency(financialStatements.totalFinancingActivities)}`), 18, currentY + 12);
+
+      currentY += 24;
+
+      const cfRows = [
+        { label: "Cash Receipts from Customers", val: financialStatements.totalCustomerReceipts },
+        { label: "Cash Payments to Suppliers", val: financialStatements.totalSupplierPayments },
+        { label: "Operating Expense Outflows", val: financialStatements.totalOpexCash + financialStatements.totalOtherOpexCash },
+        { label: "Net Cash Provided by Operating Activities", val: financialStatements.totalOperatingActivities, bold: true },
+        { label: "Net Cash Used in Investing Activities", val: financialStatements.totalInvestingActivities, bold: true },
+        { label: "Net Cash Provided by Financing Activities", val: financialStatements.totalFinancingActivities, bold: true },
+        { label: "Net Increase / Decrease in Cash", val: financialStatements.netCashFlow, bold: true },
+        { label: "Cash & Cash Equivalents at Start of Period", val: financialStatements.openingCashSum },
+        { label: "Cash & Cash Equivalents at End of Period", val: financialStatements.endingCashSum, bold: true },
+        { label: "General Ledger Cash Balance", val: financialStatements.glEndingCashSum }
+      ];
+
+      cfRows.forEach(r => {
+        if (checkPageBreak(9)) {}
+        doc.setFillColor(r.bold ? 243 : 255, r.bold ? 244 : 255, r.bold ? 246 : 255);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, r.bold ? 'bold' : 'normal');
+        doc.setFontSize(8);
+        doc.setTextColor(15, 23, 42);
+        doc.text(formatPdfText(r.label), 18, currentY + 5.5);
+        doc.text(formatPdfCurrency(r.val), 160, currentY + 5.5);
+        currentY += 9;
+      });
+    }
+    // 6. FINANCIAL RECONCILIATION
+    else if (activeReport === 'financial_reconciliation') {
+      doc.setFillColor(financialStatements.healthStatus === 'Green' ? 240 : 254, 253, 244);
+      doc.rect(15, currentY, 180, 16, 'F');
+      
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(8.5);
+      doc.setTextColor(financialStatements.healthStatus === 'Green' ? 16 : 220, 185, 129);
+      doc.text(formatPdfText(`FINANCIAL CONSISTENCY ENGINE HEALTH: [${financialStatements.healthStatus.toUpperCase()}]`), 18, currentY + 6);
+
+      setPdfFont(doc, 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(15, 23, 42);
+      doc.text(formatPdfText(`Active Diagnostics Alerts: ${financialStatements.diagnosticsList.length} Items  |  Double-Entry Audit: ${financialStatements.allChecksPass ? 'Passed' : 'Action Required'}`), 18, currentY + 12);
+
+      currentY += 22;
+
+      const drawReconHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("FINANCIAL CONTROL MODULE"), 18, currentY + 5.5);
+        doc.text(formatPdfText("GL BALANCE"), 85, currentY + 5.5);
+        doc.text(formatPdfText("SUBLEDGER BAL"), 120, currentY + 5.5);
+        doc.text(formatPdfText("VARIANCE"), 155, currentY + 5.5);
+        doc.text(formatPdfText("STATUS"), 180, currentY + 5.5);
+        currentY += 10;
+      };
+
+      drawReconHeader();
+
+      const rData = [
+        { name: "Cash Ledger vs Operational Cash", gl: reconciliationData.glCashBalance, sub: reconciliationData.operationalCashBalance },
+        { name: "Accounts Receivable vs Customer Dues", gl: reconciliationData.glArBalance, sub: reconciliationData.operationalArBalance },
+        { name: "Inventory Asset vs Stock Asset Value", gl: reconciliationData.glInventoryBalance, sub: reconciliationData.operationalInventoryBalance },
+        { name: "Accounts Payable vs Supplier Debts", gl: reconciliationData.glApBalance, sub: reconciliationData.operationalApBalance },
+        { name: "Capital Ledger vs Capital Contributions", gl: reconciliationData.glCapitalBalance, sub: reconciliationData.operationalCapitalBalance },
+        { name: "Sales Revenue vs Sales Transactions", gl: reconciliationData.glSalesBalance, sub: reconciliationData.operationalSalesBalance },
+        { name: "COGS Ledger vs Sales COGS", gl: reconciliationData.glCogsBalance, sub: reconciliationData.operationalCogsBalance }
+      ];
+
+      rData.forEach(item => {
+        if (checkPageBreak(8)) {
+          drawReconHeader();
+        }
+        const diff = Math.abs(item.gl - item.sub);
+        const match = diff < 0.01;
+
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(51, 65, 85);
+        doc.text(formatPdfText(item.name), 18, currentY);
+        doc.text(formatPdfCurrency(item.gl), 85, currentY);
+        doc.text(formatPdfCurrency(item.sub), 120, currentY);
+        doc.text(formatPdfCurrency(diff), 155, currentY);
+        setPdfFont(doc, 'bold');
+        doc.setTextColor(match ? 16 : 220, match ? 185 : 38, match ? 129 : 38);
+        doc.text(match ? 'MATCHED' : 'VARIANCE', 180, currentY);
+        setPdfFont(doc, 'normal');
+        doc.setTextColor(51, 65, 85);
+        currentY += 6.5;
+      });
+
+      if (financialStatements.diagnosticsList.length > 0) {
+        currentY += 8;
+        if (checkPageBreak(20)) {}
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(30, 41, 59);
+        doc.text(formatPdfText("DIAGNOSTICS & AUDIT ALERTS"), 15, currentY);
+        currentY += 6;
+
+        financialStatements.diagnosticsList.forEach(diag => {
+          if (checkPageBreak(12)) {}
+          doc.setFillColor(diag.category === 'Critical' ? 254 : 255, diag.category === 'Critical' ? 242 : 251, diag.category === 'Critical' ? 242 : 235);
+          doc.rect(15, currentY, 180, 10, 'F');
+          setPdfFont(doc, 'bold');
+          doc.setFontSize(7.5);
+          doc.setTextColor(diag.category === 'Critical' ? 220 : 217, diag.category === 'Critical' ? 38 : 119, diag.category === 'Critical' ? 38 : 6);
+          doc.text(formatPdfText(`[${diag.category.toUpperCase()}] ${diag.checkName}`), 18, currentY + 4);
+          setPdfFont(doc, 'normal');
+          doc.setFontSize(7);
+          doc.setTextColor(51, 65, 85);
+          doc.text(formatPdfText(diag.message), 18, currentY + 8);
+          currentY += 12;
+        });
+      }
+    }
+    // 7. GENERAL LEDGER
+    else if (activeReport === 'general_ledger') {
+      const selectedAcc = coa.find(a => a.code === selectedGlAccountId || a.id === selectedGlAccountId);
+      const accName = selectedAcc ? selectedAcc.name : 'Unknown Account';
+
+      doc.setFillColor(248, 250, 252);
+      doc.rect(15, currentY, 180, 18, 'F');
+      
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(8.5);
+      doc.setTextColor(71, 85, 105);
+      doc.text(formatPdfText(`GENERAL LEDGER SUMMARY: ${selectedGlAccountId} - ${accName.toUpperCase()}`), 18, currentY + 5);
+
+      setPdfFont(doc, 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(15, 23, 42);
+      doc.text(formatPdfText(`Opening Bal: ${formatPdfCurrency(generalLedgerData.openingBalance)}  |  Total Debits: ${formatPdfCurrency(generalLedgerData.totalDebits)}  |  Total Credits: ${formatPdfCurrency(generalLedgerData.totalCredits)}`), 18, currentY + 12);
+
+      currentY += 24;
+
+      const drawGlHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("DATE"), 18, currentY + 5.5);
+        doc.text(formatPdfText("POSTING NO"), 38, currentY + 5.5);
+        doc.text(formatPdfText("VOUCHER TYPE"), 68, currentY + 5.5);
+        doc.text(formatPdfText("NARRATION"), 100, currentY + 5.5);
+        doc.text(formatPdfText("DEBIT"), 142, currentY + 5.5);
+        doc.text(formatPdfText("CREDIT"), 162, currentY + 5.5);
+        doc.text(formatPdfText("BALANCE"), 180, currentY + 5.5);
+        currentY += 10;
+      };
+
+      drawGlHeader();
+
+      // Print Opening Balance row
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(7.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text("-", 18, currentY);
+      doc.text("INITIAL", 38, currentY);
+      doc.text("Opening Balance", 68, currentY);
+      doc.text("Starting cumulative balance", 100, currentY);
+      doc.text("-", 142, currentY);
+      doc.text("-", 162, currentY);
+      doc.text(formatPdfCurrency(generalLedgerData.openingBalance), 180, currentY);
+      currentY += 6.5;
+
+      generalLedgerData.entries.forEach(e => {
+        if (checkPageBreak(8)) {
+          drawGlHeader();
+        }
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(51, 65, 85);
+
+        doc.text(e.postingDate.split('T')[0], 18, currentY);
+        doc.text(e.postingNumber, 38, currentY);
+        doc.text(formatPdfText(e.voucherType), 68, currentY);
+        doc.text(formatPdfText(e.narration.length > 22 ? e.narration.substring(0, 22) + '...' : e.narration), 100, currentY);
+        doc.text(e.debit > 0 ? formatPdfCurrency(e.debit) : '-', 142, currentY);
+        doc.text(e.credit > 0 ? formatPdfCurrency(e.credit) : '-', 162, currentY);
+        doc.text(formatPdfCurrency(e.runningBalance), 180, currentY);
+        currentY += 6.5;
+      });
+    }
+    // 8. CUSTOMER DUE REPORT
     else if (activeReport === 'customer_due') {
       doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 15, 'F');
+      doc.rect(15, currentY, 180, 15, 'F');
       
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(8.5);
       doc.setTextColor(71, 85, 105);
-      doc.text(`TOTAL CREDIT RECEIVABLES DUES: $${totalCustomerDueOutstanding.toFixed(2)}`, 20, startY + 9.5);
+      doc.text(formatPdfText(`TOTAL CREDIT RECEIVABLES DUES: ${formatPdfCurrency(totalCustomerDueOutstanding)}`), 18, currentY + 9.5);
 
-      // Table Header
-      doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 22, 180, 8, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text("CUSTOMER IDENTIFIER ID", 18, startY + 27.5);
-      doc.text("CUSTOMER REGISTERED NAME", 65, startY + 27.5);
-      doc.text("CONTACT PHONE", 115, startY + 27.5);
-      doc.text("ACCOUNT CLASS", 145, startY + 27.5);
-      doc.text("OUTSTANDING DUE ($)", 172, startY + 27.5);
+      currentY += 21;
 
-      let rowY = startY + 34;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
-      doc.setFontSize(7.5);
+      const drawCustDueHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("CUSTOMER ID"), 18, currentY + 5.5);
+        doc.text(formatPdfText("CUSTOMER NAME"), 55, currentY + 5.5);
+        doc.text(formatPdfText("CONTACT PHONE"), 110, currentY + 5.5);
+        doc.text(formatPdfText("CLASS"), 145, currentY + 5.5);
+        doc.text(formatPdfText("OUTSTANDING DUE"), 170, currentY + 5.5);
+        currentY += 10;
+      };
 
-      customers.slice(0, 18).forEach(c => {
-        if (rowY > 260) return;
-        doc.text(c.id, 18, rowY);
-        doc.text(c.name, 65, rowY);
-        doc.text(c.phone, 115, rowY);
-        doc.text(c.customerType, 145, rowY);
-        doc.setTextColor(c.dueBalance > 0 ? 190 : 51, c.dueBalance > 0 ? 24 : 65, c.dueBalance > 0 ? 74 : 85);
-        doc.setFont('helvetica', c.dueBalance > 0 ? 'bold' : 'normal');
-        doc.text(`$${c.dueBalance.toFixed(2)}`, 172, rowY);
-        doc.setFont('helvetica', 'normal');
+      drawCustDueHeader();
+
+      const custList = searchQuery.trim() ? activeCustomersList : customersWithDue;
+      custList.forEach(c => {
+        if (checkPageBreak(8)) {
+          drawCustDueHeader();
+        }
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7.5);
         doc.setTextColor(51, 65, 85);
-        rowY += 6;
+
+        doc.text(c.id, 18, currentY);
+        doc.text(formatPdfText(c.name.length > 24 ? c.name.substring(0, 24) + '...' : c.name), 55, currentY);
+        doc.text(c.phone || 'N/A', 110, currentY);
+        doc.text(formatPdfText(c.customerType || 'Standard'), 145, currentY);
+        setPdfFont(doc, 'bold');
+        doc.setTextColor(c.dueBalance > 0 ? 190 : 51, c.dueBalance > 0 ? 24 : 65, c.dueBalance > 0 ? 74 : 85);
+        doc.text(formatPdfCurrency(c.dueBalance), 170, currentY);
+        setPdfFont(doc, 'normal');
+        doc.setTextColor(51, 65, 85);
+        currentY += 6;
       });
-    } 
+    }
+    // 9. SUPPLIER DUE REPORT
     else if (activeReport === 'supplier_due') {
       doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 15, 'F');
+      doc.rect(15, currentY, 180, 15, 'F');
       
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(8.5);
       doc.setTextColor(71, 85, 105);
-      doc.text(`TOTAL SUPPLIER DEBTS PAYABLE LEDGER: $${totalSupplierDueOutstanding.toFixed(2)}`, 20, startY + 9.5);
+      doc.text(formatPdfText(`TOTAL SUPPLIER DEBTS PAYABLE LEDGER: ${formatPdfCurrency(totalSupplierDueOutstanding)}`), 18, currentY + 9.5);
 
-      // Table Header
-      doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 22, 180, 8, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text("SUPPLIER ID", 18, startY + 27.5);
-      doc.text("SUPPLIER ENTITY NAME", 55, startY + 27.5);
-      doc.text("CONTACT EMAIL", 105, startY + 27.5);
-      doc.text("PAYMENT TYPE", 145, startY + 27.5);
-      doc.text("OUTSTANDING DEBT ($)", 172, startY + 27.5);
+      currentY += 21;
 
-      let rowY = startY + 34;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
-      doc.setFontSize(7.5);
+      const drawSuppDueHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("SUPPLIER ID"), 18, currentY + 5.5);
+        doc.text(formatPdfText("SUPPLIER ENTITY NAME"), 50, currentY + 5.5);
+        doc.text(formatPdfText("CONTACT DETAILS"), 105, currentY + 5.5);
+        doc.text(formatPdfText("CATEGORY"), 145, currentY + 5.5);
+        doc.text(formatPdfText("OUTSTANDING DEBT"), 170, currentY + 5.5);
+        currentY += 10;
+      };
 
-      suppliers.slice(0, 18).forEach(s => {
-        if (rowY > 260) return;
-        doc.text(s.id.substring(0, 12) + '...', 18, rowY);
-        doc.text(s.name, 55, rowY);
-        doc.text(s.email || 'N/A', 105, rowY);
-        doc.text(s.paymentType || 'Cash', 145, rowY);
-        const dueVal = s.dueBalance ?? 0;
-        doc.setTextColor(dueVal > 0 ? 190 : 51, dueVal > 0 ? 24 : 65, dueVal > 0 ? 74 : 85);
-        doc.setFont('helvetica', dueVal > 0 ? 'bold' : 'normal');
-        doc.text(`$${dueVal.toFixed(2)}`, 172, rowY);
-        doc.setFont('helvetica', 'normal');
+      drawSuppDueHeader();
+
+      const suppList = searchQuery.trim() ? activeSuppliersList : suppliersWithDue;
+      suppList.forEach(s => {
+        if (checkPageBreak(8)) {
+          drawSuppDueHeader();
+        }
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7.5);
         doc.setTextColor(51, 65, 85);
-        rowY += 6;
+
+        doc.text(s.id.substring(0, 12), 18, currentY);
+        doc.text(formatPdfText(s.name.length > 22 ? s.name.substring(0, 22) + '...' : s.name), 50, currentY);
+        doc.text(formatPdfText(s.phone || s.email || 'N/A'), 105, currentY);
+        doc.text(formatPdfText(s.category || 'Standard'), 145, currentY);
+        
+        const dueVal = s.dueBalance ?? 0;
+        setPdfFont(doc, 'bold');
+        doc.setTextColor(dueVal > 0 ? 190 : 51, dueVal > 0 ? 24 : 65, dueVal > 0 ? 74 : 85);
+        doc.text(formatPdfCurrency(dueVal), 170, currentY);
+        setPdfFont(doc, 'normal');
+        doc.setTextColor(51, 65, 85);
+        currentY += 6;
       });
-    } 
+    }
+    // 10. TAX / VAT COLLECTED REPORT
     else if (activeReport === 'tax_vat') {
       doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 20, 'F');
+      doc.rect(15, currentY, 180, 18, 'F');
       
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
-      doc.text("REGIONAL TAXATION / VAT LEDGER SUMMARY:", 20, startY + 6);
-
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(8.5);
-      doc.setTextColor(15, 23, 42);
-      doc.text(`Nett Taxable Trade Volume: $${totalTaxableNet.toFixed(2)}`, 20, startY + 14);
-      doc.text(`Total VAT Collected: $${calculatedTaxCollected.toFixed(2)}`, 110, startY + 14);
-      doc.text(`Gross Trade Volume: $${grossRevenueWithTax.toFixed(2)}`, 182, startY + 14);
+      doc.setTextColor(71, 85, 105);
+      doc.text(formatPdfText("REGIONAL TAXATION / VAT LEDGER SUMMARY:"), 18, currentY + 5);
 
-      // Table Header
-      doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 26, 180, 8, 'F');
-      
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'normal');
       doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text("SALE DATE", 18, startY + 31.5);
-      doc.text("TRANSACTION REFERENCE ID", 45, startY + 31.5);
-      doc.text("CUSTOMER RECIPIENT", 95, startY + 31.5);
-      doc.text("TAX VALUE (ACCRUED)", 142, startY + 31.5);
-      doc.text("NET AMOUNT ($)", 175, startY + 31.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text(formatPdfText(`Nett Taxable Trade Volume: ${formatPdfCurrency(totalTaxableNet)}`), 18, currentY + 12);
+      doc.text(formatPdfText(`Total VAT Collected: ${formatPdfCurrency(calculatedTaxCollected)}`), 90, currentY + 12);
+      doc.text(formatPdfText(`Gross Trade Volume: ${formatPdfCurrency(grossRevenueWithTax)}`), 150, currentY + 12);
 
-      let rowY = startY + 38;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
-      doc.setFontSize(7.5);
+      currentY += 24;
 
-      filteredSales.slice(0, 18).forEach(s => {
-        if (rowY > 260) return;
-        doc.text(s.saleDate.split('T')[0], 18, rowY);
-        doc.text(s.id, 45, rowY);
-        doc.text(s.customerName, 95, rowY);
-        doc.text(`$${s.taxAmount.toFixed(2)} (${s.taxRatePercent}%)`, 142, rowY);
-        doc.text(`$${s.subtotal.toFixed(2)}`, 175, rowY);
-        rowY += 6;
+      const drawTaxHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("SALE DATE"), 18, currentY + 5.5);
+        doc.text(formatPdfText("TRANSACTION REF ID"), 45, currentY + 5.5);
+        doc.text(formatPdfText("CUSTOMER RECIPIENT"), 95, currentY + 5.5);
+        doc.text(formatPdfText("TAX VALUE (ACCRUED)"), 140, currentY + 5.5);
+        doc.text(formatPdfText("NET AMOUNT"), 175, currentY + 5.5);
+        currentY += 10;
+      };
+
+      drawTaxHeader();
+
+      const taxList = searchQuery.trim() ? searchableSales : filteredSales;
+      taxList.forEach(s => {
+        if (checkPageBreak(8)) {
+          drawTaxHeader();
+        }
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(51, 65, 85);
+
+        doc.text(s.saleDate.split('T')[0], 18, currentY);
+        doc.text(s.id.substring(0, 18), 45, currentY);
+        doc.text(formatPdfText(s.customerName.length > 22 ? s.customerName.substring(0, 22) + '...' : s.customerName), 95, currentY);
+        doc.text(formatPdfText(`${formatPdfCurrency(s.taxAmount)} (${s.taxRatePercent}%)`), 140, currentY);
+        doc.text(formatPdfCurrency(s.subtotal), 175, currentY);
+        currentY += 6;
       });
     }
+    // 11. SYSTEM ACTIVITY AUDIT LOG
     else if (activeReport === 'activity_logs') {
       doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 20, 'F');
+      doc.rect(15, currentY, 180, 15, 'F');
       
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
-      doc.text("SYSTEM ACTIVITY AUDIT JOURNAL SUMMARY:", 20, startY + 6);
-
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(8.5);
-      doc.setTextColor(15, 23, 42);
-      doc.text(`Total Tracked Operations: ${filteredSystemLogs.length} Entries`, 20, startY + 14);
-      doc.text(`Active Security Engine: Yes`, 85, startY + 14);
-      doc.text(`Database: Connected Real-Time`, 140, startY + 14);
+      doc.setTextColor(71, 85, 105);
+      doc.text(formatPdfText(`SYSTEM AUDIT LOGS SUMMARY: ${filteredSystemLogs.length} Total Tracked Operations`), 18, currentY + 9.5);
 
-      // Table Header
-      doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 26, 180, 8, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text("TIMESTAMP", 18, startY + 31.5);
-      doc.text("ACTION TYPE", 55, startY + 31.5);
-      doc.text("OPERATOR USER", 95, startY + 31.5);
-      doc.text("DETAILS & CONTEXT", 135, startY + 31.5);
+      currentY += 21;
 
-      let rowY = startY + 38;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
-      doc.setFontSize(7.5);
+      const drawLogHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("TIMESTAMP"), 18, currentY + 5.5);
+        doc.text(formatPdfText("ACTION TYPE"), 55, currentY + 5.5);
+        doc.text(formatPdfText("OPERATOR USER"), 95, currentY + 5.5);
+        doc.text(formatPdfText("DETAILS & CONTEXT"), 135, currentY + 5.5);
+        currentY += 10;
+      };
 
-      searchableSystemLogs.slice(0, 18).forEach(l => {
-        if (rowY > 260) return;
+      drawLogHeader();
+
+      const logList = searchQuery.trim() ? searchableSystemLogs : filteredSystemLogs;
+      logList.forEach(l => {
+        if (checkPageBreak(8)) {
+          drawLogHeader();
+        }
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(51, 65, 85);
+
         const shortTime = new Date(l.timestamp).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
-        doc.text(shortTime, 18, rowY);
-        doc.text(l.action, 55, rowY);
-        doc.text(l.user.length > 18 ? l.user.substring(0, 18) + '...' : l.user, 95, rowY);
+        doc.text(shortTime, 18, currentY);
+        doc.text(formatPdfText(l.action), 55, currentY);
+        doc.text(formatPdfText(l.user.length > 18 ? l.user.substring(0, 18) + '...' : l.user), 95, currentY);
         const detailTxt = l.details || '';
-        doc.text(detailTxt.length > 34 ? detailTxt.substring(0, 34) + '...' : detailTxt, 135, rowY);
-        rowY += 6;
+        doc.text(formatPdfText(detailTxt.length > 32 ? detailTxt.substring(0, 32) + '...' : detailTxt), 135, currentY);
+        currentY += 6;
       });
     }
+    // 12. CUSTOMER STATEMENT
     else if (activeReport === 'customer_statement') {
       if (!currentCustomer) {
         alert("Please select a customer first.");
         return;
       }
       doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 22, 'F');
+      doc.rect(15, currentY, 180, 22, 'F');
       
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
-      doc.text(`CUSTOMER ACCOUNT INFRASTRUCTURE:`, 20, startY + 5);
-
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(8.5);
+      doc.setTextColor(71, 85, 105);
+      doc.text(formatPdfText("CUSTOMER ACCOUNT STATEMENT:"), 18, currentY + 5);
+
+      setPdfFont(doc, 'normal');
+      doc.setFontSize(8);
       doc.setTextColor(15, 23, 42);
-      doc.text(`Client: ${currentCustomer.name}`, 20, startY + 12);
-      doc.text(`Contact: ${currentCustomer.phone}`, 20, startY + 18);
-      doc.text(`Address: ${currentCustomer.address || 'N/A'}`, 100, startY + 12);
-      doc.text(`VAT ID: ${currentCustomer.vatNumber || 'N/A'}`, 100, startY + 18);
+      doc.text(formatPdfText(`Client: ${currentCustomer.name}`), 18, currentY + 12);
+      doc.text(formatPdfText(`Contact: ${currentCustomer.phone}`), 18, currentY + 18);
+      doc.text(formatPdfText(`Address: ${currentCustomer.address || 'N/A'}`), 100, currentY + 12);
+      doc.text(formatPdfText(`VAT ID: ${currentCustomer.vatNumber || 'N/A'}`), 100, currentY + 18);
 
-      // Bento Grid Summary Boxes
+      currentY += 26;
+
       doc.setFillColor(243, 244, 246);
-      doc.rect(15, startY + 26, 180, 14, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(30, 41, 59);
-      doc.text(`Opening Bal: $${initialOpeningBalance.toFixed(2)}`, 18, startY + 34.5);
-      doc.text(`Total Sales: $${totalSalesDebit.toFixed(2)}`, 62, startY + 34.5);
-      doc.text(`Total Payments: $${totalPaymentsCredit.toFixed(2)}`, 108, startY + 34.5);
-      doc.text(`Outstanding: $${derivedOutstanding.toFixed(2)}`, 154, startY + 34.5);
-
-      // Table Header
-      doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 44, 180, 8, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text("DATE", 18, startY + 49.5);
-      doc.text("REFERENCE NO", 40, startY + 49.5);
-      doc.text("TYPE", 75, startY + 49.5);
-      doc.text("DEBIT ($)", 110, startY + 49.5);
-      doc.text("CREDIT ($)", 138, startY + 49.5);
-      doc.text("RUNNING BAL ($)", 164, startY + 49.5);
-
-      let rowY = startY + 56;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
+      doc.rect(15, currentY, 180, 10, 'F');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(7.5);
+      doc.setTextColor(30, 41, 59);
+      doc.text(formatPdfText(`Opening Bal: ${formatPdfCurrency(initialOpeningBalance)}`), 18, currentY + 6.5);
+      doc.text(formatPdfText(`Total Sales: ${formatPdfCurrency(totalSalesDebit)}`), 62, currentY + 6.5);
+      doc.text(formatPdfText(`Total Payments: ${formatPdfCurrency(totalPaymentsCredit)}`), 108, currentY + 6.5);
+      doc.text(formatPdfText(`Outstanding: ${formatPdfCurrency(derivedOutstanding)}`), 154, currentY + 6.5);
+
+      currentY += 16;
+
+      const drawCustStmtHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("DATE"), 18, currentY + 5.5);
+        doc.text(formatPdfText("REFERENCE NO"), 40, currentY + 5.5);
+        doc.text(formatPdfText("TYPE"), 75, currentY + 5.5);
+        doc.text(formatPdfText("DEBIT"), 110, currentY + 5.5);
+        doc.text(formatPdfText("CREDIT"), 138, currentY + 5.5);
+        doc.text(formatPdfText("RUNNING BAL"), 164, currentY + 5.5);
+        currentY += 10;
+      };
+
+      drawCustStmtHeader();
 
       // Print initial starting balance row
-      doc.setFont('helvetica', 'bold');
-      doc.text("-", 18, rowY);
-      doc.text("INITIAL", 40, rowY);
-      doc.text("Opening Balance", 75, rowY);
-      doc.text("-", 110, rowY);
-      doc.text("-", 138, rowY);
-      doc.text(`$${initialOpeningBalance.toFixed(2)}`, 164, rowY);
-      doc.setFont('helvetica', 'normal');
-      rowY += 6;
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(7.5);
+      doc.text("-", 18, currentY);
+      doc.text("INITIAL", 40, currentY);
+      doc.text("Opening Balance", 75, currentY);
+      doc.text("-", 110, currentY);
+      doc.text("-", 138, currentY);
+      doc.text(formatPdfCurrency(initialOpeningBalance), 164, currentY);
+      currentY += 6;
 
-      customerLedgerEntries.slice(0, 24).forEach(item => {
-        if (rowY > 260) return;
-        doc.text(new Date(item.date).toLocaleDateString(), 18, rowY);
-        doc.text(item.ref.substring(0, 15), 40, rowY);
-        doc.text(item.type, 75, rowY);
-        doc.text(item.debit > 0 ? `$${item.debit.toFixed(2)}` : "-", 110, rowY);
-        doc.text(item.credit > 0 ? `$${item.credit.toFixed(2)}` : "-", 138, rowY);
-        doc.text(`$${item.runningBalance.toFixed(2)}`, 164, rowY);
-        rowY += 6;
+      customerLedgerEntries.forEach(item => {
+        if (checkPageBreak(8)) {
+          drawCustStmtHeader();
+        }
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(51, 65, 85);
+
+        doc.text(new Date(item.date).toLocaleDateString(), 18, currentY);
+        doc.text(formatPdfText(item.ref.substring(0, 15)), 40, currentY);
+        doc.text(formatPdfText(item.type), 75, currentY);
+        doc.text(item.debit > 0 ? formatPdfCurrency(item.debit) : "-", 110, currentY);
+        doc.text(item.credit > 0 ? formatPdfCurrency(item.credit) : "-", 138, currentY);
+        doc.text(formatPdfCurrency(item.runningBalance), 164, currentY);
+        currentY += 6;
       });
     }
+    // 13. SUPPLIER STATEMENT
     else if (activeReport === 'supplier_statement') {
       if (!currentSupplier) {
         alert("Please select a supplier first.");
         return;
       }
       doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 22, 'F');
+      doc.rect(15, currentY, 180, 22, 'F');
       
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
-      doc.text(`SUPPLIER ACCOUNT INFRASTRUCTURE:`, 20, startY + 5);
-
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(8.5);
+      doc.setTextColor(71, 85, 105);
+      doc.text(formatPdfText("SUPPLIER ACCOUNT STATEMENT:"), 18, currentY + 5);
+
+      setPdfFont(doc, 'normal');
+      doc.setFontSize(8);
       doc.setTextColor(15, 23, 42);
-      doc.text(`Supplier: ${currentSupplier.name}`, 20, startY + 12);
-      doc.text(`Contact: ${currentSupplier.phone}`, 20, startY + 18);
-      doc.text(`Address: ${currentSupplier.address || 'N/A'}`, 100, startY + 12);
-      doc.text(`Terms: ${currentSupplier.paymentType || 'Credit'}`, 100, startY + 18);
+      doc.text(formatPdfText(`Supplier: ${currentSupplier.name}`), 18, currentY + 12);
+      doc.text(formatPdfText(`Contact: ${currentSupplier.phone}`), 18, currentY + 18);
+      doc.text(formatPdfText(`Address: ${currentSupplier.address || 'N/A'}`), 100, currentY + 12);
+      doc.text(formatPdfText(`Terms: ${currentSupplier.paymentType || 'Credit'}`), 100, currentY + 18);
 
-      // Bento Grid Summary Boxes
+      currentY += 26;
+
       doc.setFillColor(243, 244, 246);
-      doc.rect(15, startY + 26, 180, 14, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(30, 41, 59);
-      doc.text(`Opening Bal: $${initialSupplierOpeningBalance.toFixed(2)}`, 18, startY + 34.5);
-      doc.text(`Total Credit Purchases: $${totalSupplierPurchasesCredit.toFixed(2)}`, 55, startY + 34.5);
-      doc.text(`Total Payments: $${totalSupplierPaymentsDebit.toFixed(2)}`, 108, startY + 34.5);
-      doc.text(`Outstanding: $${derivedSupplierOutstanding.toFixed(2)}`, 154, startY + 34.5);
-
-      // Table Header
-      doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 44, 180, 8, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text("DATE", 18, startY + 49.5);
-      doc.text("REFERENCE NO", 40, startY + 49.5);
-      doc.text("TYPE", 75, startY + 49.5);
-      doc.text("DEBIT ($) [PAY]", 110, startY + 49.5);
-      doc.text("CREDIT ($) [BUY]", 138, startY + 49.5);
-      doc.text("RUNNING BAL ($)", 164, startY + 49.5);
-
-      let rowY = startY + 56;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
+      doc.rect(15, currentY, 180, 10, 'F');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(7.5);
+      doc.setTextColor(30, 41, 59);
+      doc.text(formatPdfText(`Opening Bal: ${formatPdfCurrency(initialSupplierOpeningBalance)}`), 18, currentY + 6.5);
+      doc.text(formatPdfText(`Total Credit Purchases: ${formatPdfCurrency(totalSupplierPurchasesCredit)}`), 55, currentY + 6.5);
+      doc.text(formatPdfText(`Total Payments: ${formatPdfCurrency(totalSupplierPaymentsDebit)}`), 108, currentY + 6.5);
+      doc.text(formatPdfText(`Outstanding: ${formatPdfCurrency(derivedSupplierOutstanding)}`), 154, currentY + 6.5);
 
-      // Print initial starting balance row
-      doc.setFont('helvetica', 'bold');
-      doc.text("-", 18, rowY);
-      doc.text("INITIAL", 40, rowY);
-      doc.text("Opening Balance", 75, rowY);
-      doc.text("-", 110, rowY);
-      doc.text("-", 138, rowY);
-      doc.text(`$${initialSupplierOpeningBalance.toFixed(2)}`, 164, rowY);
-      doc.setFont('helvetica', 'normal');
-      rowY += 6;
+      currentY += 16;
 
-      supplierLedgerEntries.slice(0, 24).forEach(item => {
-        if (rowY > 260) return;
-        doc.text(new Date(item.date).toLocaleDateString(), 18, rowY);
-        doc.text(item.ref.substring(0, 15), 40, rowY);
-        doc.text(item.type, 75, rowY);
-        doc.text(item.debit > 0 ? `$${item.debit.toFixed(2)}` : "-", 110, rowY);
-        doc.text(item.credit > 0 ? `$${item.credit.toFixed(2)}` : "-", 138, rowY);
-        doc.text(`$${item.runningBalance.toFixed(2)}`, 164, rowY);
-        rowY += 6;
+      const drawSuppStmtHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("DATE"), 18, currentY + 5.5);
+        doc.text(formatPdfText("REFERENCE NO"), 40, currentY + 5.5);
+        doc.text(formatPdfText("TYPE"), 75, currentY + 5.5);
+        doc.text(formatPdfText("DEBIT [PAY]"), 110, currentY + 5.5);
+        doc.text(formatPdfText("CREDIT [BUY]"), 138, currentY + 5.5);
+        doc.text(formatPdfText("RUNNING BAL"), 164, currentY + 5.5);
+        currentY += 10;
+      };
+
+      drawSuppStmtHeader();
+
+      setPdfFont(doc, 'bold');
+      doc.setFontSize(7.5);
+      doc.text("-", 18, currentY);
+      doc.text("INITIAL", 40, currentY);
+      doc.text("Opening Balance", 75, currentY);
+      doc.text("-", 110, currentY);
+      doc.text("-", 138, currentY);
+      doc.text(formatPdfCurrency(initialSupplierOpeningBalance), 164, currentY);
+      currentY += 6;
+
+      supplierLedgerEntries.forEach(item => {
+        if (checkPageBreak(8)) {
+          drawSuppStmtHeader();
+        }
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(51, 65, 85);
+
+        doc.text(new Date(item.date).toLocaleDateString(), 18, currentY);
+        doc.text(formatPdfText(item.ref.substring(0, 15)), 40, currentY);
+        doc.text(formatPdfText(item.type), 75, currentY);
+        doc.text(item.debit > 0 ? formatPdfCurrency(item.debit) : "-", 110, currentY);
+        doc.text(item.credit > 0 ? formatPdfCurrency(item.credit) : "-", 138, currentY);
+        doc.text(formatPdfCurrency(item.runningBalance), 164, currentY);
+        currentY += 6;
       });
     }
-    else if (activeReport === 'expense_analytics') {
-      doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 22, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
-      doc.text("OPERATING EXPENSES (OPEX) ANALYTICS SUMMARY:", 20, startY + 5);
-
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8.5);
-      doc.setTextColor(15, 23, 42);
-      doc.text(`Total Active Outflow: $${expenseAnalyticsSummary.total.toFixed(2)}`, 20, startY + 12);
-      doc.text(`Transaction Volume: ${expenseAnalyticsSummary.count} Active Tx`, 20, startY + 18);
-      doc.text(`Cash Settle: $${cashImpactAnalysis.cashOpex.toFixed(2)}`, 110, startY + 12);
-      doc.text(`Deferred Creditor: $${cashImpactAnalysis.nonCashOpex.toFixed(2)}`, 110, startY + 18);
-
-      // Category Metrics Box
-      doc.setFillColor(243, 244, 246);
-      doc.rect(15, startY + 26, 180, 18, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(30, 41, 59);
-      doc.text("BUDGET BREAKDOWN BY BUSINESS CATEGORIES:", 18, startY + 31.5);
-      
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(7.5);
-      let catLineText = "";
-      categoryExpensesReport.slice(0, 4).forEach((c, i) => {
-        catLineText += `${c.category}: $${c.total.toFixed(2)} (${c.percentage.toFixed(1)}%)   |   `;
-      });
-      if (catLineText.endsWith('   |   ')) {
-        catLineText = catLineText.substring(0, catLineText.length - 7);
-      }
-      doc.text(catLineText, 18, startY + 38);
-
-      let vendorLineText = "";
-      vendorExpensesReport.slice(0, 4).forEach((v, i) => {
-        vendorLineText += `${v.vendor}: $${v.total.toFixed(2)} (${v.count} Tx)   |   `;
-      });
-      if (vendorLineText.endsWith('   |   ')) {
-        vendorLineText = vendorLineText.substring(0, vendorLineText.length - 7);
-      }
-      doc.text(`Creditors: ${vendorLineText || 'None'}`, 18, startY + 42);
-
-      // Table Header
-      doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 48, 180, 8, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text("DATE", 18, startY + 53.5);
-      doc.text("EXPENSE ID", 40, startY + 53.5);
-      doc.text("CATEGORY & PAYEE", 70, startY + 53.5);
-      doc.text("METHOD", 130, startY + 53.5);
-      doc.text("STATUS", 152, startY + 53.5);
-      doc.text("AMOUNT ($)", 180, startY + 53.5);
-
-      let rowY = startY + 60;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
-      doc.setFontSize(7.5);
-
-      filteredExpensesList.slice(0, 24).forEach(item => {
-        if (rowY > 260) return;
-        const isVoid = isVoidStatus(item.status);
-        doc.text(item.expenseDate ? item.expenseDate.split('T')[0] : 'N/A', 18, rowY);
-        doc.text((item.id || '').substring(0, 10).toUpperCase(), 40, rowY);
-        
-        let label = `${item.category}`;
-        if (item.vendorName) label += ` (${item.vendorName})`;
-        doc.text(label.length > 32 ? label.substring(0, 32) + '...' : label, 70, rowY);
-        
-        doc.text(item.paymentMethod || 'Cash', 130, rowY);
-        
-        if (isVoid) {
-          doc.setTextColor(220, 38, 38);
-          doc.setFont('helvetica', 'bold');
-          doc.text("Voided", 152, rowY);
-          doc.setFont('helvetica', 'normal');
-          doc.setTextColor(51, 65, 85);
-        } else {
-          doc.text("Active", 152, rowY);
-        }
-        
-        doc.setFont('helvetica', 'bold');
-        if (isVoid) {
-          doc.setTextColor(148, 163, 184);
-          doc.text(`$${Number(item.amount || 0).toFixed(2)}`, 180, rowY);
-          doc.setTextColor(51, 65, 85);
-        } else {
-          doc.text(`$${Number(item.amount || 0).toFixed(2)}`, 180, rowY);
-        }
-        doc.setFont('helvetica', 'normal');
-        
-        rowY += 6;
-      });
-    }
+    // 14. CHART OF ACCOUNTS REPORT
     else if (activeReport === 'chart_of_accounts') {
       doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 22, 'F');
+      doc.rect(15, currentY, 180, 22, 'F');
       
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
-      doc.text("ENTERPRISE CHART OF ACCOUNTS SUMMARY:", 20, startY + 5);
-
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(8.5);
-      doc.setTextColor(15, 23, 42);
-      doc.text(`Total Accounts: ${coaSummaryStats.totalAccounts}   |   Active: ${coaSummaryStats.activeAccounts}`, 20, startY + 12);
-      doc.text(`Assets Balance: $${coaSummaryStats.assetsBalance.toFixed(2)}   |   Liabilities: $${coaSummaryStats.liabilitiesBalance.toFixed(2)}`, 20, startY + 18);
-      doc.text(`Equity Balance: $${coaSummaryStats.equityBalance.toFixed(2)}`, 110, startY + 12);
-      doc.text(`Revenue: $${coaSummaryStats.revenueBalance.toFixed(2)}   |   Expenses: $${coaSummaryStats.expensesBalance.toFixed(2)}`, 110, startY + 18);
+      doc.setTextColor(71, 85, 105);
+      doc.text(formatPdfText("ENTERPRISE CHART OF ACCOUNTS SUMMARY:"), 18, currentY + 5);
 
-      // Table Header
-      doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 26, 180, 8, 'F');
-      
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'normal');
       doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text("CODE", 18, startY + 31.5);
-      doc.text("ACCOUNT NAME", 42, startY + 31.5);
-      doc.text("TYPE", 102, startY + 31.5);
-      doc.text("PARENT", 132, startY + 31.5);
-      doc.text("EDITABLE", 154, startY + 31.5);
-      doc.text("BALANCE ($)", 174, startY + 31.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text(formatPdfText(`Total Accounts: ${coaSummaryStats.totalAccounts}   |   Active: ${coaSummaryStats.activeAccounts}`), 18, currentY + 12);
+      doc.text(formatPdfText(`Assets: ${formatPdfCurrency(coaSummaryStats.assetsBalance)}   |   Liabilities: ${formatPdfCurrency(coaSummaryStats.liabilitiesBalance)}`), 18, currentY + 18);
+      doc.text(formatPdfText(`Equity: ${formatPdfCurrency(coaSummaryStats.equityBalance)}`), 110, currentY + 12);
+      doc.text(formatPdfText(`Revenue: ${formatPdfCurrency(coaSummaryStats.revenueBalance)}   |   Expenses: ${formatPdfCurrency(coaSummaryStats.expensesBalance)}`), 110, currentY + 18);
 
-      let rowY = startY + 38;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
-      doc.setFontSize(7.5);
+      currentY += 28;
 
-      coa.forEach(a => {
-        if (rowY > 260) return;
+      const drawCoaHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("CODE"), 18, currentY + 5.5);
+        doc.text(formatPdfText("ACCOUNT NAME"), 42, currentY + 5.5);
+        doc.text(formatPdfText("TYPE"), 102, currentY + 5.5);
+        doc.text(formatPdfText("PARENT"), 132, currentY + 5.5);
+        doc.text(formatPdfText("EDITABLE"), 154, currentY + 5.5);
+        doc.text(formatPdfText("BALANCE"), 174, currentY + 5.5);
+        currentY += 10;
+      };
+
+      drawCoaHeader();
+
+      const coaList = searchQuery.trim() ? searchableCOA : coa;
+      coaList.forEach(a => {
+        if (checkPageBreak(8)) {
+          drawCoaHeader();
+        }
         const bal = getCOAAccountLiveBalance(a.code);
-        doc.text(a.code, 18, rowY);
-        doc.text(a.name.length > 32 ? a.name.substring(0, 32) + '...' : a.name, 42, rowY);
-        doc.text(a.type, 102, rowY);
-        doc.text(a.parentAccount || 'None', 132, rowY);
-        doc.text(a.editable ? 'Yes' : 'No', 154, rowY);
-        doc.text(`$${bal.toFixed(2)}`, 174, rowY);
-        rowY += 6.5;
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(51, 65, 85);
+
+        doc.text(a.code, 18, currentY);
+        doc.text(formatPdfText(a.name.length > 30 ? a.name.substring(0, 30) + '...' : a.name), 42, currentY);
+        doc.text(formatPdfText(a.type), 102, currentY);
+        doc.text(formatPdfText(a.parentAccount || 'None'), 132, currentY);
+        doc.text(a.editable ? 'Yes' : 'No', 154, currentY);
+        doc.text(formatPdfCurrency(bal), 174, currentY);
+        currentY += 6.5;
       });
     }
-    else if (activeReport === 'general_ledger') {
-      const selectedAcc = coa.find(a => a.code === selectedGlAccountId || a.id === selectedGlAccountId);
-      const accName = selectedAcc ? selectedAcc.name : 'Unknown Account';
-
+    // 15. EXPENSE ANALYTICS & REPORTS
+    else if (activeReport === 'expense_analytics') {
       doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 22, 'F');
+      doc.rect(15, currentY, 180, 22, 'F');
       
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
-      doc.text(`GENERAL LEDGER SUMMARY: ${selectedGlAccountId} - ${accName.toUpperCase()}`, 20, startY + 5);
-
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(8.5);
-      doc.setTextColor(15, 23, 42);
-      doc.text(`Opening Balance: $${generalLedgerData.openingBalance.toFixed(2)}   |   Total Debits: $${generalLedgerData.totalDebits.toFixed(2)}`, 20, startY + 12);
-      doc.text(`Closing Balance: $${generalLedgerData.closingBalance.toFixed(2)}   |   Total Credits: $${generalLedgerData.totalCredits.toFixed(2)}`, 20, startY + 18);
-      doc.text(`Transactions Count: ${generalLedgerData.entries.length}`, 120, startY + 12);
-      doc.text(`Normal Balance Type: ${generalLedgerData.isDebitNormal ? 'Debit-Normal' : 'Credit-Normal'}`, 120, startY + 18);
+      doc.setTextColor(71, 85, 105);
+      doc.text(formatPdfText("OPERATING EXPENSES ANALYTICS SUMMARY:"), 18, currentY + 5);
 
-      // Table Header
-      doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 26, 180, 8, 'F');
-      
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'normal');
       doc.setFontSize(8);
-      doc.setTextColor(255, 255, 255);
-      doc.text("DATE", 18, startY + 31.5);
-      doc.text("POSTING NO", 35, startY + 31.5);
-      doc.text("VOUCHER TYPE", 65, startY + 31.5);
-      doc.text("NARRATION", 95, startY + 31.5);
-      doc.text("DEBIT ($)", 140, startY + 31.5);
-      doc.text("CREDIT ($)", 162, startY + 31.5);
-      doc.text("BALANCE ($)", 182, startY + 31.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text(formatPdfText(`Total Outflow: ${formatPdfCurrency(expenseAnalyticsSummary.total)}  |  Count: ${expenseAnalyticsSummary.count} Tx`), 18, currentY + 12);
+      doc.text(formatPdfText(`Cash Settle: ${formatPdfCurrency(cashImpactAnalysis.cashOpex)}  |  Deferred Creditor: ${formatPdfCurrency(cashImpactAnalysis.nonCashOpex)}`), 18, currentY + 18);
 
-      let rowY = startY + 38;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
-      doc.setFontSize(7.5);
+      currentY += 28;
 
-      // Print Opening Balance row
-      doc.setFont('helvetica', 'bold');
-      doc.text("-", 18, rowY);
-      doc.text("INITIAL", 35, rowY);
-      doc.text("Opening Balance", 65, rowY);
-      doc.text("Starting cumulative balance", 95, rowY);
-      doc.text("-", 140, rowY);
-      doc.text("-", 162, rowY);
-      doc.text(`$${generalLedgerData.openingBalance.toFixed(2)}`, 182, rowY);
-      doc.setFont('helvetica', 'normal');
-      rowY += 6.5;
+      const drawExpenseHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("DATE"), 18, currentY + 5.5);
+        doc.text(formatPdfText("EXPENSE ID"), 40, currentY + 5.5);
+        doc.text(formatPdfText("CATEGORY & PAYEE"), 70, currentY + 5.5);
+        doc.text(formatPdfText("METHOD"), 130, currentY + 5.5);
+        doc.text(formatPdfText("STATUS"), 152, currentY + 5.5);
+        doc.text(formatPdfText("AMOUNT"), 175, currentY + 5.5);
+        currentY += 10;
+      };
 
-      generalLedgerData.entries.slice(0, 25).forEach(e => {
-        if (rowY > 260) return;
-        doc.text(e.postingDate.split('T')[0], 18, rowY);
-        doc.text(e.postingNumber, 35, rowY);
-        doc.text(e.voucherType, 65, rowY);
-        
-        const shortNarration = e.narration.length > 25 ? e.narration.substring(0, 25) + '...' : e.narration;
-        doc.text(shortNarration, 95, rowY);
-        
-        doc.text(e.debit > 0 ? `$${e.debit.toFixed(2)}` : '-', 140, rowY);
-        doc.text(e.credit > 0 ? `$${e.credit.toFixed(2)}` : '-', 162, rowY);
-        doc.text(`$${e.runningBalance.toFixed(2)}`, 182, rowY);
-        rowY += 6.5;
+      drawExpenseHeader();
+
+      const expList = searchQuery.trim() ? searchableExpenses : filteredExpensesList;
+      expList.forEach(item => {
+        if (checkPageBreak(8)) {
+          drawExpenseHeader();
+        }
+        const isVoid = isVoidStatus(item.status);
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(51, 65, 85);
+
+        doc.text(item.expenseDate ? item.expenseDate.split('T')[0] : 'N/A', 18, currentY);
+        doc.text((item.id || '').substring(0, 10).toUpperCase(), 40, currentY);
+
+        let label = `${item.category}`;
+        if (item.vendorName) label += ` (${item.vendorName})`;
+        doc.text(formatPdfText(label.length > 30 ? label.substring(0, 30) + '...' : label), 70, currentY);
+
+        doc.text(formatPdfText(item.paymentMethod || 'Cash'), 130, currentY);
+        doc.text(isVoid ? 'Voided' : 'Active', 152, currentY);
+        doc.text(formatPdfCurrency(Number(item.amount || 0)), 175, currentY);
+        currentY += 6;
       });
     }
+    // 16. ENTERPRISE TRIAL BALANCE
     else if (activeReport === 'trial_balance') {
       doc.setFillColor(248, 250, 252);
-      doc.rect(15, startY, 180, 24, 'F');
+      doc.rect(15, currentY, 180, 20, 'F');
       
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
-      doc.text("ENTERPRISE TRIAL BALANCE SUMMARY:", 20, startY + 5);
-
-      doc.setFont('helvetica', 'normal');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(8.5);
+      doc.setTextColor(71, 85, 105);
+      doc.text(formatPdfText("ENTERPRISE TRIAL BALANCE SUMMARY:"), 18, currentY + 5);
+
+      setPdfFont(doc, 'normal');
+      doc.setFontSize(8);
       doc.setTextColor(15, 23, 42);
-      doc.text(`Total Accounts: ${trialBalanceData.totalAccounts}   |   Status: ${trialBalanceData.isBalanced ? 'BALANCED' : 'OUT OF BALANCE'}`, 20, startY + 12);
-      doc.text(`Total Debits: $${trialBalanceData.totalDebitColumnSum.toFixed(2)}   |   Total Credits: $${trialBalanceData.totalCreditColumnSum.toFixed(2)}`, 20, startY + 18);
-      
-      if (!trialBalanceData.isBalanced) {
-        doc.setTextColor(220, 38, 38);
-        doc.setFont('helvetica', 'bold');
-        doc.text(`DIFFERENCE: $${trialBalanceData.difference.toFixed(2)}`, 130, startY + 12);
-        doc.setTextColor(15, 23, 42);
-        doc.setFont('helvetica', 'normal');
-      } else {
-        doc.setTextColor(16, 185, 129);
-        doc.setFont('helvetica', 'bold');
-        doc.text("✓ BALANCED", 130, startY + 12);
-        doc.setTextColor(15, 23, 42);
-        doc.setFont('helvetica', 'normal');
-      }
-      doc.text(`Last Posting: ${trialBalanceData.lastPostingDate ? trialBalanceData.lastPostingDate.split('T')[0] : 'None'}`, 130, startY + 18);
+      doc.text(formatPdfText(`Total Accounts: ${trialBalanceData.totalAccounts}   |   Status: ${trialBalanceData.isBalanced ? 'BALANCED ✓' : 'OUT OF BALANCE ⚠️'}`), 18, currentY + 12);
+      doc.text(formatPdfText(`Total Debits: ${formatPdfCurrency(trialBalanceData.totalDebitColumnSum)}   |   Total Credits: ${formatPdfCurrency(trialBalanceData.totalCreditColumnSum)}`), 18, currentY + 17);
 
-      // Table Header
-      doc.setFillColor(30, 41, 59);
-      doc.rect(15, startY + 28, 180, 8, 'F');
-      
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(7.5);
-      doc.setTextColor(255, 255, 255);
-      doc.text("CODE", 18, startY + 33.5);
-      doc.text("ACCOUNT NAME", 38, startY + 33.5);
-      doc.text("TYPE", 85, startY + 33.5);
-      doc.text("OPENING", 120, startY + 33.5);
-      doc.text("DEBIT (+)", 142, startY + 33.5);
-      doc.text("CREDIT (-)", 164, startY + 33.5);
-      doc.text("ENDING BAL", 183, startY + 33.5);
+      currentY += 26;
 
-      let rowY = startY + 41;
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(51, 65, 85);
-      doc.setFontSize(7.0);
+      const drawTbHeader = () => {
+        doc.setFillColor(30, 41, 59);
+        doc.rect(15, currentY, 180, 8, 'F');
+        setPdfFont(doc, 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(formatPdfText("CODE"), 18, currentY + 5.5);
+        doc.text(formatPdfText("ACCOUNT NAME"), 38, currentY + 5.5);
+        doc.text(formatPdfText("TYPE"), 85, currentY + 5.5);
+        doc.text(formatPdfText("OPENING"), 120, currentY + 5.5);
+        doc.text(formatPdfText("DEBIT (+)"), 142, currentY + 5.5);
+        doc.text(formatPdfText("CREDIT (-)"), 162, currentY + 5.5);
+        doc.text(formatPdfText("ENDING BAL"), 180, currentY + 5.5);
+        currentY += 10;
+      };
 
-      trialBalanceData.rows.slice(0, 32).forEach(r => {
-        if (rowY > 265) return;
-        doc.text(r.code, 18, rowY);
-        doc.text(r.name.length > 28 ? r.name.substring(0, 28) + '...' : r.name, 38, rowY);
-        doc.text(r.type, 85, rowY);
-        doc.text(`$${r.openingBalance.toFixed(1)}`, 120, rowY);
-        doc.text(r.periodDebit > 0 ? `$${r.periodDebit.toFixed(1)}` : '-', 142, rowY);
-        doc.text(r.periodCredit > 0 ? `$${r.periodCredit.toFixed(1)}` : '-', 164, rowY);
-        
-        doc.setFont('helvetica', 'bold');
-        if (r.debitColumnValue > 0) {
-          doc.text(`$${r.debitColumnValue.toFixed(1)} (Dr)`, 183, rowY);
-        } else if (r.creditColumnValue > 0) {
-          doc.text(`$${r.creditColumnValue.toFixed(1)} (Cr)`, 183, rowY);
-        } else {
-          doc.text('$0.0', 183, rowY);
+      drawTbHeader();
+
+      const tbRows = searchQuery.trim() ? searchableTrialBalanceRows : trialBalanceData.rows;
+      tbRows.forEach(r => {
+        if (checkPageBreak(8)) {
+          drawTbHeader();
         }
-        doc.setFont('helvetica', 'normal');
-        rowY += 6;
+        setPdfFont(doc, 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(51, 65, 85);
+
+        doc.text(r.code, 18, currentY);
+        doc.text(formatPdfText(r.name.length > 26 ? r.name.substring(0, 26) + '...' : r.name), 38, currentY);
+        doc.text(formatPdfText(r.type), 85, currentY);
+        doc.text(formatPdfCurrency(r.openingBalance), 120, currentY);
+        doc.text(r.periodDebit > 0 ? formatPdfCurrency(r.periodDebit) : '-', 142, currentY);
+        doc.text(r.periodCredit > 0 ? formatPdfCurrency(r.periodCredit) : '-', 162, currentY);
+
+        setPdfFont(doc, 'bold');
+        if (r.debitColumnValue > 0) {
+          doc.text(`${formatPdfCurrency(r.debitColumnValue)} (Dr)`, 180, currentY);
+        } else if (r.creditColumnValue > 0) {
+          doc.text(`${formatPdfCurrency(r.creditColumnValue)} (Cr)`, 180, currentY);
+        } else {
+          doc.text(formatPdfCurrency(0), 180, currentY);
+        }
+        setPdfFont(doc, 'normal');
+        currentY += 6;
       });
     }
 
-    // Beautiful footer signature block
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.5);
-    doc.setTextColor(148, 163, 184); // grey border
-    doc.line(15, 275, 195, 275);
-    doc.text("Official Certified Ledger Balance Report Sheet • Restricted Trade Intel", 15, 280);
-    doc.text(`Confidential • Page 1 of 1`, 160, 280);
-
-    // Save outputs securely
+    addPdfFooter();
     doc.save(`ledger_${activeReport}_${startDate}_to_${endDate}.pdf`);
   };
-
-  // Filter lists inside display screens based on search query
-  const searchableSales = filteredSales.filter(s => {
-    const items = getNormalizedItems(s);
-    const hasMatchingProduct = items.some(item => item.productName.toLowerCase().includes(searchQuery.toLowerCase()));
-    return s.customerName.toLowerCase().includes(searchQuery.toLowerCase()) || 
-           hasMatchingProduct || 
-           s.id.toLowerCase().includes(searchQuery.toLowerCase());
-  });
 
   const searchableCustomers = customers.filter(c => {
     return c.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
@@ -3901,34 +4425,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
 
   const salesAreaPoints = salesPoints ? `${trendPaddingX},${trendHeightSvg - trendPaddingY} ${salesPoints} ${trendWidthSvg - trendPaddingX},${trendHeightSvg - trendPaddingY}` : '';
 
-  // Requirement 8: If no sales exist -> show "No sales data available" empty state page
-  if (sales.length === 0 && !loading) {
-    return (
-      <div id="nexus-reports-root" className="space-y-8 animate-fade-in font-sans pb-12 print:space-y-4 print:pb-0">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 print:border-b print:pb-3">
-          <div>
-            <h2 className="text-xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 animate-pulse print:hidden"></span>
-              Operational Intelligence Reports
-            </h2>
-            <p className="text-xs text-slate-400 mt-1 uppercase tracking-wider font-semibold font-mono print:text-slate-500">
-              Custom filters • Multiple layout exports • Professional Print Engine ready
-            </p>
-          </div>
-        </div>
 
-        <div className="flex flex-col items-center justify-center py-24 bg-white border border-slate-200 rounded-[2.5rem] p-8 shadow-2xs">
-          <div className="w-16 h-16 bg-slate-50 rounded-2xl border border-slate-150 flex items-center justify-center mb-4">
-            <ShoppingBag className="w-8 h-8 text-slate-400" />
-          </div>
-          <h3 className="text-base font-bold text-slate-950">No sales data available</h3>
-          <p className="text-xs text-slate-400 mt-1 max-w-sm text-center">
-            Currently, there are no recorded transactions across the system. Log some sales in order to view analytical insights.
-          </p>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div id="nexus-reports-root" className="space-y-8 animate-fade-in font-sans pb-12 print:space-y-4 print:pb-0 w-full max-w-full overflow-x-clip">
@@ -3963,10 +4460,14 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                   'this_year': 'YTD',
                   'all_time': 'Max'
                 };
-                const isSelected = (range === '30_days' && startDate === '2026-05-01' && endDate === '2026-06-01') ||
-                                   (range === '90_days' && startDate === '2026-03-01' && endDate === '2026-06-01') ||
-                                   (range === 'this_year' && startDate === '2026-01-01' && endDate === '2026-06-01') ||
-                                   (range === 'all_time' && startDate === '2020-01-01' && endDate === '2026-06-01');
+                const today = getTodayStr();
+                const d30 = getDaysAgoStr(30);
+                const d90 = getDaysAgoStr(90);
+                const yearStart = `${new Date().getFullYear()}-01-01`;
+                const isSelected = (range === '30_days' && startDate === d30 && endDate === today) ||
+                                   (range === '90_days' && startDate === d90 && endDate === today) ||
+                                   (range === 'this_year' && startDate === yearStart && endDate === today) ||
+                                   (range === 'all_time' && !startDate && !endDate);
                 return (
                   <button 
                     key={range}
@@ -4189,7 +4690,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                 <>
                   <div className="space-y-1">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Total Realised Business Revenue</span>
-                    <p className="text-2xl font-black text-slate-900">${registerSummary.totalRevenue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-slate-900">{formatCurrency(registerSummary.totalRevenue)}</p>
                     <p className="text-[10px] text-slate-400">Over {activeRegisterSales.length} active transactions</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
@@ -4199,7 +4700,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Average Voucher Basket</span>
-                    <p className="text-2xl font-black text-indigo-600">${registerSummary.avgOrderValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-indigo-600">{formatCurrency(registerSummary.avgOrderValue)}</p>
                     <p className="text-[10px] text-slate-400 font-semibold text-slate-500">Active average ticket basket</p>
                   </div>
                 </>
@@ -4209,23 +4710,23 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                 <>
                   <div className="space-y-1">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Total Purchases Ledger</span>
-                    <p className="text-2xl font-black text-slate-900">${purchasesSummary.totalPurchases.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-slate-900">{formatCurrency(purchasesSummary.totalPurchases)}</p>
                     <p className="text-[10px] text-slate-400">
-                      Cash: <span className="font-bold text-slate-600">${purchasesSummary.cashPurchases.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span> • Credit: <span className="font-bold text-slate-600">${purchasesSummary.creditPurchases.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                      Cash: <span className="font-bold text-slate-600">{formatCurrency(purchasesSummary.cashPurchases)}</span> • Credit: <span className="font-bold text-slate-600">{formatCurrency(purchasesSummary.creditPurchases)}</span>
                     </p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Procured Volume & Average Ticket</span>
-                    <p className="text-2xl font-black text-slate-900">{purchasesSummary.quantityPurchased.toLocaleString()} Units</p>
+                    <p className="text-2xl font-black text-slate-900">{formatCurrency(purchasesSummary.quantityPurchased)} Units</p>
                     <p className="text-[10px] text-slate-400">
-                      Average Ticket size: <span className="font-bold text-slate-600">${purchasesSummary.averagePurchase.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      Average Ticket size: <span className="font-bold text-slate-600">{formatCurrency(purchasesSummary.averagePurchase)}</span>
                     </p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Transaction Bounds & Taxes</span>
-                    <p className="text-xl font-black text-emerald-600">Max: ${purchasesSummary.largestPurchase.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-xl font-black text-emerald-600">Max: {formatCurrency(purchasesSummary.largestPurchase)}</p>
                     <p className="text-[10px] text-slate-400">
-                      Min: <span className="font-bold text-slate-600">${purchasesSummary.smallestPurchase.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span> • VAT (15%): <span className="font-bold text-slate-600">${purchasesSummary.totalVAT.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span> • Disc: <span className="font-bold text-rose-600">-${purchasesSummary.totalDiscount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                      Min: <span className="font-bold text-slate-600">{formatCurrency(purchasesSummary.smallestPurchase)}</span> • VAT (15%): <span className="font-bold text-slate-600">{formatCurrency(purchasesSummary.totalVAT)}</span> • Disc: <span className="font-bold text-rose-600">-{formatCurrency(purchasesSummary.totalDiscount)}</span>
                     </p>
                   </div>
                 </>
@@ -4235,17 +4736,17 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                 <>
                   <div className="space-y-1">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Reconciled Revenue & COGS</span>
-                    <p className="text-xl font-black text-slate-900">${financialStatements.totalRevenue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                    <p className="text-[10px] text-rose-500 font-bold">COGS: ${financialStatements.totalCogs.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-xl font-black text-slate-900">{formatCurrency(financialStatements.totalRevenue)}</p>
+                    <p className="text-[10px] text-rose-500 font-bold">COGS: {formatCurrency(financialStatements.totalCogs)}</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Gross Profit & Operating Expenses</span>
-                    <p className="text-xl font-black text-slate-900">${financialStatements.grossProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                    <p className="text-[10px] text-rose-500 font-bold">OpEx: ${financialStatements.totalOpex.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-xl font-black text-slate-900">{formatCurrency(financialStatements.grossProfit)}</p>
+                    <p className="text-[10px] text-rose-500 font-bold">OpEx: {formatCurrency(financialStatements.totalOpex)}</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest block">Net Profit After Tax</span>
-                    <p className="text-2xl font-black text-emerald-600">${financialStatements.netProfitAfterTax.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-emerald-600">{formatCurrency(financialStatements.netProfitAfterTax)}</p>
                     <p className="text-[10px] text-emerald-650 font-bold font-mono">Net Margin: {financialStatements.totalRevenue > 0 ? ((financialStatements.netProfitAfterTax / financialStatements.totalRevenue) * 100).toFixed(1) : '0.0'}%</p>
                   </div>
                 </>
@@ -4255,19 +4756,17 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                 <>
                   <div className="space-y-1">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Total Classified Assets</span>
-                    <p className="text-2xl font-black text-teal-650">${financialStatements.totalAssets.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                    <p className="text-[10px] text-slate-400">Current: ${financialStatements.totalCurrentAssets.toLocaleString(undefined, { minimumFractionDigits: 2 })} • Non-Current: ${financialStatements.totalNonCurrentAssets.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-teal-650">{formatCurrency(financialStatements.totalAssets)}</p>
+                    <p className="text-[10px] text-slate-400">Current: {formatCurrency(financialStatements.totalCurrentAssets)} • Non-Current: {formatCurrency(financialStatements.totalNonCurrentAssets)}</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Total Liabilities & Equity</span>
-                    <p className="text-2xl font-black text-indigo-650">${(financialStatements.totalLiabilities + financialStatements.totalEquity).toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                    <p className="text-[10px] text-slate-400">Liab: ${financialStatements.totalLiabilities.toLocaleString(undefined, { minimumFractionDigits: 2 })} • Equity: ${financialStatements.totalEquity.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-indigo-650">${formatCurrency(financialStatements.totalLiabilities + financialStatements.totalEquity)}</p>
+                    <p className="text-[10px] text-slate-400">Liab: {formatCurrency(financialStatements.totalLiabilities)} • Equity: {formatCurrency(financialStatements.totalEquity)}</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold uppercase tracking-widest block text-slate-400">Balance Equation Variance</span>
-                    <p className={`text-2xl font-black ${financialStatements.isBsBalanced ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      ${financialStatements.balanceSheetDifference.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                    </p>
+                    <p className={`text-2xl font-black ${financialStatements.isBsBalanced ? 'text-emerald-600' : 'text-rose-600'}`}>${formatCurrency(financialStatements.balanceSheetDifference)}</p>
                     <p className={`text-[10px] font-bold font-mono ${financialStatements.isBsBalanced ? 'text-emerald-600' : 'text-rose-600'}`}>
                       {financialStatements.isBsBalanced ? 'Balanced (Assets = L + E)' : 'Out of Balance'}
                     </p>
@@ -4279,18 +4778,18 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                 <>
                   <div className="space-y-1">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Operating Cash Net Impact</span>
-                    <p className="text-xl font-black text-slate-900">${financialStatements.totalOperatingActivities.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                    <p className="text-[10px] text-slate-400">Receipts: ${financialStatements.totalCustomerReceipts.toLocaleString(undefined, { minimumFractionDigits: 2 })} • Payments: ${financialStatements.totalSupplierPayments.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-xl font-black text-slate-900">{formatCurrency(financialStatements.totalOperatingActivities)}</p>
+                    <p className="text-[10px] text-slate-400">Receipts: {formatCurrency(financialStatements.totalCustomerReceipts)} • Payments: {formatCurrency(financialStatements.totalSupplierPayments)}</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Investing & Financing Flows</span>
-                    <p className="text-xl font-black text-slate-900">${(financialStatements.totalInvestingActivities + financialStatements.totalFinancingActivities).toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                    <p className="text-[10px] text-slate-400">Investing: ${financialStatements.totalInvestingActivities.toLocaleString(undefined, { minimumFractionDigits: 2 })} • Financing: ${financialStatements.totalFinancingActivities.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-xl font-black text-slate-900">${formatCurrency(financialStatements.totalInvestingActivities + financialStatements.totalFinancingActivities)}</p>
+                    <p className="text-[10px] text-slate-400">Investing: {formatCurrency(financialStatements.totalInvestingActivities)} • Financing: {formatCurrency(financialStatements.totalFinancingActivities)}</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-cyan-600 uppercase tracking-widest block">Net Cash Flow Period Change</span>
-                    <p className="text-2xl font-black text-cyan-600">${financialStatements.netCashFlow.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                    <p className="text-[10px] text-cyan-600 font-bold font-mono">Ending Cash: ${financialStatements.endingCashSum.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-cyan-600">{formatCurrency(financialStatements.netCashFlow)}</p>
+                    <p className="text-[10px] text-cyan-600 font-bold font-mono">Ending Cash: {formatCurrency(financialStatements.endingCashSum)}</p>
                   </div>
                 </>
               )}
@@ -4326,14 +4825,14 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                   <div className="space-y-1">
                     <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest block">Opening & Closing Balances</span>
                     <p className="text-lg font-black text-slate-700">
-                      Opening: <span className="font-bold text-slate-900">${generalLedgerData.openingBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      Opening: <span className="font-bold text-slate-900">{formatCurrency(generalLedgerData.openingBalance)}</span>
                     </p>
-                    <p className="text-xs text-indigo-600 font-bold">Closing: ${generalLedgerData.closingBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p className="text-xs text-indigo-600 font-bold">Closing: {formatCurrency(generalLedgerData.closingBalance)}</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Period Debits & Credits</span>
-                    <p className="text-lg font-black text-emerald-600">Debits: +${generalLedgerData.totalDebits.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                    <p className="text-xs text-rose-600 font-bold">Credits: -${generalLedgerData.totalCredits.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p className="text-lg font-black text-emerald-600">Debits: +{formatCurrency(generalLedgerData.totalDebits)}</p>
+                    <p className="text-xs text-rose-600 font-bold">Credits: -{formatCurrency(generalLedgerData.totalCredits)}</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Transaction volume</span>
@@ -4347,7 +4846,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                 <>
                   <div className="space-y-1">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Total Outstanding Account Receivables</span>
-                    <p className="text-2xl font-black text-slate-900">${totalCustomerDueOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-slate-900">{formatCurrency(totalCustomerDueOutstanding)}</p>
                     <p className="text-[10px] text-slate-400">Accrued across credit histories</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
@@ -4358,7 +4857,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Max Debtor Balance</span>
                     <p className="text-2xl font-black text-indigo-600">
-                      ${activeCustomersList.length > 0 ? Math.max(...activeCustomersList.map(c => c.dueBalance || 0), 0).toFixed(2) : '0.00'}
+                      {formatCurrency(activeCustomersList.length > 0 ? Math.max(...activeCustomersList.map(c => c.dueBalance || 0), 0) : 0)}
                     </p>
                     <p className="text-[10px] text-slate-400">Single highest liability</p>
                   </div>
@@ -4369,7 +4868,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                 <>
                   <div className="space-y-1">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Outstanding payables stock debt</span>
-                    <p className="text-2xl font-black text-slate-900">${totalSupplierDueOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-slate-900">{formatCurrency(totalSupplierDueOutstanding)}</p>
                     <p className="text-[10px] text-slate-400">Outstanding liabilities</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
@@ -4380,7 +4879,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Max Creditor Debt</span>
                     <p className="text-2xl font-black text-indigo-600">
-                      ${activeSuppliersList.length > 0 ? Math.max(...activeSuppliersList.map(s => s.dueBalance || 0), 0).toFixed(2) : '0.00'}
+                      {formatCurrency(activeSuppliersList.length > 0 ? Math.max(...activeSuppliersList.map(s => s.dueBalance || 0), 0) : 0)}
                     </p>
                     <p className="text-[10px] text-slate-400">Single highest trade liability</p>
                   </div>
@@ -4391,18 +4890,26 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                 <>
                   <div className="space-y-1">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Accumulated net taxable revenue</span>
-                    <p className="text-2xl font-black text-slate-900">${totalTaxableNet.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-slate-900">{formatCurrency(totalTaxableNet)}</p>
                     <p className="text-[10px] text-slate-400">From filtered trade orders</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-rose-500 uppercase tracking-widest block">Tax / VAT Collected Liabilities</span>
-                    <p className="text-2xl font-black text-rose-600">${calculatedTaxCollected.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                    <p className="text-[10px] text-rose-600 font-semibold text-[9px] font-mono">Standard Rate: {defaultVatRate}% VAT</p>
+                    <p className="text-2xl font-black text-rose-600">{formatCurrency(calculatedTaxCollected)}</p>
+                    <p className="text-[10px] text-rose-600 font-semibold font-[9px] font-mono">Standard Rate: {defaultVatRate}% VAT</p>
                   </div>
-                  <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Gross Turnover (Inc. Tax)</span>
-                    <p className="text-2xl font-black text-indigo-150 text-indigo-600">${grossRevenueWithTax.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                    <p className="text-[10px] text-slate-400">Trade turn with taxes added</p>
+                  <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6 flex flex-col justify-between">
+                    <div>
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Gross Turnover (Inc. Tax)</span>
+                      <p className="text-2xl font-black text-indigo-600">{formatCurrency(grossRevenueWithTax)}</p>
+                    </div>
+                    <button
+                      onClick={() => setIsVatSettlementOpen(true)}
+                      className="mt-2 text-xs font-bold px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition shadow-xs flex items-center gap-1.5 w-fit"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Execute VAT Settlement JV
+                    </button>
                   </div>
                 </>
               )}
@@ -4431,17 +4938,17 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                 <>
                   <div className="space-y-1">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Opening Balance</span>
-                    <p className="text-2xl font-black text-slate-950">${initialOpeningBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-slate-950">{formatCurrency(initialOpeningBalance)}</p>
                     <p className="text-[10px] text-slate-400">Initial profile starting due</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Total Sales (Debits)</span>
-                    <p className="text-2xl font-black text-slate-900">${totalSalesDebit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-slate-900">{formatCurrency(totalSalesDebit)}</p>
                     <p className="text-[10px] text-slate-400">From {salesInvoicesCount} credit invoices</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Outstanding Due Recievables</span>
-                    <p className="text-2xl font-black text-rose-600">${derivedOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-rose-600">{formatCurrency(derivedOutstanding)}</p>
                     <p className="text-[10px] text-rose-600 font-bold">Current reconciled ledger due</p>
                   </div>
                 </>
@@ -4451,17 +4958,17 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                 <>
                   <div className="space-y-1">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Opening Balance</span>
-                    <p className="text-2xl font-black text-slate-950">${initialSupplierOpeningBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-slate-950">{formatCurrency(initialSupplierOpeningBalance)}</p>
                     <p className="text-[10px] text-slate-400">Initial profile starting debt</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Total Purchases (Credits)</span>
-                    <p className="text-2xl font-black text-slate-900">${totalSupplierPurchasesCredit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-slate-900">{formatCurrency(totalSupplierPurchasesCredit)}</p>
                     <p className="text-[10px] text-slate-400">From {purchasesInvoicesCount} credit invoices</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Outstanding Payables Debt</span>
-                    <p className="text-2xl font-black text-amber-600">${derivedSupplierOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-amber-600">{formatCurrency(derivedSupplierOutstanding)}</p>
                     <p className="text-[10px] text-amber-600 font-bold">Current reconciled ledger debt</p>
                   </div>
                 </>
@@ -4478,12 +4985,12 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Total Asset Valuation</span>
-                    <p className="text-2xl font-black text-slate-900">${coaSummaryStats.assetsBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-slate-900">{formatCurrency(coaSummaryStats.assetsBalance)}</p>
                     <p className="text-[10px] text-slate-400">Reconciled Cash, AR, & Inventory Assets</p>
                   </div>
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-100 pt-4 sm:pt-0 sm:pl-6">
                     <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest block">Live Cumulative Revenue</span>
-                    <p className="text-2xl font-black text-emerald-600">${coaSummaryStats.revenueBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    <p className="text-2xl font-black text-emerald-600">{formatCurrency(coaSummaryStats.revenueBalance)}</p>
                     <p className="text-[10px] text-emerald-600 font-bold font-mono">Reconciled Sales Invoices</p>
                   </div>
                 </>
@@ -4594,7 +5101,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                               {d.label}
                             </text>
                           )}
-                          <title>{`${d.label} - Revenue: $${d.salesValue.toFixed(2)}${activeReport === 'profit_loss' ? `, Profit: $${d.profitValue.toFixed(2)}` : ''}`}</title>
+                          <title>{`${d.label} - Revenue: ${formatCurrency(d.salesValue)}${activeReport === 'profit_loss' ? `, Profit: ${formatCurrency(d.profitValue)}` : ''}`}</title>
                         </g>
                       );
                     })}
@@ -4619,7 +5126,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                     <option value="">-- Choose Customer --</option>
                     {customers.map((c) => (
                       <option key={c.id} value={c.id}>
-                        {c.name} (Due: ${c.dueBalance.toFixed(2)})
+                        {c.name} (Due: {formatCurrency(c.dueBalance)})
                       </option>
                     ))}
                   </select>
@@ -4658,7 +5165,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                     <option value="">-- Choose Supplier --</option>
                     {suppliers.map((s) => (
                       <option key={s.id} value={s.id}>
-                        {s.name} (Debt: ${Number(s.dueBalance || 0).toFixed(2)})
+                        {s.name} (Debt: {formatCurrency(Number(s.dueBalance || 0))})
                       </option>
                     ))}
                   </select>
@@ -4822,7 +5329,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center pr-2">Date Presets:</span>
                 {[
                   { value: 'all_time', label: 'All-Time' },
-                  { value: 'today', label: 'Today (June 1)' },
+                  { value: 'today', label: 'Today' },
                   { value: 'yesterday', label: 'Yesterday' },
                   { value: 'this_week', label: 'This Week' },
                   { value: 'this_month', label: 'This Month' },
@@ -5310,7 +5817,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                           <th className="py-4 px-5 min-w-[220px] whitespace-nowrap">Product Summary</th>
                           <th className="py-4 px-5 text-center min-w-[60px] whitespace-nowrap">Qty</th>
                           <th className="py-4 px-5 text-right min-w-[110px] whitespace-nowrap">Subtotal</th>
-                          <th className="py-4 px-5 text-right min-w-[90px] whitespace-nowrap">VAT (15%)</th>
+                          <th className="py-4 px-5 text-right min-w-[90px] whitespace-nowrap">VAT ({companyProfile?.taxRatePercent ?? 15}%)</th>
                           <th className="py-4 px-5 text-right min-w-[90px] whitespace-nowrap">Discount</th>
                           <th className="py-4 px-5 text-right min-w-[120px] whitespace-nowrap font-bold text-indigo-200">Grand Total</th>
                           <th className="py-4 px-5 min-w-[100px] whitespace-nowrap">Payment</th>
@@ -5379,20 +5886,18 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                 </td>
                                 {/* Subtotal */}
                                 <td className="py-4 px-5 text-xs font-mono font-bold text-slate-950 text-right whitespace-nowrap">
-                                  ${(item.subtotal ?? item.totalAmount / 1.15).toFixed(2)}
+                                  ${formatCurrency(item.subtotal ?? (item.totalAmount / (1 + (item.taxRatePercent ?? companyProfile?.taxRatePercent ?? 15) / 100)))}
                                 </td>
                                 {/* VAT */}
                                 <td className="py-4 px-5 text-xs font-mono font-bold text-slate-500 text-right whitespace-nowrap">
-                                  ${(item.taxAmount ?? (item.totalAmount - (item.subtotal ?? item.totalAmount / 1.15))).toFixed(2)}
+                                  ${formatCurrency(item.taxAmount ?? (item.totalAmount - (item.subtotal ?? (item.totalAmount / (1 + (item.taxRatePercent ?? companyProfile?.taxRatePercent ?? 15) / 100)))))}
                                 </td>
                                 {/* Discount */}
                                 <td className="py-4 px-5 text-xs font-mono font-semibold text-slate-400 text-right whitespace-nowrap">
                                   $0.00
                                 </td>
                                 {/* Grand Total */}
-                                <td className={`py-4 px-5 text-xs font-mono font-black text-right whitespace-nowrap ${isVoid ? 'text-slate-400 line-through' : 'text-indigo-650 text-indigo-700'}`}>
-                                  ${item.totalAmount.toFixed(2)}
-                                </td>
+                                <td className={`py-4 px-5 text-xs font-mono font-black text-right whitespace-nowrap ${isVoid ? 'text-slate-400 line-through' : 'text-indigo-650 text-indigo-700'}`}>${formatCurrency(item.totalAmount)}</td>
                                 {/* Payment */}
                                 <td className="py-4 px-5 text-xs whitespace-nowrap">
                                   <span className={`inline-flex items-center px-2 py-0.5 rounded-full border font-bold text-[9px] ${
@@ -5436,14 +5941,14 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                           <div className="grid grid-cols-2 gap-4">
                             <div className="bg-white border border-slate-200/60 p-4 rounded-xl space-y-1">
                               <span className="text-[9px] font-bold text-emerald-600 uppercase tracking-wider block">Cash Settlements</span>
-                              <p className="text-lg font-black text-slate-900">${salesAnalyticsData.paymentBreakdown.cashRevenue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                              <p className="text-lg font-black text-slate-900">{formatCurrency(salesAnalyticsData.paymentBreakdown.cashRevenue)}</p>
                               <span className="text-[10px] text-slate-400 font-medium block">
                                 {salesAnalyticsData.paymentBreakdown.cashCount} completed orders
                               </span>
                             </div>
                             <div className="bg-white border border-slate-200/60 p-4 rounded-xl space-y-1">
                               <span className="text-[9px] font-bold text-amber-600 uppercase tracking-wider block">Credit Settlements</span>
-                              <p className="text-lg font-black text-slate-900">${salesAnalyticsData.paymentBreakdown.creditRevenue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                              <p className="text-lg font-black text-slate-900">{formatCurrency(salesAnalyticsData.paymentBreakdown.creditRevenue)}</p>
                               <span className="text-[10px] text-slate-400 font-medium block">
                                 {salesAnalyticsData.paymentBreakdown.creditCount} outstanding ledger lines
                               </span>
@@ -5481,7 +5986,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                 <div key={idx} className="space-y-1">
                                   <div className="flex justify-between text-xs font-semibold text-slate-700">
                                     <span className="font-bold">{cat.name || 'General'}</span>
-                                    <span className="font-mono text-slate-900">${cat.revenue.toLocaleString(undefined, { minimumFractionDigits: 2 })} ({sharePercent}%)</span>
+                                    <span className="font-mono text-slate-900">{formatCurrency(cat.revenue)} ({sharePercent}%)</span>
                                   </div>
                                   <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
                                     <div 
@@ -5521,8 +6026,8 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                     </div>
                                   </div>
                                   <div className="text-right">
-                                    <span className="text-xs font-mono font-bold text-slate-900 block">${cust.revenue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                                    <span className="text-[9px] text-slate-400 font-bold uppercase">{share.toFixed(1)}% contribution</span>
+                                    <span className="text-xs font-mono font-bold text-slate-900 block">{formatCurrency(cust.revenue)}</span>
+                                    <span className="text-[9px] text-slate-400 font-bold uppercase">{formatCurrency(share)}% contribution</span>
                                   </div>
                                 </div>
                               );
@@ -5549,7 +6054,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                   </div>
                                   <div className="text-right">
                                     <span className="text-xs font-mono font-bold text-emerald-700 block">{prod.qty} Units Sold</span>
-                                    <span className="text-[10px] text-slate-400 font-medium">${prod.revenue.toLocaleString(undefined, { minimumFractionDigits: 2 })} revenue</span>
+                                    <span className="text-[10px] text-slate-400 font-medium">{formatCurrency(prod.revenue)} revenue</span>
                                   </div>
                                 </div>
                               );
@@ -5579,7 +6084,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                             <th className="py-4 px-5 min-w-[220px] whitespace-nowrap">Product Summary</th>
                             <th className="py-4 px-5 text-center min-w-[60px] whitespace-nowrap">Qty</th>
                             <th className="py-4 px-5 text-right min-w-[110px] whitespace-nowrap">Subtotal</th>
-                            <th className="py-4 px-5 text-right min-w-[90px] whitespace-nowrap">VAT (15%)</th>
+                            <th className="py-4 px-5 text-right min-w-[90px] whitespace-nowrap">VAT ({companyProfile?.taxRatePercent ?? 15}%)</th>
                             <th className="py-4 px-5 text-right min-w-[90px] whitespace-nowrap">Discount</th>
                             <th className="py-4 px-5 text-right min-w-[120px] whitespace-nowrap font-bold text-emerald-200">Grand Total</th>
                             <th className="py-4 px-5 min-w-[100px] whitespace-nowrap">Payment Type</th>
@@ -5600,8 +6105,9 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                               const logMatch = systemLogs.find(l => l.entityId === item.id && l.action.includes('PROCUREMENT'));
                               const createdBy = item.createdBy || (logMatch ? logMatch.user : "System Admin");
                               const sType = suppliers.find(s => s.id === item.supplierId)?.category || "Standard";
-                              const vat = item.vatAmount ?? (item.totalAmount * 15 / 115);
-                              const sub = item.totalAmount - vat;
+                              const pRate = item.taxRatePercent ?? companyProfile?.taxRatePercent ?? 15;
+                              const sub = item.subtotal ?? (item.totalAmount / (1 + pRate / 100));
+                              const vat = item.vatAmount ?? (item.totalAmount - sub);
                               const disc = item.discountAmount ?? 0;
                               const invoiceNum = item.invoiceNumber || `PIN-${item.id.substring(item.id.length - 8).toUpperCase()}`;
 
@@ -5642,21 +6148,13 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                     {item.quantity}
                                   </td>
                                   {/* Subtotal */}
-                                  <td className="py-4 px-5 text-xs font-mono font-bold text-slate-950 text-right whitespace-nowrap">
-                                    ${sub.toFixed(2)}
-                                  </td>
+                                  <td className="py-4 px-5 text-xs font-mono font-bold text-slate-950 text-right whitespace-nowrap">{formatCurrency(sub)}</td>
                                   {/* VAT */}
-                                  <td className="py-4 px-5 text-xs font-mono font-bold text-slate-500 text-right whitespace-nowrap">
-                                    ${vat.toFixed(2)}
-                                  </td>
+                                  <td className="py-4 px-5 text-xs font-mono font-bold text-slate-500 text-right whitespace-nowrap">{formatCurrency(vat)}</td>
                                   {/* Discount */}
-                                  <td className="py-4 px-5 text-xs font-mono font-bold text-rose-600 text-right whitespace-nowrap">
-                                    -${disc.toFixed(2)}
-                                  </td>
+                                  <td className="py-4 px-5 text-xs font-mono font-bold text-rose-600 text-right whitespace-nowrap">-{formatCurrency(disc)}</td>
                                   {/* Grand Total */}
-                                  <td className="py-4 px-5 text-xs font-mono font-black text-slate-900 text-right whitespace-nowrap">
-                                    ${item.totalAmount.toFixed(2)}
-                                  </td>
+                                  <td className="py-4 px-5 text-xs font-mono font-black text-slate-900 text-right whitespace-nowrap">{formatCurrency(item.totalAmount)}</td>
                                   {/* Payment Type */}
                                   <td className="py-4 px-5 text-xs whitespace-nowrap">
                                     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold ${
@@ -5701,14 +6199,14 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                           <div className="grid grid-cols-2 gap-4">
                             <div className="bg-white border border-slate-200/60 p-4 rounded-xl space-y-1">
                               <span className="text-[9px] font-bold text-emerald-600 uppercase tracking-wider block">Cash Settlements</span>
-                              <p className="text-lg font-black text-slate-900">${purchasesAnalyticsData.paymentBreakdown.cashAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                              <p className="text-lg font-black text-slate-900">{formatCurrency(purchasesAnalyticsData.paymentBreakdown.cashAmount)}</p>
                               <span className="text-[10px] text-slate-400 font-medium block">
                                 {purchasesAnalyticsData.paymentBreakdown.cashCount} completed orders
                               </span>
                             </div>
                             <div className="bg-white border border-slate-200/60 p-4 rounded-xl space-y-1">
                               <span className="text-[9px] font-bold text-amber-600 uppercase tracking-wider block">Credit Settlements</span>
-                              <p className="text-lg font-black text-slate-900">${purchasesAnalyticsData.paymentBreakdown.creditAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                              <p className="text-lg font-black text-slate-900">{formatCurrency(purchasesAnalyticsData.paymentBreakdown.creditAmount)}</p>
                               <span className="text-[10px] text-slate-400 font-medium block">
                                 {purchasesAnalyticsData.paymentBreakdown.creditCount} outstanding ledger lines
                               </span>
@@ -5746,7 +6244,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                 <div key={idx} className="space-y-1">
                                   <div className="flex justify-between text-xs font-semibold text-slate-700">
                                     <span className="font-bold">{cat.name || 'General'}</span>
-                                    <span className="font-mono text-slate-900">${cat.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })} ({sharePercent}%)</span>
+                                    <span className="font-mono text-slate-900">{formatCurrency(cat.amount)} ({sharePercent}%)</span>
                                   </div>
                                   <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
                                     <div 
@@ -5786,8 +6284,8 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                     </div>
                                   </div>
                                   <div className="text-right">
-                                    <span className="text-xs font-bold font-mono text-slate-900 block">${sup.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                                    <span className="text-[9px] text-emerald-600 font-bold block">{share.toFixed(1)}% weight</span>
+                                    <span className="text-xs font-bold font-mono text-slate-900 block">{formatCurrency(sup.amount)}</span>
+                                    <span className="text-[9px] text-emerald-600 font-bold block">{formatCurrency(share)}% weight</span>
                                   </div>
                                 </div>
                               );
@@ -5818,7 +6316,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                     </div>
                                   </div>
                                   <div className="text-right">
-                                    <span className="text-xs font-bold font-mono text-slate-900 block">${prod.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                                    <span className="text-xs font-bold font-mono text-slate-900 block">{formatCurrency(prod.amount)}</span>
                                     <span className="text-[9px] text-slate-500 font-bold block">Qty: {prod.qty} Units</span>
                                   </div>
                                 </div>
@@ -5836,424 +6334,27 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
               )}
 
               {activeReport === 'profit_loss' && (
-                <div className="p-6 space-y-6">
-                  {renderFinancialStatementConfigPanel && (
-                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 mb-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Reporting Company</label>
-                        <select
-                          value={tbCompanyFilter}
-                          onChange={(e) => setTbCompanyFilter(e.target.value)}
-                          className="w-full bg-white border border-slate-200 text-slate-800 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500 font-semibold"
-                        >
-                          <option value="">All Registered Companies</option>
-                          <option value="CO-001">Apex Global Supply Ltd.</option>
-                          <option value="CO-002">Nexus Innovations Corp.</option>
-                        </select>
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Branch Division</label>
-                        <select
-                          value={tbBranchFilter}
-                          onChange={(e) => setTbBranchFilter(e.target.value)}
-                          className="w-full bg-white border border-slate-200 text-slate-800 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500 font-semibold"
-                        >
-                          <option value="">All Company Divisions</option>
-                          <option value="BR-HQ">Austin Headquarters (HQ)</option>
-                          <option value="BR-EAST">New York Distribution</option>
-                          <option value="BR-WEST">California Logistics</option>
-                        </select>
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Journal Postings Filter</label>
-                        <select
-                          value={tbPostingStatusFilter}
-                          onChange={(e) => setTbPostingStatusFilter(e.target.value)}
-                          className="w-full bg-white border border-slate-200 text-slate-800 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500 font-semibold"
-                        >
-                          <option value="POSTED">Official Posted (General Ledger)</option>
-                          <option value="DRAFT">Draft Journals (Provisional)</option>
-                          <option value="">All State Postings</option>
-                        </select>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex items-center gap-2 p-3 bg-indigo-50/50 border border-indigo-100 rounded-xl text-indigo-700 text-xs font-semibold">
-                    <Info className="h-4 w-4 text-indigo-500 shrink-0" />
-                    <span>Real-time IFRS/GAAP compliant Profit & Loss Statement backed by General Ledger posting lines. Includes active and legacy account balances.</span>
-                  </div>
-
-                  {/* Profit & Loss Statement Table */}
-                  <div className="border border-slate-200 rounded-2xl overflow-hidden bg-white shadow-3xs">
-                    <table className="w-full border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-slate-900 text-white font-bold text-[10px] uppercase tracking-wider">
-                          <th className="px-4 py-3 text-left">Account Description</th>
-                          <th className="px-4 py-3 text-right">Account Code</th>
-                          <th className="px-4 py-3 text-right">Debit Balance ($)</th>
-                          <th className="px-4 py-3 text-right">Credit Balance ($)</th>
-                          <th className="px-4 py-3 text-right">Net Amount ($)</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {/* 1. Revenues */}
-                        <tr className="bg-slate-100/80 font-black text-slate-800">
-                          <td colSpan={5} className="px-4 py-2.5 text-[10px] uppercase tracking-wider">1. Operating Revenues</td>
-                        </tr>
-                        {financialStatements.revenueAccounts.map((acc, index) => (
-                          <tr key={index} className="border-b border-slate-100 hover:bg-slate-50/50 font-medium">
-                            <td className="px-4 py-2.5 font-bold flex items-center gap-1.5 text-slate-800">
-                              <span>{acc.name}</span>
-                              {acc.isLegacy && (
-                                <span className="text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded border border-amber-150 shrink-0">LEGACY</span>
-                              )}
-                            </td>
-                            <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-500">{acc.code}</td>
-                            <td className="px-4 py-2.5 text-right font-mono text-slate-400">0.00</td>
-                            <td className="px-4 py-2.5 text-right font-mono text-slate-900">{acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-4 py-2.5 text-right font-mono font-bold text-emerald-600">+{acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-                        ))}
-                        {financialStatements.revenueAccounts.length === 0 && (
-                          <tr className="border-b border-slate-100"><td colSpan={5} className="px-4 py-3 text-center text-slate-400">No operating revenue entries recorded in this range.</td></tr>
-                        )}
-                        <tr className="border-b border-slate-200 bg-slate-50/50 font-bold">
-                          <td colSpan={4} className="px-4 py-3 text-slate-700">Subtotal Operating Revenues:</td>
-                          <td className="px-4 py-3 text-right font-mono font-black text-emerald-600 underline">${financialStatements.totalRevenue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        </tr>
-
-                        {/* 2. COGS */}
-                        <tr className="bg-slate-100/80 font-black text-slate-800">
-                          <td colSpan={5} className="px-4 py-2.5 text-[10px] uppercase tracking-wider">2. Cost of Sales / Cost of Goods Sold</td>
-                        </tr>
-                        {financialStatements.cogsAccounts.map((acc, index) => (
-                          <tr key={index} className="border-b border-slate-100 hover:bg-slate-50/50 font-medium">
-                            <td className="px-4 py-2.5 font-bold flex items-center gap-1.5 text-slate-800">
-                              <span>{acc.name}</span>
-                              {acc.isLegacy && (
-                                <span className="text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded border border-amber-150 shrink-0">LEGACY</span>
-                              )}
-                            </td>
-                            <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-500">{acc.code}</td>
-                            <td className="px-4 py-2.5 text-right font-mono text-slate-900">{acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-4 py-2.5 text-right font-mono text-slate-400 font-bold">0.00</td>
-                            <td className="px-4 py-2.5 text-right font-mono font-bold text-rose-600">-${acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-                        ))}
-                        {financialStatements.cogsAccounts.length === 0 && (
-                          <tr className="border-b border-slate-100"><td colSpan={5} className="px-4 py-3 text-center text-slate-400">No cost of goods sold entries recorded.</td></tr>
-                        )}
-                        <tr className="border-b border-slate-200 bg-slate-50/50 font-bold">
-                          <td colSpan={4} className="px-4 py-3 text-slate-700">Subtotal Cost of Goods Sold:</td>
-                          <td className="px-4 py-3 text-right font-mono font-black text-rose-600 underline">-${financialStatements.totalCogs.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        </tr>
-
-                        {/* 3. Gross Profit */}
-                        <tr className="bg-indigo-50/40 font-black text-slate-900 border-b-2 border-slate-300">
-                          <td colSpan={4} className="px-4 py-3.5 text-xs text-indigo-900 uppercase tracking-wider font-extrabold">Gross Profit / Operating Margin:</td>
-                          <td className="px-4 py-3.5 text-right font-mono text-sm text-emerald-600 font-black">${financialStatements.grossProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        </tr>
-
-                        {/* 4. OpEx */}
-                        <tr className="bg-slate-100/80 font-black text-slate-800">
-                          <td colSpan={5} className="px-4 py-2.5 text-[10px] uppercase tracking-wider">3. General & Administrative Operating Expenses (OpEx)</td>
-                        </tr>
-                        {financialStatements.opexAccounts.map((acc, index) => (
-                          <tr key={index} className="border-b border-slate-100 hover:bg-slate-50/50 font-medium">
-                            <td className="px-4 py-2.5 font-bold flex items-center gap-1.5 text-slate-800">
-                              <span>{acc.name}</span>
-                              {acc.isLegacy && (
-                                <span className="text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded border border-amber-150 shrink-0">LEGACY</span>
-                              )}
-                            </td>
-                            <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-500">{acc.code}</td>
-                            <td className="px-4 py-2.5 text-right font-mono text-slate-900">{acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-4 py-2.5 text-right font-mono text-slate-400">0.00</td>
-                            <td className="px-4 py-2.5 text-right font-mono font-bold text-rose-600">-${acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-                        ))}
-                        {financialStatements.opexAccounts.length === 0 && (
-                          <tr className="border-b border-slate-100"><td colSpan={5} className="px-4 py-3 text-center text-slate-400">No general operating expenses recorded.</td></tr>
-                        )}
-                        <tr className="border-b border-slate-200 bg-slate-50/50 font-bold">
-                          <td colSpan={4} className="px-4 py-3 text-slate-700">Subtotal Operating Expenses:</td>
-                          <td className="px-4 py-3 text-right font-mono font-black text-rose-600 underline">-${financialStatements.totalOpex.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        </tr>
-
-                        {/* 5. Operating Profit */}
-                        <tr className="bg-indigo-50/40 font-black text-slate-900 border-b-2 border-slate-300">
-                          <td colSpan={4} className="px-4 py-3.5 text-xs text-indigo-900 uppercase tracking-wider font-extrabold">Operating Income / Profit (EBIT):</td>
-                          <td className="px-4 py-3.5 text-right font-mono text-sm text-indigo-600 font-black">${financialStatements.operatingProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        </tr>
-
-                        {/* 6. Taxes */}
-                        <tr className="bg-slate-100/80 font-black text-slate-800">
-                          <td colSpan={5} className="px-4 py-2.5 text-[10px] uppercase tracking-wider">4. Provision for Corporate Income Taxes</td>
-                        </tr>
-                        {financialStatements.taxAccounts.map((acc, index) => (
-                          <tr key={index} className="border-b border-slate-100 hover:bg-slate-50/50 font-medium">
-                            <td className="px-4 py-2.5 font-bold flex items-center gap-1.5 text-slate-800">
-                              <span>{acc.name}</span>
-                              {acc.isLegacy && (
-                                <span className="text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded border border-amber-150 shrink-0">LEGACY</span>
-                              )}
-                            </td>
-                            <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-500">{acc.code}</td>
-                            <td className="px-4 py-2.5 text-right font-mono text-slate-900">{acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-4 py-2.5 text-right font-mono text-slate-400">0.00</td>
-                            <td className="px-4 py-2.5 text-right font-mono font-bold text-rose-600">-${acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-                        ))}
-                        {financialStatements.taxAccounts.length === 0 && (
-                          <tr className="border-b border-slate-100"><td colSpan={5} className="px-4 py-3 text-center text-slate-400">No taxation provisions recorded in this range.</td></tr>
-                        )}
-                        <tr className="border-b border-slate-200 bg-slate-50/50 font-bold">
-                          <td colSpan={4} className="px-4 py-3 text-slate-700">Subtotal Income Taxation:</td>
-                          <td className="px-4 py-3 text-right font-mono font-black text-rose-600 underline">-${financialStatements.totalTax.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        </tr>
-
-                        {/* 7. Net Profit After Tax */}
-                        <tr className="bg-slate-950 text-white font-black border-t border-slate-900">
-                          <td colSpan={4} className="px-4 py-4 text-xs uppercase tracking-widest font-extrabold text-slate-200">GRAND TOTAL NET INCOME / PROFIT (NET PROFIT AFTER TAX):</td>
-                          <td className="px-4 py-4 text-right font-mono text-base text-emerald-450 font-black underline decoration-double">${financialStatements.netProfitAfterTax.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
+                <ProfitLossView
+                  financialStatements={financialStatements}
+                  tbCompanyFilter={tbCompanyFilter}
+                  setTbCompanyFilter={setTbCompanyFilter}
+                  tbBranchFilter={tbBranchFilter}
+                  setTbBranchFilter={setTbBranchFilter}
+                  tbPostingStatusFilter={tbPostingStatusFilter}
+                  setTbPostingStatusFilter={setTbPostingStatusFilter}
+                />
               )}
 
               {activeReport === 'balance_sheet' && (
-                <div className="p-6 space-y-6">
-                  {renderFinancialStatementConfigPanel && (
-                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 mb-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Reporting Company</label>
-                        <select
-                          value={tbCompanyFilter}
-                          onChange={(e) => setTbCompanyFilter(e.target.value)}
-                          className="w-full bg-white border border-slate-200 text-slate-800 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500 font-semibold"
-                        >
-                          <option value="">All Registered Companies</option>
-                          <option value="CO-001">Apex Global Supply Ltd.</option>
-                          <option value="CO-002">Nexus Innovations Corp.</option>
-                        </select>
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Branch Division</label>
-                        <select
-                          value={tbBranchFilter}
-                          onChange={(e) => setTbBranchFilter(e.target.value)}
-                          className="w-full bg-white border border-slate-200 text-slate-800 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500 font-semibold"
-                        >
-                          <option value="">All Company Divisions</option>
-                          <option value="BR-HQ">Austin Headquarters (HQ)</option>
-                          <option value="BR-EAST">New York Distribution</option>
-                          <option value="BR-WEST">California Logistics</option>
-                        </select>
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Journal Postings Filter</label>
-                        <select
-                          value={tbPostingStatusFilter}
-                          onChange={(e) => setTbPostingStatusFilter(e.target.value)}
-                          className="w-full bg-white border border-slate-200 text-slate-800 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500 font-semibold"
-                        >
-                          <option value="POSTED">Official Posted (General Ledger)</option>
-                          <option value="DRAFT">Draft Journals (Provisional)</option>
-                          <option value="">All State Postings</option>
-                        </select>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between p-4 rounded-xl border font-semibold text-xs transition duration-300 bg-white shadow-3xs border-slate-200">
-                    <div className="flex items-center gap-2">
-                      <Layers className="h-4 w-4 text-indigo-500" />
-                      <span className="text-slate-800 font-extrabold uppercase tracking-wide">Balance Equation:</span>
-                      <span className="text-slate-500">Assets ($) = Liabilities ($) + Equity ($)</span>
-                    </div>
-                    <div>
-                      {financialStatements.isBsBalanced ? (
-                        <span className="inline-flex items-center gap-1 bg-emerald-50 border border-emerald-200 text-emerald-700 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider">● EQUATION BALANCED</span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 bg-rose-50 border border-rose-200 text-rose-700 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider">● OUT OF BALANCE</span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Dual Column Assets vs Liabilities & Equity Layout */}
-                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
-                    
-                    {/* LEFT COLUMN: ASSETS */}
-                    <div className="border border-slate-200 rounded-2xl overflow-hidden bg-white shadow-3xs">
-                      <table className="w-full border-collapse text-xs">
-                        <thead>
-                          <tr className="bg-teal-700 text-white font-bold text-[10px] uppercase tracking-wider">
-                            <th className="px-4 py-3 text-left">Asset Account Classification</th>
-                            <th className="px-4 py-3 text-right">Code</th>
-                            <th className="px-4 py-3 text-right">Amount ($)</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {/* Current Assets */}
-                          <tr className="bg-teal-50/45 font-black text-teal-900 border-b border-teal-100">
-                            <td colSpan={3} className="px-4 py-2.5 text-[10px] uppercase tracking-wider">1. Current Assets</td>
-                          </tr>
-                          {financialStatements.currentAssetAccounts.map((acc, index) => (
-                            <tr key={index} className="border-b border-slate-150 hover:bg-slate-50/50 font-medium">
-                              <td className="px-4 py-2.5 font-bold flex items-center gap-1.5 text-slate-800">
-                                <span>{acc.name}</span>
-                                {acc.isLegacy && (
-                                  <span className="text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded border border-amber-150 shrink-0">LEGACY</span>
-                                )}
-                              </td>
-                              <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-500">{acc.code}</td>
-                              <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-900">{acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            </tr>
-                          ))}
-                          {financialStatements.currentAssetAccounts.length === 0 && (
-                            <tr><td colSpan={3} className="px-4 py-3 text-center text-slate-400">No Current Assets recorded.</td></tr>
-                          )}
-                          <tr className="border-b border-slate-200 bg-slate-50/30 font-bold">
-                            <td colSpan={2} className="px-4 py-2.5 text-slate-650 pl-6">Total Current Assets:</td>
-                            <td className="px-4 py-2.5 text-right font-mono font-black text-slate-900 underline">${financialStatements.totalCurrentAssets.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-
-                          {/* Non-Current Assets */}
-                          <tr className="bg-teal-50/45 font-black text-teal-900 border-b border-teal-100">
-                            <td colSpan={3} className="px-4 py-2.5 text-[10px] uppercase tracking-wider">2. Non-Current Assets (Fixed assets, property, equipment)</td>
-                          </tr>
-                          {financialStatements.nonCurrentAssetAccounts.map((acc, index) => (
-                            <tr key={index} className="border-b border-slate-150 hover:bg-slate-50/50 font-medium">
-                              <td className="px-4 py-2.5 font-bold flex items-center gap-1.5 text-slate-800">
-                                <span>{acc.name}</span>
-                                {acc.isLegacy && (
-                                  <span className="text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded border border-amber-150 shrink-0">LEGACY</span>
-                                )}
-                              </td>
-                              <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-500">{acc.code}</td>
-                              <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-900">{acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            </tr>
-                          ))}
-                          {financialStatements.nonCurrentAssetAccounts.length === 0 && (
-                            <tr><td colSpan={3} className="px-4 py-3 text-center text-slate-400">No Fixed or Long-Term Assets recorded.</td></tr>
-                          )}
-                          <tr className="border-b border-slate-250 bg-slate-50/30 font-bold">
-                            <td colSpan={2} className="px-4 py-2.5 text-slate-650 pl-6">Total Non-Current Assets:</td>
-                            <td className="px-4 py-2.5 text-right font-mono font-black text-slate-900 underline">${financialStatements.totalNonCurrentAssets.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-
-                          {/* GRAND TOTAL ASSETS */}
-                          <tr className="bg-slate-900 text-white font-black border-t border-slate-800">
-                            <td colSpan={2} className="px-4 py-3.5 text-[10px] uppercase tracking-widest font-black text-slate-200">TOTAL CONSOLIDATED ASSETS:</td>
-                            <td className="px-4 py-3.5 text-right font-mono text-sm text-white font-black underline decoration-double">${financialStatements.totalAssets.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-
-                    {/* RIGHT COLUMN: LIABILITIES & EQUITY */}
-                    <div className="border border-slate-200 rounded-2xl overflow-hidden bg-white shadow-3xs">
-                      <table className="w-full border-collapse text-xs">
-                        <thead>
-                          <tr className="bg-slate-800 text-white font-bold text-[10px] uppercase tracking-wider">
-                            <th className="px-4 py-3 text-left">Liabilities & Equity Classifications</th>
-                            <th className="px-4 py-3 text-right">Code</th>
-                            <th className="px-4 py-3 text-right">Amount ($)</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {/* Current Liabilities */}
-                          <tr className="bg-slate-100 font-black text-slate-800 border-b border-slate-200">
-                            <td colSpan={3} className="px-4 py-2.5 text-[10px] uppercase tracking-wider">1. Current Liabilities</td>
-                          </tr>
-                          {financialStatements.currentLiabilityAccounts.map((acc, index) => (
-                            <tr key={index} className="border-b border-slate-150 hover:bg-slate-50/50 font-medium">
-                              <td className="px-4 py-2.5 font-bold flex items-center gap-1.5 text-slate-800">
-                                <span>{acc.name}</span>
-                                {acc.isLegacy && (
-                                  <span className="text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded border border-amber-150 shrink-0">LEGACY</span>
-                                )}
-                              </td>
-                              <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-500">{acc.code}</td>
-                              <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-900">{acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            </tr>
-                          ))}
-                          {financialStatements.currentLiabilityAccounts.length === 0 && (
-                            <tr><td colSpan={3} className="px-4 py-3 text-center text-slate-400">No Current Liabilities recorded.</td></tr>
-                          )}
-                          <tr className="border-b border-slate-200 bg-slate-50/30 font-bold">
-                            <td colSpan={2} className="px-4 py-2.5 text-slate-650 pl-6">Total Current Liabilities:</td>
-                            <td className="px-4 py-2.5 text-right font-mono font-black text-slate-900 underline">${financialStatements.totalCurrentLiabilities.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-
-                          {/* Long Term Liabilities */}
-                          <tr className="bg-slate-100 font-black text-slate-800 border-b border-slate-200">
-                            <td colSpan={3} className="px-4 py-2.5 text-[10px] uppercase tracking-wider">2. Long-Term Liabilities (Notes, mortgages)</td>
-                          </tr>
-                          {financialStatements.longTermLiabilityAccounts.map((acc, index) => (
-                            <tr key={index} className="border-b border-slate-150 hover:bg-slate-50/50 font-medium">
-                              <td className="px-4 py-2.5 font-bold flex items-center gap-1.5 text-slate-800">
-                                <span>{acc.name}</span>
-                                {acc.isLegacy && (
-                                  <span className="text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded border border-amber-150 shrink-0">LEGACY</span>
-                                )}
-                              </td>
-                              <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-500">{acc.code}</td>
-                              <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-900">{acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            </tr>
-                          ))}
-                          {financialStatements.longTermLiabilityAccounts.length === 0 && (
-                            <tr><td colSpan={3} className="px-4 py-3 text-center text-slate-400">No Long-Term Liabilities recorded.</td></tr>
-                          )}
-                          <tr className="border-b border-slate-250 bg-slate-50/30 font-bold">
-                            <td colSpan={2} className="px-4 py-2.5 text-slate-650 pl-6">Total Long-Term Liabilities:</td>
-                            <td className="px-4 py-2.5 text-right font-mono font-black text-slate-900 underline">${financialStatements.totalLongTermLiabilities.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-
-                          {/* Equity Area */}
-                          <tr className="bg-slate-100 font-black text-slate-800 border-b border-slate-200">
-                            <td colSpan={3} className="px-4 py-2.5 text-[10px] uppercase tracking-wider">3. Shareholders' Equity</td>
-                          </tr>
-                          {financialStatements.equityAccounts.map((acc, index) => (
-                            <tr key={index} className="border-b border-slate-150 hover:bg-slate-50/50 font-medium">
-                              <td className="px-4 py-2.5 font-bold flex items-center gap-1.5 text-slate-800">
-                                <span>{acc.name}</span>
-                                {acc.isLegacy && (
-                                  <span className="text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded border border-amber-150 shrink-0">LEGACY</span>
-                                )}
-                              </td>
-                              <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-500">{acc.code}</td>
-                              <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-900">{acc.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            </tr>
-                          ))}
-                          {/* Dynamic Current Year Earnings */}
-                          <tr className="border-b border-slate-150 hover:bg-indigo-50/20 font-medium">
-                            <td className="px-4 py-2.5 font-bold flex items-center gap-1.5 text-indigo-900">
-                              <span>Retained Earnings (Current Year Net Profit)</span>
-                              <span className="text-[8px] bg-indigo-50 border border-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-black font-mono">DYNAMIC RECONCILED</span>
-                            </td>
-                            <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-400">N/A</td>
-                            <td className="px-4 py-2.5 text-right font-mono font-black text-emerald-600 font-bold">${financialStatements.currentYearEarnings.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-                          <tr className="border-b border-slate-250 bg-slate-50/30 font-bold">
-                            <td colSpan={2} className="px-4 py-2.5 text-slate-650 pl-6">Total Shareholders' Equity:</td>
-                            <td className="px-4 py-2.5 text-right font-mono font-black text-slate-900 underline">${financialStatements.totalEquity.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-
-                          {/* GRAND TOTAL LIABILITIES & EQUITY */}
-                          <tr className="bg-slate-850 text-white font-black border-t border-slate-800">
-                            <td colSpan={2} className="px-4 py-3.5 text-[10px] uppercase tracking-widest font-black text-slate-200">TOTAL LIABILITIES & EQUITY:</td>
-                            <td className="px-4 py-3.5 text-right font-mono text-sm text-white font-black underline decoration-double">${(financialStatements.totalLiabilities + financialStatements.totalEquity).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-
-                  </div>
-                </div>
+                <BalanceSheetView
+                  financialStatements={financialStatements}
+                  tbCompanyFilter={tbCompanyFilter}
+                  setTbCompanyFilter={setTbCompanyFilter}
+                  tbBranchFilter={tbBranchFilter}
+                  setTbBranchFilter={setTbBranchFilter}
+                  tbPostingStatusFilter={tbPostingStatusFilter}
+                  setTbPostingStatusFilter={setTbPostingStatusFilter}
+                />
               )}
 
               {activeReport === 'cash_flow' && (
@@ -6337,31 +6438,31 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                         </tr>
                         <tr className="border-b border-slate-100 font-medium">
                           <td className="px-4 py-2.5 font-bold text-slate-800 pl-6">Customer Cash Receipts (Inflow):</td>
-                          <td className="px-4 py-2.5 text-right font-mono text-emerald-600">+${financialStatements.totalCustomerReceipts.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2.5 text-right font-mono text-emerald-600">+{formatCurrency(financialStatements.totalCustomerReceipts)}</td>
                           <td className="px-4 py-2.5 text-right font-mono text-slate-400">0.00</td>
                           <td className="px-4 py-2.5 text-right font-mono text-slate-450">-</td>
                         </tr>
                         <tr className="border-b border-slate-100 font-medium">
                           <td className="px-4 py-2.5 font-bold text-slate-800 pl-6">Payments to Suppliers & Vendor Invoices (Outflow):</td>
                           <td className="px-4 py-2.5 text-right font-mono text-slate-400">0.00</td>
-                          <td className="px-4 py-2.5 text-right font-mono text-rose-600">-${Math.abs(financialStatements.totalSupplierPayments).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2.5 text-right font-mono text-rose-600">-{formatCurrency(Math.abs(financialStatements.totalSupplierPayments))}</td>
                           <td className="px-4 py-2.5 text-right font-mono text-slate-450">-</td>
                         </tr>
                         <tr className="border-b border-slate-100 font-medium">
                           <td className="px-4 py-2.5 font-bold text-slate-800 pl-6">Payments for Operating Administrative Expenses (Outflow):</td>
                           <td className="px-4 py-2.5 text-right font-mono text-slate-400">0.00</td>
-                          <td className="px-4 py-2.5 text-right font-mono text-rose-600">-${Math.abs(financialStatements.totalOpexCash).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2.5 text-right font-mono text-rose-600">-{formatCurrency(Math.abs(financialStatements.totalOpexCash))}</td>
                           <td className="px-4 py-2.5 text-right font-mono text-slate-450">-</td>
                         </tr>
                         <tr className="border-b border-slate-100 font-medium">
                           <td className="px-4 py-2.5 font-bold text-slate-800 pl-6">Other Operating Cash Flows:</td>
-                          <td className="px-4 py-2.5 text-right font-mono text-slate-900">${financialStatements.totalOtherOpexCash >= 0 ? '+' : ''}${financialStatements.totalOtherOpexCash.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2.5 text-right font-mono text-slate-900">${financialStatements.totalOtherOpexCash >= 0 ? '+' : ''}{formatCurrency(financialStatements.totalOtherOpexCash)}</td>
                           <td className="px-4 py-2.5 text-right font-mono text-slate-450">-</td>
                           <td className="px-4 py-2.5 text-right font-mono text-slate-450">-</td>
                         </tr>
                         <tr className="border-b border-slate-200 bg-slate-50/20 font-bold">
                           <td colSpan={3} className="px-4 py-2.5 text-slate-700 pl-8">Net Cash provided by Operating Activities:</td>
-                          <td className="px-4 py-2.5 text-right font-mono font-black text-emerald-600 underline">${financialStatements.totalOperatingActivities.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2.5 text-right font-mono font-black text-emerald-600 underline">{formatCurrency(financialStatements.totalOperatingActivities)}</td>
                         </tr>
 
                         {/* 2. Investing Activities */}
@@ -6371,8 +6472,8 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                         {financialStatements.investingFlows.map((f, i) => (
                           <tr key={i} className="border-b border-slate-100 hover:bg-slate-50/50 font-medium">
                             <td className="px-4 py-2 pl-6 text-slate-700 font-semibold">{f.desc}</td>
-                            <td className="px-4 py-2 text-right font-mono text-slate-400">{f.amount > 0 ? `+${f.amount.toFixed(2)}` : '-'}</td>
-                            <td className="px-4 py-2 text-right font-mono text-slate-400">{f.amount < 0 ? `-${Math.abs(f.amount).toFixed(2)}` : '-'}</td>
+                            <td className="px-4 py-2 text-right font-mono text-slate-400">{f.amount > 0 ? `+${formatCurrency(f.amount)}` : '-'}</td>
+                            <td className="px-4 py-2 text-right font-mono text-slate-400">{f.amount < 0 ? `-${formatCurrency(Math.abs(f.amount))}` : '-'}</td>
                             <td className="px-4 py-2 text-right font-mono text-slate-450">-</td>
                           </tr>
                         ))}
@@ -6381,7 +6482,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                         )}
                         <tr className="border-b border-slate-200 bg-slate-50/20 font-bold">
                           <td colSpan={3} className="px-4 py-2.5 text-slate-700 pl-8">Net Cash provided by Investing Activities:</td>
-                          <td className="px-4 py-2.5 text-right font-mono font-black text-slate-900 underline">${financialStatements.totalInvestingActivities.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2.5 text-right font-mono font-black text-slate-900 underline">{formatCurrency(financialStatements.totalInvestingActivities)}</td>
                         </tr>
 
                         {/* 3. Financing Activities */}
@@ -6391,8 +6492,8 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                         {financialStatements.financingFlows.map((f, i) => (
                           <tr key={i} className="border-b border-slate-100 hover:bg-slate-50/50 font-medium">
                             <td className="px-4 py-2 pl-6 text-slate-700 font-semibold">{f.desc}</td>
-                            <td className="px-4 py-2 text-right font-mono text-slate-400">{f.amount > 0 ? `+${f.amount.toFixed(2)}` : '-'}</td>
-                            <td className="px-4 py-2 text-right font-mono text-slate-400">{f.amount < 0 ? `-${Math.abs(f.amount).toFixed(2)}` : '-'}</td>
+                            <td className="px-4 py-2 text-right font-mono text-slate-400">{f.amount > 0 ? `+${formatCurrency(f.amount)}` : '-'}</td>
+                            <td className="px-4 py-2 text-right font-mono text-slate-400">{f.amount < 0 ? `-${formatCurrency(Math.abs(f.amount))}` : '-'}</td>
                             <td className="px-4 py-2 text-right font-mono text-slate-450">-</td>
                           </tr>
                         ))}
@@ -6401,7 +6502,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                         )}
                         <tr className="border-b border-slate-200 bg-slate-50/20 font-bold">
                           <td colSpan={3} className="px-4 py-2.5 text-slate-700 pl-8">Net Cash provided by Financing Activities:</td>
-                          <td className="px-4 py-2.5 text-right font-mono font-black text-slate-900 underline">${financialStatements.totalFinancingActivities.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2.5 text-right font-mono font-black text-slate-900 underline">{formatCurrency(financialStatements.totalFinancingActivities)}</td>
                         </tr>
 
                         {/* 4. Cash Reconciliation and Proof */}
@@ -6410,23 +6511,23 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                         </tr>
                         <tr className="border-b border-slate-100 hover:bg-slate-50/50 font-medium">
                           <td colSpan={3} className="px-4 py-2.5 pl-6 text-slate-700 font-bold">NET INCREASE / DECREASE IN CASH Reserves (A + B + C):</td>
-                          <td className="px-4 py-2.5 text-right font-mono font-black text-slate-900">${financialStatements.netCashFlow.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2.5 text-right font-mono font-black text-slate-900">{formatCurrency(financialStatements.netCashFlow)}</td>
                         </tr>
                         <tr className="border-b border-slate-150 hover:bg-slate-50/50 font-medium">
                           <td colSpan={3} className="px-4 py-2.5 pl-6 text-slate-650">Plus: Opening Cash Reserves (Start of range):</td>
-                          <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-700">${financialStatements.openingCashSum.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2.5 text-right font-mono font-bold text-slate-700">{formatCurrency(financialStatements.openingCashSum)}</td>
                         </tr>
                         <tr className="border-b-2 border-slate-300 bg-slate-50 font-black">
                           <td colSpan={3} className="px-4 py-3 pl-6 text-indigo-900 font-black uppercase text-[10px] tracking-wider">STATEMENT CALCULATED ENDING CASH BALANCE:</td>
-                          <td className="px-4 py-3 text-right font-mono text-sm text-indigo-700 font-black underline decoration-double">${financialStatements.endingCashSum.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-3 text-right font-mono text-sm text-indigo-700 font-black underline decoration-double">{formatCurrency(financialStatements.endingCashSum)}</td>
                         </tr>
                         <tr className="border-b-2 border-slate-300 bg-slate-100 font-black text-slate-800">
                           <td colSpan={3} className="px-4 py-3 pl-6 text-slate-800 font-black uppercase text-[10px] tracking-wider">LEDGER VERIFIED TOTAL CASH ACCOUNT BALANCE (GL check):</td>
-                          <td className="px-4 py-3 text-right font-mono text-sm text-slate-900 font-black underline decoration-double">${financialStatements.glEndingCashSum.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-3 text-right font-mono text-sm text-slate-900 font-black underline decoration-double">{formatCurrency(financialStatements.glEndingCashSum)}</td>
                         </tr>
                         <tr className="bg-slate-950 text-white font-black">
                           <td colSpan={3} className="px-4 py-3.5 pl-6 text-slate-200 font-black uppercase text-[10px] tracking-widest">CASH RECONCILIATION VARIANCE (Proof delta):</td>
-                          <td className="px-4 py-3.5 text-right font-mono text-sm text-emerald-400 font-black underline decoration-double">${financialStatements.cashFlowDifference.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-3.5 text-right font-mono text-sm text-emerald-400 font-black underline decoration-double">{formatCurrency(financialStatements.cashFlowDifference)}</td>
                         </tr>
                       </tbody>
                     </table>
@@ -6507,7 +6608,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                       <p className={`text-xs font-black ${financialStatements.bsBalanced ? 'text-emerald-600' : 'text-rose-600'}`}>
                         {financialStatements.bsBalanced ? '✓ ASSETS = L + E' : '✗ EQUATION MISMATCH'}
                       </p>
-                      <span className="text-[9px] text-slate-500 font-semibold">Variance: ${financialStatements.balanceSheetDifference.toFixed(2)}</span>
+                      <span className="text-[9px] text-slate-500 font-semibold">Variance: {formatCurrency(financialStatements.balanceSheetDifference)}</span>
                     </div>
 
                     <div className={`p-4 border rounded-2xl bg-white shadow-3xs flex flex-col justify-between h-28 border-emerald-200`}>
@@ -6523,7 +6624,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                       <p className={`text-xs font-black ${financialStatements.isCashFlowReconciled ? 'text-emerald-600' : 'text-amber-500'}`}>
                         {financialStatements.isCashFlowReconciled ? '✓ RECONCILED WITH GL' : '⚠ RECONCILING DELTA'}
                       </p>
-                      <span className="text-[9px] text-slate-500 font-semibold">Delta: ${financialStatements.cashFlowDifference.toFixed(2)}</span>
+                      <span className="text-[9px] text-slate-500 font-semibold">Delta: {formatCurrency(financialStatements.cashFlowDifference)}</span>
                     </div>
 
                     <div className={`p-4 border rounded-2xl bg-white shadow-3xs flex flex-col justify-between h-28 ${financialStatements.allChecksPass ? 'bg-emerald-50 border-emerald-250' : 'bg-rose-50 border-rose-250'}`}>
@@ -6660,9 +6761,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                         <TrendingUp className="h-4 w-4" />
                       </div>
                       <div className="mt-3">
-                        <h3 className="text-2xl font-black text-slate-900 font-mono leading-none text-emerald-600">
-                          ${trialBalanceData.totalDebitColumnSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        </h3>
+                        <h3 className="text-2xl font-black text-slate-900 font-mono leading-none text-emerald-600">{formatCurrency(trialBalanceData.totalDebitColumnSum)}</h3>
                         <p className="text-[10px] text-slate-400 mt-1">Aggregate debit side ending balances</p>
                       </div>
                     </div>
@@ -6674,9 +6773,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                         <TrendingDown className="h-4 w-4" />
                       </div>
                       <div className="mt-3">
-                        <h3 className="text-2xl font-black text-slate-900 font-mono leading-none text-rose-600">
-                          ${trialBalanceData.totalCreditColumnSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        </h3>
+                        <h3 className="text-2xl font-black text-slate-900 font-mono leading-none text-rose-600">{formatCurrency(trialBalanceData.totalCreditColumnSum)}</h3>
                         <p className="text-[10px] text-slate-400 mt-1">Aggregate credit side ending balances</p>
                       </div>
                     </div>
@@ -6709,7 +6806,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                               ⚠ OUT OF BALANCE
                             </h3>
                             <p className="text-[10px] text-rose-600 font-bold mt-1">
-                              Variance: ${trialBalanceData.difference.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                              Variance: {formatCurrency(trialBalanceData.difference)}
                             </p>
                           </>
                         )}
@@ -6829,12 +6926,12 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                               className="w-full bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-xl px-3 min-h-[38px] focus:outline-none focus:border-indigo-500 font-semibold"
                             >
                               <option value="all_time">All Time Cumulative</option>
-                              <option value="today">Today (2026-07-15)</option>
-                              <option value="yesterday">Yesterday (2026-07-14)</option>
+                              <option value="today">Today</option>
+                              <option value="yesterday">Yesterday</option>
                               <option value="this_week">This Week (Mon-Sun)</option>
-                              <option value="this_month">This Month (July 2026)</option>
-                              <option value="this_quarter">This Quarter (Q3 2026)</option>
-                              <option value="this_year">This Fiscal Year (2026)</option>
+                              <option value="this_month">This Month</option>
+                              <option value="this_quarter">This Quarter</option>
+                              <option value="this_year">This Fiscal Year</option>
                               <option value="fiscal_year">Full Current Fiscal Year</option>
                             </select>
                           </div>
@@ -6908,24 +7005,22 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                         {row.normalBalance}-Normal
                                       </td>
                                       {/* Opening Balance */}
-                                      <td className="py-3.5 px-5 text-right font-mono font-bold text-slate-600 whitespace-nowrap">
-                                        ${row.openingBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                      </td>
+                                      <td className="py-3.5 px-5 text-right font-mono font-bold text-slate-600 whitespace-nowrap">{formatCurrency(row.openingBalance)}</td>
                                       {/* Period Debit */}
                                       <td className="py-3.5 px-5 text-right font-mono text-emerald-600 font-bold whitespace-nowrap">
-                                        {row.periodDebit > 0 ? `+$${row.periodDebit.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                        {row.periodDebit > 0 ? `+${formatCurrency(row.periodDebit)}` : '-'}
                                       </td>
                                       {/* Period Credit */}
                                       <td className="py-3.5 px-5 text-right font-mono text-rose-600 font-bold whitespace-nowrap">
-                                        {row.periodCredit > 0 ? `-$${row.periodCredit.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                        {row.periodCredit > 0 ? `-${formatCurrency(row.periodCredit)}` : '-'}
                                       </td>
                                       {/* Debit Column Value */}
                                       <td className="py-3.5 px-5 text-right font-mono font-black text-slate-900 bg-slate-50/30 whitespace-nowrap">
-                                        {row.debitColumnValue > 0 ? `$${row.debitColumnValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                        {row.debitColumnValue > 0 ? `${formatCurrency(row.debitColumnValue)}` : '-'}
                                       </td>
                                       {/* Credit Column Value */}
                                       <td className="py-3.5 px-5 text-right font-mono font-black text-slate-900 bg-slate-50/30 whitespace-nowrap">
-                                        {row.creditColumnValue > 0 ? `$${row.creditColumnValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                        {row.creditColumnValue > 0 ? `${formatCurrency(row.creditColumnValue)}` : '-'}
                                       </td>
                                       {/* General Ledger Drill Down */}
                                       <td className="py-3.5 px-5 text-center whitespace-nowrap">
@@ -6948,17 +7043,13 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                       GRAND TRIAL SUMMARY
                                     </td>
                                     <td className="py-4 px-5 text-right text-[10px] text-slate-450">
-                                      Variance: ${trialBalanceData.difference.toFixed(2)}
+                                      Variance: {formatCurrency(trialBalanceData.difference)}
                                     </td>
                                     <td colSpan={2} className="py-4 px-5 text-right text-[10px] text-slate-450">
                                       Debit Sum vs Credit Sum
                                     </td>
-                                    <td className="py-4 px-5 text-right text-emerald-400 font-bold">
-                                      ${trialBalanceData.totalDebitColumnSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                    </td>
-                                    <td className="py-4 px-5 text-right text-rose-400 font-bold">
-                                      ${trialBalanceData.totalCreditColumnSum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                    </td>
+                                    <td className="py-4 px-5 text-right text-emerald-400 font-bold">{formatCurrency(trialBalanceData.totalDebitColumnSum)}</td>
+                                    <td className="py-4 px-5 text-right text-rose-400 font-bold">{formatCurrency(trialBalanceData.totalCreditColumnSum)}</td>
                                     <td className="py-4 px-5 rounded-br-2xl"></td>
                                   </tr>
                                 </>
@@ -7002,15 +7093,9 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                   <td className="py-4 px-5 font-mono text-slate-500 font-bold">
                                     {item.code}
                                   </td>
-                                  <td className="py-4 px-5 text-right font-mono text-slate-900 font-bold">
-                                    ${item.gl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                  </td>
-                                  <td className="py-4 px-5 text-right font-mono text-slate-700">
-                                    ${item.op.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                  </td>
-                                  <td className={`py-4 px-5 text-right font-mono font-bold ${item.isReconciled ? 'text-slate-500' : 'text-rose-600 text-sm font-black'}`}>
-                                    ${item.diff.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                  </td>
+                                  <td className="py-4 px-5 text-right font-mono text-slate-900 font-bold">{formatCurrency(item.gl)}</td>
+                                  <td className="py-4 px-5 text-right font-mono text-slate-700">{formatCurrency(item.op)}</td>
+                                  <td className={`py-4 px-5 text-right font-mono font-bold ${item.isReconciled ? 'text-slate-500' : 'text-rose-600 text-sm font-black'}`}>${formatCurrency(item.diff)}</td>
                                   <td className="py-4 px-5 text-center whitespace-nowrap">
                                     {item.isReconciled ? (
                                       <span className="inline-flex items-center gap-1 bg-emerald-50 border border-emerald-100 text-emerald-700 px-2.5 py-0.5 rounded-full font-bold text-[9px] uppercase tracking-wide">
@@ -7166,19 +7251,19 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                     <div className="flex flex-wrap gap-2 w-full md:w-auto">
                       <div className="bg-white border border-slate-200/80 px-4 py-2 rounded-xl text-xs flex flex-col justify-center min-w-[120px] shadow-3xs">
                         <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider">Opening</span>
-                        <span className="font-mono font-bold text-slate-900">${generalLedgerData.openingBalance.toFixed(2)}</span>
+                        <span className="font-mono font-bold text-slate-900">{formatCurrency(generalLedgerData.openingBalance)}</span>
                       </div>
                       <div className="bg-white border border-slate-200/80 px-4 py-2 rounded-xl text-xs flex flex-col justify-center min-w-[120px] shadow-3xs">
                         <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider">Debit Total</span>
-                        <span className="font-mono font-bold text-emerald-600">+${generalLedgerData.totalDebits.toFixed(2)}</span>
+                        <span className="font-mono font-bold text-emerald-600">+{formatCurrency(generalLedgerData.totalDebits)}</span>
                       </div>
                       <div className="bg-white border border-slate-200/80 px-4 py-2 rounded-xl text-xs flex flex-col justify-center min-w-[120px] shadow-3xs">
                         <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider">Credit Total</span>
-                        <span className="font-mono font-bold text-rose-600">-${generalLedgerData.totalCredits.toFixed(2)}</span>
+                        <span className="font-mono font-bold text-rose-600">-{formatCurrency(generalLedgerData.totalCredits)}</span>
                       </div>
                       <div className="bg-indigo-600 text-white border border-indigo-700 px-4 py-2 rounded-xl text-xs flex flex-col justify-center min-w-[120px] shadow-3xs">
                         <span className="text-[8px] font-bold text-indigo-200 uppercase tracking-wider">Closing</span>
-                        <span className="font-mono font-black text-white">${generalLedgerData.closingBalance.toFixed(2)}</span>
+                        <span className="font-mono font-black text-white">{formatCurrency(generalLedgerData.closingBalance)}</span>
                       </div>
                     </div>
                   </div>
@@ -7237,9 +7322,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                             <td className="py-3.5 px-5 text-slate-700 font-bold bg-slate-50/50">Cumulative Opening Balance (Starting Ledger Point)</td>
                             <td className="py-3.5 px-5 text-slate-400 font-medium text-right whitespace-nowrap">-</td>
                             <td className="py-3.5 px-5 text-slate-400 font-medium text-right whitespace-nowrap">-</td>
-                            <td className="py-3.5 px-5 text-indigo-700 font-black text-right bg-indigo-50/20 whitespace-nowrap">
-                              ${generalLedgerData.openingBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                            </td>
+                            <td className="py-3.5 px-5 text-indigo-700 font-black text-right bg-indigo-50/20 whitespace-nowrap">{formatCurrency(generalLedgerData.openingBalance)}</td>
                             <td className="py-3.5 px-5 text-slate-400 font-medium whitespace-nowrap">System</td>
                             <td className="py-3.5 px-5 text-center whitespace-nowrap">-</td>
                           </tr>
@@ -7291,16 +7374,14 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                                   </td>
                                   {/* Debit */}
                                   <td className="py-3.5 px-5 font-mono font-bold text-right text-emerald-600 whitespace-nowrap">
-                                    {e.debit > 0 ? `+$${e.debit.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                    {e.debit > 0 ? `+${formatCurrency(e.debit)}` : '-'}
                                   </td>
                                   {/* Credit */}
                                   <td className="py-3.5 px-5 font-mono font-bold text-right text-rose-600 whitespace-nowrap">
-                                    {e.credit > 0 ? `-$${e.credit.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '-'}
+                                    {e.credit > 0 ? `-${formatCurrency(e.credit)}` : '-'}
                                   </td>
                                   {/* Running Balance */}
-                                  <td className="py-3.5 px-5 font-mono font-black text-right text-slate-900 bg-slate-50/30 whitespace-nowrap">
-                                    ${e.runningBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                  </td>
+                                  <td className="py-3.5 px-5 font-mono font-black text-right text-slate-900 bg-slate-50/30 whitespace-nowrap">{formatCurrency(e.runningBalance)}</td>
                                   {/* Operator / Creator */}
                                   <td className="py-3.5 px-5 font-mono text-slate-400 whitespace-nowrap max-w-[120px] truncate" title={e.createdBy}>
                                     {e.createdBy}
@@ -7365,9 +7446,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                             </span>
                           </td>
                           <td className="py-4 px-5 text-xs text-right whitespace-nowrap">
-                            <span className={`font-mono font-bold ${c.dueBalance > 0 ? 'text-rose-600 text-sm' : 'text-slate-500'}`}>
-                              ${c.dueBalance.toFixed(2)}
-                            </span>
+                            <span className={`font-mono font-bold ${c.dueBalance > 0 ? 'text-rose-600 text-sm' : 'text-slate-500'}`}>${formatCurrency(c.dueBalance)}</span>
                           </td>
                         </tr>
                       ))
@@ -7407,9 +7486,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                             </td>
                             <td className="py-4 px-5 text-xs text-slate-500 capitalize whitespace-nowrap">{s.category ?? 'Primary Materials'}</td>
                             <td className="py-4 px-5 text-xs text-right whitespace-nowrap">
-                              <span className={`font-mono font-bold ${debt > 0 ? 'text-rose-600 text-sm' : 'text-slate-500'}`}>
-                                ${debt.toFixed(2)}
-                              </span>
+                              <span className={`font-mono font-bold ${debt > 0 ? 'text-rose-600 text-sm' : 'text-slate-500'}`}>${formatCurrency(debt)}</span>
                             </td>
                           </tr>
                         );
@@ -7444,8 +7521,8 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                             <td className="py-4 px-5 font-mono text-xs text-indigo-600 whitespace-nowrap">{item.id.substring(item.id.length - 12).toUpperCase()}</td>
                             <td className="py-4 px-5 text-xs font-bold text-slate-800 capitalize whitespace-nowrap">{item.customerName}</td>
                             <td className="py-4 px-5 text-xs text-center font-bold text-slate-500 whitespace-nowrap">{item.taxRatePercent}%</td>
-                            <td className="py-4 px-5 text-xs font-bold text-right text-rose-600 font-mono whitespace-nowrap">${item.taxAmount?.toFixed(2)}</td>
-                            <td className="py-4 px-5 text-xs font-bold text-right text-slate-900 font-mono whitespace-nowrap">${item.subtotal?.toFixed(2)}</td>
+                            <td className="py-4 px-5 text-xs font-bold text-right text-rose-600 font-mono whitespace-nowrap">{formatCurrency(item.taxAmount || 0)}</td>
+                            <td className="py-4 px-5 text-xs font-bold text-right text-slate-900 font-mono whitespace-nowrap">{formatCurrency(item.subtotal || 0)}</td>
                           </tr>
                         );
                       })
@@ -7534,7 +7611,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                           <td className="py-4 px-5 text-xs text-slate-500">Starting balance configured on profile creation</td>
                           <td className="py-4 px-5 text-xs text-right font-mono text-slate-400">-</td>
                           <td className="py-4 px-5 text-xs text-right font-mono text-slate-400">-</td>
-                          <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-900">${initialOpeningBalance.toFixed(2)}</td>
+                          <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-900">{formatCurrency(initialOpeningBalance)}</td>
                           <td className="py-4 px-5 text-xs text-emerald-800 font-semibold">Active</td>
                         </tr>
                         <tr>
@@ -7555,7 +7632,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                           <td className="py-4 px-5 text-xs text-slate-500">Starting balance configured on profile creation</td>
                           <td className="py-4 px-5 text-xs text-right font-mono text-slate-400">-</td>
                           <td className="py-4 px-5 text-xs text-right font-mono text-slate-400">-</td>
-                          <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-900">${initialOpeningBalance.toFixed(2)}</td>
+                          <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-900">{formatCurrency(initialOpeningBalance)}</td>
                           <td className="py-4 px-5 text-xs text-emerald-800 font-semibold">Active</td>
                         </tr>
                         {filteredLedgerEntries.map((item, idx) => {
@@ -7600,16 +7677,14 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                               </td>
                               {/* 7. Debit */}
                               <td className={`py-4 px-5 text-xs text-right font-mono font-bold text-rose-600 whitespace-nowrap ${isVoid ? 'line-through' : ''}`}>
-                                {item.debit > 0 ? `$${item.debit.toFixed(2)}` : '-'}
+                                {item.debit > 0 ? `${formatCurrency(item.debit)}` : '-'}
                               </td>
                               {/* 8. Credit */}
                               <td className={`py-4 px-5 text-xs text-right font-mono font-bold text-emerald-600 whitespace-nowrap ${isVoid ? 'line-through' : ''}`}>
-                                {item.credit > 0 ? `$${item.credit.toFixed(2)}` : '-'}
+                                {item.credit > 0 ? `${formatCurrency(item.credit)}` : '-'}
                               </td>
                               {/* 9. Running Balance */}
-                              <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-950 whitespace-nowrap bg-slate-50/10">
-                                ${item.runningBalance.toFixed(2)}
-                              </td>
+                              <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-950 whitespace-nowrap bg-slate-50/10">{formatCurrency(item.runningBalance)}</td>
                               {/* 10. Status */}
                               <td className="py-4 px-5 text-xs whitespace-nowrap">
                                 <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold border ${
@@ -7658,7 +7733,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                           <td className="py-4 px-5 text-xs text-slate-500">Starting balance configured on profile creation</td>
                           <td className="py-4 px-5 text-xs text-right font-mono text-slate-400">-</td>
                           <td className="py-4 px-5 text-xs text-right font-mono text-slate-400">-</td>
-                          <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-900">${initialSupplierOpeningBalance.toFixed(2)}</td>
+                          <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-900">{formatCurrency(initialSupplierOpeningBalance)}</td>
                         </tr>
                         <tr>
                           <td colSpan={7} className="py-12 text-center text-slate-400 text-xs font-semibold">
@@ -7676,7 +7751,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                           <td className="py-4 px-5 text-xs text-slate-500">Starting balance configured on profile creation</td>
                           <td className="py-4 px-5 text-xs text-right font-mono text-slate-400">-</td>
                           <td className="py-4 px-5 text-xs text-right font-mono text-slate-400">-</td>
-                          <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-900">${initialSupplierOpeningBalance.toFixed(2)}</td>
+                          <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-900">{formatCurrency(initialSupplierOpeningBalance)}</td>
                         </tr>
                         {filteredSupplierLedgerEntries.map((item, idx) => (
                           <tr key={idx} className="hover:bg-slate-50/50 transition duration-150">
@@ -7699,14 +7774,12 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                               {item.description}
                             </td>
                             <td className="py-4 px-5 text-xs text-right font-mono font-bold text-emerald-600 whitespace-nowrap">
-                              {item.debit > 0 ? `$${item.debit.toFixed(2)}` : '-'}
+                              {item.debit > 0 ? `${formatCurrency(item.debit)}` : '-'}
                             </td>
                             <td className="py-4 px-5 text-xs text-right font-mono font-bold text-rose-600 whitespace-nowrap">
-                              {item.credit > 0 ? `$${item.credit.toFixed(2)}` : '-'}
+                              {item.credit > 0 ? `${formatCurrency(item.credit)}` : '-'}
                             </td>
-                            <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-950 whitespace-nowrap bg-slate-50/10">
-                              ${item.runningBalance.toFixed(2)}
-                            </td>
+                            <td className="py-4 px-5 text-xs text-right font-mono font-black text-slate-950 whitespace-nowrap bg-slate-50/10">{formatCurrency(item.runningBalance)}</td>
                           </tr>
                         ))}
                       </>
@@ -7802,9 +7875,7 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
                               </span>
                             </td>
                             {/* Live Balance */}
-                            <td className="py-4 px-5 text-right font-mono font-black text-slate-900 whitespace-nowrap text-sm">
-                              ${balanceVal.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                            </td>
+                            <td className="py-4 px-5 text-right font-mono font-black text-slate-900 whitespace-nowrap text-sm">{formatCurrency(balanceVal)}</td>
                           </tr>
                         );
                       })
@@ -7819,297 +7890,16 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
 
           {/* EXPENSE ANALYTICS VIEW PANEL */}
           {activeReport === 'expense_analytics' && (
-            <div className="space-y-6 font-sans print:space-y-4">
-              
-              {/* KPI Summary Cards */}
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                {/* Total Reconciled Expense */}
-                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 text-white flex flex-col justify-between shadow-sm min-h-[120px]">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Total Active Outflow</span>
-                    <TrendingDown className="h-4.5 w-4.5 text-rose-400" />
-                  </div>
-                  <div>
-                    <h3 className="text-xl xs:text-2xl font-black font-mono leading-none pt-2">
-                      ${expenseAnalyticsSummary.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </h3>
-                    <p className="text-[10px] text-slate-400 mt-1">Reconciled in selected date range</p>
-                  </div>
-                </div>
-
-                {/* Average Outflow Value */}
-                <div className="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col justify-between shadow-xs min-h-[120px]">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Average Tx Outflow</span>
-                    <Activity className="h-4.5 w-4.5 text-indigo-500" />
-                  </div>
-                  <div>
-                    <h3 className="text-xl xs:text-2xl font-black text-slate-900 font-mono leading-none pt-2">
-                      ${expenseAnalyticsSummary.avg.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </h3>
-                    <p className="text-[10px] text-slate-400 mt-1">Weighted transaction average</p>
-                  </div>
-                </div>
-
-                {/* Peak Operating Outflow */}
-                <div className="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col justify-between shadow-xs min-h-[120px]">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Largest Single Outflow</span>
-                    <DollarSign className="h-4.5 w-4.5 text-emerald-500" />
-                  </div>
-                  <div>
-                    <h3 className="text-xl xs:text-2xl font-black text-slate-900 font-mono leading-none pt-2">
-                      ${expenseAnalyticsSummary.largest.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </h3>
-                    <p className="text-[10px] text-slate-400 mt-1">Peak single transaction value</p>
-                  </div>
-                </div>
-
-                {/* Transaction Volume */}
-                <div className="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col justify-between shadow-xs min-h-[120px]">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Transaction Volume</span>
-                    <Clock className="h-4.5 w-4.5 text-amber-500" />
-                  </div>
-                  <div>
-                    <h3 className="text-xl xs:text-2xl font-black text-slate-900 font-mono leading-none pt-2">
-                      {expenseAnalyticsSummary.count} Active Tx
-                    </h3>
-                    <p className="text-[10px] text-slate-400 mt-1">GAAP-compliant audit records</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Bento Grid: Categories & Vendors */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Category-wise bento card */}
-                <div className="bg-white border border-slate-200 rounded-[2rem] p-6 shadow-xs space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="text-sm font-bold text-slate-900">Category-wise Operating Expenses</h4>
-                      <p className="text-[11px] text-slate-400">Proportional budget utilization</p>
-                    </div>
-                    <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full">
-                      Budget Breakdown
-                    </span>
-                  </div>
-
-                  <div className="space-y-3 max-h-[300px] overflow-y-auto pr-1">
-                    {categoryExpensesReport.length === 0 ? (
-                      <p className="text-xs text-slate-400 py-12 text-center font-semibold">No category metrics calculated</p>
-                    ) : (
-                      categoryExpensesReport.map((cat, i) => (
-                        <div key={i} className="space-y-1">
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-bold text-slate-700">{cat.category}</span>
-                            <span className="font-mono font-bold text-slate-900">
-                              ${cat.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                              <span className="text-slate-400 font-normal text-[10px] ml-1.5">({cat.count} Tx, {cat.percentage.toFixed(1)}%)</span>
-                            </span>
-                          </div>
-                          <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                            <div 
-                              className="bg-gradient-to-r from-indigo-500 to-rose-500 h-full rounded-full"
-                              style={{ width: `${cat.percentage}%` }}
-                            ></div>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                {/* Vendor-wise bento card */}
-                <div className="bg-white border border-slate-200 rounded-[2rem] p-6 shadow-xs space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="text-sm font-bold text-slate-900">Creditor & Vendor Concentration</h4>
-                      <p className="text-[11px] text-slate-400">Concentration of active business liabilities</p>
-                    </div>
-                    <span className="text-[10px] font-bold text-rose-600 bg-rose-50 border border-rose-100 px-2 py-0.5 rounded-full">
-                      Vendor Stats
-                    </span>
-                  </div>
-
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs">
-                      <thead>
-                        <tr className="border-b border-slate-100 text-slate-400 font-bold uppercase tracking-wider text-[10px]">
-                          <th className="pb-2">Vendor</th>
-                          <th className="pb-2 text-center">Tx Count</th>
-                          <th className="pb-2 text-right">Average</th>
-                          <th className="pb-2 text-right">Total Outflow</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-50">
-                        {vendorExpensesReport.length === 0 ? (
-                          <tr>
-                            <td colSpan={4} className="py-12 text-center text-slate-400 font-semibold">No vendor metrics logged</td>
-                          </tr>
-                        ) : (
-                          vendorExpensesReport.slice(0, 6).map((v, idx) => (
-                            <tr key={idx} className="hover:bg-slate-50/50">
-                              <td className="py-2.5 font-bold text-slate-700">{v.vendor}</td>
-                              <td className="py-2.5 text-center font-mono text-slate-600">{v.count}</td>
-                              <td className="py-2.5 text-right font-mono text-slate-600">${v.avg.toFixed(2)}</td>
-                              <td className="py-2.5 text-right font-mono font-bold text-rose-600">${v.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              {/* Bento Grid: Temporal Distribution & Financial Impact Analysis */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Temporal distribution */}
-                <div className="bg-white border border-slate-200 rounded-[2rem] p-6 shadow-xs space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="text-sm font-bold text-slate-900">Temporal Period Distribution</h4>
-                      <p className="text-[11px] text-slate-400">Total operational spend classified by chronological cycles</p>
-                    </div>
-                    <span className="text-[10px] font-bold text-amber-600 bg-amber-50 border border-amber-100 px-2 py-0.5 rounded-full">
-                      Time Periods
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                    {dateWiseExpensesReport.map((item, idx) => (
-                      <div key={idx} className="bg-slate-50 p-4 rounded-2xl border border-slate-100 flex flex-col justify-between">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{item.period}</span>
-                        <div>
-                          <h5 className="text-sm xs:text-base font-black font-mono text-slate-800 pt-1">
-                            ${item.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                          </h5>
-                          <span className="text-[9px] text-slate-400 line-clamp-1 block leading-tight mt-0.5">{item.description}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Operating Impact & Cash flow Analysis */}
-                <div className="bg-white border border-slate-200 rounded-[2rem] p-6 shadow-xs space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="text-sm font-bold text-slate-900">Financial Impact & Liquidity Analysis</h4>
-                      <p className="text-[11px] text-slate-400">Nett cash flow drainage vs non-cash accrued obligations</p>
-                    </div>
-                    <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-100 px-2 py-0.5 rounded-full">
-                      GAAP Impact
-                    </span>
-                  </div>
-
-                  <div className="space-y-4 font-sans text-xs">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="p-4 rounded-2xl border border-emerald-100 bg-emerald-50/20">
-                        <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest block">Cash Settle Outflow</span>
-                        <h4 className="text-lg font-black text-emerald-700 font-mono mt-1">
-                          ${cashImpactAnalysis.cashOpex.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                        </h4>
-                        <p className="text-[9px] text-emerald-600 mt-1">Cash, Transfer, Cashier, Petty cash</p>
-                      </div>
-
-                      <div className="p-4 rounded-2xl border border-rose-100 bg-rose-50/20">
-                        <span className="text-[10px] font-bold text-rose-600 uppercase tracking-widest block">Deferred Credit Opex</span>
-                        <h4 className="text-lg font-black text-rose-700 font-mono mt-1">
-                          ${cashImpactAnalysis.nonCashOpex.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                        </h4>
-                        <p className="text-[9px] text-rose-600 mt-1">Credit, Deferred, Accrued, Accounts Payable</p>
-                      </div>
-                    </div>
-
-                    <div className="border-t border-slate-100 pt-3 flex items-center justify-between text-xs">
-                      <div>
-                        <span className="font-bold text-slate-700 block">Total OpEx to Net Margin Impact</span>
-                        <p className="text-[10px] text-slate-400">Aggregate impact of operating costs on gross trading yields</p>
-                      </div>
-                      <span className="font-mono font-black text-rose-600 text-sm bg-rose-50 border border-rose-100 px-3 py-1 rounded-lg">
-                        -${totalExpensesAmt.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Detailed Line-item Transaction Log */}
-              <div className="bg-white border border-slate-200 rounded-[2rem] shadow-2xs overflow-hidden">
-                <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                  <div>
-                    <h4 className="text-sm font-bold text-slate-900">Line-item Operating Ledger Log</h4>
-                    <p className="text-[11px] text-slate-400">Reconciled line-items for audit and internal controls</p>
-                  </div>
-                  <span className="text-[10px] font-mono text-slate-400">
-                    Showing {filteredExpensesList.length} of {expenses.length} records
-                  </span>
-                </div>
-
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="bg-slate-900 text-white font-bold uppercase tracking-wider text-[10px]">
-                        <th className="py-3 px-5 whitespace-nowrap">Tx ID / Date</th>
-                        <th className="py-3 px-5 whitespace-nowrap">Category</th>
-                        <th className="py-3 px-5 whitespace-nowrap">Vendor / Payee</th>
-                        <th className="py-3 px-5 whitespace-nowrap">Payment Method</th>
-                        <th className="py-3 px-5 whitespace-nowrap text-center">Status</th>
-                        <th className="py-3 px-5 whitespace-nowrap text-right">Amount</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {filteredExpensesList.length === 0 ? (
-                        <tr>
-                          <td colSpan={6} className="py-12 text-center text-slate-400 font-semibold">
-                            No operating expense lines match the filters
-                          </td>
-                        </tr>
-                      ) : (
-                        filteredExpensesList.map((item) => {
-                          const isVoid = isVoidStatus(item.status);
-                          return (
-                            <tr key={item.id} className={`hover:bg-slate-50/50 transition duration-150 ${isVoid ? 'bg-slate-50/30 opacity-70' : ''}`}>
-                              <td className="py-3.5 px-5 whitespace-nowrap">
-                                <span className="font-mono font-bold text-indigo-600 block">{(item.id || '').substring(0, 8).toUpperCase()}</span>
-                                <span className="text-[10px] text-slate-400 font-semibold">{item.expenseDate ? item.expenseDate.split('T')[0] : 'N/A'}</span>
-                              </td>
-                              <td className="py-3.5 px-5 whitespace-nowrap">
-                                <span className="font-bold text-slate-800">{item.category}</span>
-                                {item.description && <span className="text-[10px] text-slate-400 block max-w-xs truncate">{item.description}</span>}
-                              </td>
-                              <td className="py-3.5 px-5 whitespace-nowrap">
-                                <span className="font-bold text-slate-700 block">{item.vendorName || 'N/A'}</span>
-                                <span className="text-[10px] text-slate-400">Employee: {item.employeeName || 'N/A'}</span>
-                              </td>
-                              <td className="py-3.5 px-5 whitespace-nowrap">
-                                <span className="font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full text-[10px] uppercase font-mono tracking-wide">{item.paymentMethod || 'Cash'}</span>
-                              </td>
-                              <td className="py-3.5 px-5 whitespace-nowrap text-center">
-                                {isVoid ? (
-                                  <span className="inline-flex items-center gap-1 bg-red-50 border border-red-100 text-red-700 px-2.5 py-0.5 rounded-full font-bold text-[9px] uppercase tracking-wide">
-                                    <ShieldAlert className="w-3 h-3 text-red-500" /> Voided (0.00 Impact)
-                                  </span>
-                                ) : (
-                                  <span className="inline-flex items-center gap-1 bg-emerald-50 border border-emerald-100 text-emerald-700 px-2.5 py-0.5 rounded-full font-bold text-[9px] uppercase tracking-wide">
-                                    Active
-                                  </span>
-                                )}
-                              </td>
-                              <td className={`py-3.5 px-5 whitespace-nowrap text-right font-mono font-bold text-sm ${isVoid ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
-                                ${Number(item.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                              </td>
-                            </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-            </div>
+            <ExpenseAnalyticsView
+              expenseAnalyticsSummary={expenseAnalyticsSummary}
+              categoryExpensesReport={categoryExpensesReport}
+              vendorExpensesReport={vendorExpensesReport}
+              dateWiseExpensesReport={dateWiseExpensesReport}
+              cashImpactAnalysis={cashImpactAnalysis}
+              totalExpensesAmt={totalExpensesAmt}
+              filteredExpensesList={filteredExpensesList}
+              expenses={expenses}
+            />
           )}
 
         </div>
@@ -8137,6 +7927,16 @@ export default function ReportsPage({ userRole, permissions: propPermissions }: 
           products={products}
           companyProfile={companyProfile}
           onClose={() => setSelectedPurchaseForDetail(null)}
+        />
+      )}
+
+      {/* RENDER VAT SETTLEMENT MODAL OVERLAY */}
+      {isVatSettlementOpen && (
+        <VatSettlementModal
+          isOpen={isVatSettlementOpen}
+          onClose={() => setIsVatSettlementOpen(false)}
+          ledgerEntries={ledgerEntries}
+          coa={coa.length > 0 ? coa : INITIAL_CHART_OF_ACCOUNTS}
         />
       )}
 

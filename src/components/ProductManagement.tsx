@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Package, 
@@ -20,15 +20,59 @@ import {
   Sparkles,
   Layers,
   Archive,
-  BookOpen
+  BookOpen,
+  Lock,
+  Eye,
+  Info,
+  Barcode,
+  Zap,
+  Globe,
+  RefreshCw,
+  Printer,
+  CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
-import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
-import { Product } from '../types';
+import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs, runTransaction } from 'firebase/firestore';
+import { Product, UnitMaster, UnitConversion, BarcodeType, BarcodeStatus, BarcodeSource, BarcodeExecutionResult, BarcodePrintExecutionResult, LedgerEntry, LedgerEntryLine } from '../types';
+import { INITIAL_UNITS } from '../data/defaultUnits';
 import { isInactiveStatus } from '../lib/utils';
+import { ResponsiveKPIValue } from './MetricCard';
 import { usePermission, UserRole } from '../hooks/usePermission';
+import { formatCurrency } from '../utils/currencyFormatter';
+import { UnitConversionService } from '../services/unitConversionService';
+import { BarcodeService } from '../services/barcodeService';
+import { BarcodeExecutionService } from '../services/barcode/execution/BarcodeExecutionService';
+import { DesktopDetector } from '../services/barcode/transport/DesktopDetector';
+import { TranslationService } from '../services/translation/TranslationService';
+import { UnitBadge } from './ui/UnitBadge';
+import { formatConversionText } from '../lib/unitConversion';
+import { 
+  getNextPostingNumber, 
+  commitNextPostingNumber, 
+  ensureSystemAccountsExist, 
+  resolveSystemAccount, 
+  validateJournalBalance 
+} from '../lib/postingEngine';
+import { INITIAL_CHART_OF_ACCOUNTS } from '../data';
 
 export const INITIAL_PRODUCTS: Product[] = [
+  {
+    id: "prod-rice-001",
+    name: "RICE",
+    sku: "RE-1",
+    category: "Grocery",
+    brand: "GrainMaster",
+    purchasePrice: 15.00,
+    sellingPrice: 25.00,
+    currentStock: 100,
+    minimumStockAlert: 20,
+    createdDate: "2026-06-01T08:00:00Z",
+    barcode: "RE-1",
+    barcodeType: "CODE128",
+    unitCode: "KG",
+    unitName: "KG"
+  },
   {
     id: "prod-1",
     name: "AeroGrip Pro Athletic Shoes",
@@ -91,6 +135,9 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
 
   // --- States ---
   const [products, setProducts] = useState<Product[]>([]);
+  const [units, setUnits] = useState<UnitMaster[]>([]);
+  const [allConversions, setAllConversions] = useState<UnitConversion[]>([]);
+  const [selectedProductDetails, setSelectedProductDetails] = useState<Product | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -101,21 +148,452 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [productToDelete, setProductToDelete] = useState<Product | null>(null);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [translationNotice, setTranslationNotice] = useState<{ type: 'success' | 'warning'; message: string } | null>(null);
+  
+  // --- Sprint 11 & Sprint 10 Execution Engine States ---
+  const [isExecutingBarcode, setIsExecutingBarcode] = useState(false);
+  const [barcodeExecResult, setBarcodeExecResult] = useState<BarcodeExecutionResult | null>(null);
+
+  const [isExecutingPrint, setIsExecutingPrint] = useState(false);
+  const [printExecResult, setPrintExecResult] = useState<BarcodePrintExecutionResult | null>(null);
+
+  const handleGenerateBarcodeForProduct = async (product: Product) => {
+    setIsExecutingBarcode(true);
+    const service = BarcodeExecutionService.getInstance();
+    const result = await service.executeGenerateBarcode({
+      productId: product.id,
+      sku: product.sku,
+      barcodeValue: product.barcode || product.sku,
+      barcodeType: product.barcodeType || 'CODE128',
+      quantity: 1,
+    });
+
+    setBarcodeExecResult(result);
+    setIsExecutingBarcode(false);
+  };
+
+  const handlePrintBarcodeForProduct = async (product: Product) => {
+    setIsExecutingPrint(true);
+    const unitVal = product.unitCode || product.unitName || 'PCS';
+    const service = BarcodeExecutionService.getInstance();
+    const result = await service.executePrintBarcode({
+      productId: product.id,
+      sku: product.sku,
+      productName: product.name,
+      barcodeValue: product.barcode || product.sku,
+      barcodeType: product.barcodeType || 'CODE128',
+      category: product.category,
+      categoryName: product.category,
+      brand: product.brand,
+      brandName: product.brand,
+      unit: unitVal,
+      unitName: unitVal,
+      warehouse: 'WH-MAIN',
+      warehouseName: 'Main Warehouse',
+      printerName: 'MZ Thermal Printer ZD421',
+      labelTemplateId: 'STD_PRODUCT_38X25MM',
+      copies: 1,
+      labelWidthMm: 38,
+      labelHeightMm: 25,
+      rotation: 0,
+      printDensity: 15,
+      originSource: 'PRODUCT_MANAGEMENT',
+      context: {
+        product: {
+          id: product.id,
+          name: product.name,
+          sku: product.sku,
+          barcode: product.barcode || product.sku,
+          barcodeType: product.barcodeType || 'CODE128',
+          category: product.category,
+          brand: product.brand,
+          unit: unitVal,
+        },
+        warehouse: {
+          warehouseId: 'WH-MAIN',
+          warehouseName: 'Main Warehouse',
+        },
+        user: {
+          userName: auth.currentUser?.email || 'admin_01@nexus.erp',
+          role: userRole,
+        },
+      },
+    });
+
+    setPrintExecResult(result);
+    setIsExecutingPrint(false);
+  };
+
+  // --- Multi Label Print States ---
+  const [multiPrintQuantity, setMultiPrintQuantity] = useState<number>(5);
+  const [multiPrintCopies, setMultiPrintCopies] = useState<number>(1);
+  const [multiPrintTemplate, setMultiPrintTemplate] = useState<string>('STD_PRODUCT_38X25MM');
+  const [multiPrintPrinter, setMultiPrintPrinter] = useState<string>('MZ Thermal Printer ZD421');
+  const [isMultiPrinting, setIsMultiPrinting] = useState<boolean>(false);
+  const [multiPrintProgress, setMultiPrintProgress] = useState<{
+    current: number;
+    total: number;
+    statusMessage: string;
+    completed: number;
+    failed: number;
+    skipped: number;
+    startTime: number;
+    endTime?: number;
+    lastJobId?: string;
+  } | null>(null);
+
+  const cancelMultiPrintRef = useRef<boolean>(false);
+
+  const handleBatchPrintBarcodeForProduct = async (product: Product) => {
+    if (!product) return;
+    setIsMultiPrinting(true);
+    cancelMultiPrintRef.current = false;
+
+    const total = Math.max(1, multiPrintQuantity);
+    const copies = Math.max(1, multiPrintCopies);
+    const startTime = Date.now();
+
+    setMultiPrintProgress({
+      current: 0,
+      total,
+      statusMessage: 'Preparing labels...',
+      completed: 0,
+      failed: 0,
+      skipped: 0,
+      startTime,
+    });
+
+    let completed = 0;
+    let failed = 0;
+    let skipped = 0;
+    let lastJobId = '';
+
+    const service = BarcodeExecutionService.getInstance();
+
+    for (let i = 1; i <= total; i++) {
+      if (cancelMultiPrintRef.current) {
+        skipped = total - i + 1;
+        setMultiPrintProgress(prev => prev ? {
+          ...prev,
+          statusMessage: 'Printing Cancelled by User',
+          skipped,
+          endTime: Date.now(),
+        } : null);
+        break;
+      }
+
+      setMultiPrintProgress(prev => prev ? {
+        ...prev,
+        current: i,
+        statusMessage: `Printing ${i} / ${total}`,
+      } : null);
+
+      try {
+        const unitVal = product.unitCode || product.unitName || 'PCS';
+        const result = await service.executePrintBarcode({
+          productId: product.id,
+          sku: product.sku,
+          productName: product.name,
+          barcodeValue: product.barcode || product.sku,
+          barcodeType: product.barcodeType || 'CODE128',
+          category: product.category,
+          categoryName: product.category,
+          brand: product.brand,
+          brandName: product.brand,
+          unit: unitVal,
+          unitName: unitVal,
+          warehouse: 'WH-MAIN',
+          warehouseName: 'Main Warehouse',
+          printerName: multiPrintPrinter || 'MZ Thermal Printer ZD421',
+          labelTemplateId: multiPrintTemplate || 'STD_PRODUCT_38X25MM',
+          copies,
+          labelWidthMm: 38,
+          labelHeightMm: 25,
+          rotation: 0,
+          printDensity: 15,
+          originSource: 'PRODUCT_BATCH_PRINT',
+          context: {
+            product: {
+              id: product.id,
+              name: product.name,
+              sku: product.sku,
+              barcode: product.barcode || product.sku,
+              barcodeType: product.barcodeType || 'CODE128',
+              category: product.category,
+              brand: product.brand,
+              unit: unitVal,
+            },
+            warehouse: {
+              warehouseId: 'WH-MAIN',
+              warehouseName: 'Main Warehouse',
+            },
+            user: {
+              userName: auth.currentUser?.email || 'admin_01@nexus.erp',
+              role: userRole,
+            },
+          },
+        });
+
+        if (result.success) {
+          completed++;
+          lastJobId = result.jobId || lastJobId;
+        } else {
+          failed++;
+        }
+      } catch {
+        failed++;
+      }
+
+      setMultiPrintProgress(prev => prev ? {
+        ...prev,
+        completed,
+        failed,
+        skipped,
+        lastJobId,
+      } : null);
+    }
+
+    const endTime = Date.now();
+    setMultiPrintProgress(prev => prev ? {
+      ...prev,
+      statusMessage: cancelMultiPrintRef.current ? 'Batch Printing Cancelled' : 'Printing Complete',
+      endTime,
+    } : null);
+
+    setIsMultiPrinting(false);
+  };
+
+  const handleCancelMultiPrint = () => {
+    cancelMultiPrintRef.current = true;
+  };
+  
+  // --- Carton Label Print States (Sprint 11.3) ---
+  const [cartonQuantity, setCartonQuantity] = useState<number>(1);
+  const [cartonNumber, setCartonNumber] = useState<string>('');
+  const [totalCartons, setTotalCartons] = useState<string>('');
+  const [cartonCopies, setCartonCopies] = useState<number>(1);
+  const [cartonTemplate, setCartonTemplate] = useState<string>('STD_PRODUCT_38X25MM');
+  const [cartonPrinter, setCartonPrinter] = useState<string>('MZ Thermal Printer ZD421');
+  const [isPrintingCarton, setIsPrintingCarton] = useState<boolean>(false);
+  const [cartonPrintResult, setCartonPrintResult] = useState<BarcodePrintExecutionResult | null>(null);
+
+  const handlePrintCartonLabelForProduct = async (product: Product) => {
+    if (!product) return;
+    setIsPrintingCarton(true);
+    setCartonPrintResult(null);
+
+    const unitVal = product.unitCode || product.unitName || 'PCS';
+    const service = BarcodeExecutionService.getInstance();
+    const result = await service.executePrintBarcode({
+      productId: product.id,
+      sku: product.sku,
+      productName: product.name,
+      barcodeValue: product.barcode || product.sku,
+      barcodeType: product.barcodeType || 'CODE128',
+      category: product.category,
+      categoryName: product.category,
+      brand: product.brand,
+      brandName: product.brand,
+      unit: unitVal,
+      unitName: unitVal,
+      warehouse: 'WH-MAIN',
+      warehouseName: 'Main Warehouse',
+      printerName: cartonPrinter || 'MZ Thermal Printer ZD421',
+      labelTemplateId: cartonTemplate || 'STD_PRODUCT_38X25MM',
+      copies: Math.max(1, cartonCopies),
+      labelWidthMm: 38,
+      labelHeightMm: 25,
+      rotation: 0,
+      printDensity: 15,
+      labelType: 'CARTON_LABEL',
+      cartonQuantity: cartonQuantity,
+      cartonNumber: cartonNumber || undefined,
+      totalCartons: totalCartons || undefined,
+      originSource: 'PRODUCT_CARTON_LABEL',
+      context: {
+        product: {
+          id: product.id,
+          name: product.name,
+          sku: product.sku,
+          barcode: product.barcode || product.sku,
+          barcodeType: product.barcodeType || 'CODE128',
+          category: product.category,
+          brand: product.brand,
+          unit: unitVal,
+        },
+        warehouse: {
+          warehouseId: 'WH-MAIN',
+          warehouseName: 'Main Warehouse',
+        },
+        user: {
+          userName: auth.currentUser?.email || 'admin_01@nexus.erp',
+          role: userRole,
+        },
+      },
+    });
+
+    setCartonPrintResult(result);
+    setIsPrintingCarton(false);
+  };
+
+  // --- Unit Conversion Label Print States (Sprint 11.4) ---
+  const [unitConversionUnit, setUnitConversionUnit] = useState<string>('Box');
+  const [unitConversionQty, setUnitConversionQty] = useState<number>(10);
+  const [unitConversionCopies, setUnitConversionCopies] = useState<number>(1);
+  const [unitConversionTemplate, setUnitConversionTemplate] = useState<string>('STD_PRODUCT_38X25MM');
+  const [unitConversionPrinter, setUnitConversionPrinter] = useState<string>('MZ Thermal Printer ZD421');
+  const [isPrintingUnitConversion, setIsPrintingUnitConversion] = useState<boolean>(false);
+  const [unitConversionPrintResult, setUnitConversionPrintResult] = useState<BarcodePrintExecutionResult | null>(null);
+
+  const handlePrintUnitConversionLabelForProduct = async (product: Product) => {
+    if (!product) return;
+    setIsPrintingUnitConversion(true);
+    setUnitConversionPrintResult(null);
+
+    const baseUnitCode = product.unitCode || product.unitName || 'PCS';
+
+    const service = BarcodeExecutionService.getInstance();
+    const result = await service.executePrintBarcode({
+      productId: product.id,
+      sku: product.sku,
+      productName: product.name,
+      barcodeValue: product.barcode || product.sku,
+      barcodeType: product.barcodeType || 'CODE128',
+      category: product.category,
+      categoryName: product.category,
+      brand: product.brand,
+      brandName: product.brand,
+      unit: unitConversionUnit,
+      unitName: unitConversionUnit,
+      warehouse: 'WH-MAIN',
+      warehouseName: 'Main Warehouse',
+      printerName: unitConversionPrinter || 'MZ Thermal Printer ZD421',
+      labelTemplateId: unitConversionTemplate || 'STD_PRODUCT_38X25MM',
+      copies: Math.max(1, unitConversionCopies),
+      labelWidthMm: 38,
+      labelHeightMm: 25,
+      rotation: 0,
+      printDensity: 15,
+      labelType: 'UNIT_CONVERSION_LABEL',
+      conversionUnit: unitConversionUnit,
+      conversionQuantity: unitConversionQty,
+      baseUnit: baseUnitCode,
+      originSource: 'PRODUCT_UNIT_CONVERSION',
+      context: {
+        product: {
+          id: product.id,
+          name: product.name,
+          sku: product.sku,
+          barcode: product.barcode || product.sku,
+          barcodeType: product.barcodeType || 'CODE128',
+          category: product.category,
+          brand: product.brand,
+          unit: baseUnitCode,
+        },
+        warehouse: {
+          warehouseId: 'WH-MAIN',
+          warehouseName: 'Main Warehouse',
+        },
+        user: {
+          userName: auth.currentUser?.email || 'admin_01@nexus.erp',
+          role: userRole,
+        },
+      },
+    });
+
+    setUnitConversionPrintResult(result);
+    setIsPrintingUnitConversion(false);
+  };
   
   // --- Form Field States ---
   const [formData, setFormData] = useState({
     name: '',
+    nameArabic: '',
     sku: '',
     category: '',
+    unitId: '',
     purchasePrice: '',
     sellingPrice: '',
     currentStock: '',
     minimumStockAlert: '',
-    status: 'active'
+    status: 'active',
+    barcode: '',
+    barcodeType: 'CODE128' as BarcodeType,
+    barcodeStatus: 'unassigned' as BarcodeStatus,
+    barcodeSource: 'manual' as BarcodeSource,
+    isBarcodeLocked: false,
   });
 
   // --- Validation Errors State ---
   const [errors, setErrors] = useState<Record<string, string>>({});
+
+  // --- Synchronize Chart of Accounts ---
+  const [coa, setCoa] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!auth.currentUser) {
+      const saved = localStorage.getItem('nexus_chart_of_accounts');
+      setCoa(saved ? JSON.parse(saved) : INITIAL_CHART_OF_ACCOUNTS);
+      return;
+    }
+
+    const unsubCoa = onSnapshot(collection(db, 'chartOfAccounts'), (snapshot) => {
+      const list: any[] = [];
+      snapshot.forEach((docSnap) => {
+        list.push({ id: docSnap.id, ...docSnap.data() });
+      });
+      setCoa(list.length > 0 ? list : INITIAL_CHART_OF_ACCOUNTS);
+    }, (err) => {
+      console.error("COA sync error in ProductManagement:", err);
+      setCoa(INITIAL_CHART_OF_ACCOUNTS);
+    });
+
+    return () => unsubCoa();
+  }, []);
+
+  // --- Synchronize Units ---
+  useEffect(() => {
+    if (!auth.currentUser) {
+      const saved = localStorage.getItem('inventory_units');
+      setUnits(saved ? JSON.parse(saved) : INITIAL_UNITS);
+      return;
+    }
+
+    const unsubUnits = onSnapshot(collection(db, 'units'), (snapshot) => {
+      const list: UnitMaster[] = [];
+      snapshot.forEach((docSnap) => {
+        list.push({ id: docSnap.id, ...docSnap.data() } as UnitMaster);
+      });
+      setUnits(list.length > 0 ? list : INITIAL_UNITS);
+    }, (err) => {
+      console.error("Units sync error in ProductManagement:", err);
+      setUnits(INITIAL_UNITS);
+    });
+
+    return () => unsubUnits();
+  }, []);
+
+  // --- Synchronize Unit Conversions ---
+  useEffect(() => {
+    const unsubConversions = UnitConversionService.subscribeAllConversions(
+      (data) => setAllConversions(data),
+      (err) => console.error('Conversions sync error:', err)
+    );
+    return () => unsubConversions();
+  }, []);
+
+  const activeUnits = useMemo(() => {
+    const source = units.length > 0 ? units : INITIAL_UNITS;
+    return source
+      .filter((u) => u.status === 'active')
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.unitName.localeCompare(b.unitName));
+  }, [units]);
+
+  // Inventory transaction guard: product has movement if currentStock > 0 or currentStock differs from initialStock
+  const hasMovement = useMemo(() => {
+    if (!editingProduct) return false;
+    return editingProduct.currentStock > 0 || (editingProduct.initialStock !== undefined && editingProduct.currentStock !== editingProduct.initialStock);
+  }, [editingProduct]);
 
   // --- Real-time Firestore Sync ---
   useEffect(() => {
@@ -200,25 +678,39 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
       setEditingProduct(product);
       setFormData({
         name: product.name,
+        nameArabic: product.nameArabic || '',
         sku: product.sku,
         category: product.category,
+        unitId: product.unitId || activeUnits[0]?.id || '',
         purchasePrice: product.purchasePrice.toString(),
         sellingPrice: product.sellingPrice.toString(),
         currentStock: product.currentStock.toString(),
         minimumStockAlert: product.minimumStockAlert.toString(),
-        status: product.status || 'active'
+        status: product.status || 'active',
+        barcode: product.barcode || '',
+        barcodeType: product.barcodeType || 'CODE128',
+        barcodeStatus: product.barcodeStatus || (product.barcode ? 'assigned' : 'unassigned'),
+        barcodeSource: product.barcodeSource || 'manual',
+        isBarcodeLocked: product.isBarcodeLocked || false,
       });
     } else {
       setEditingProduct(null);
       setFormData({
         name: '',
+        nameArabic: '',
         sku: '',
         category: '',
+        unitId: activeUnits[0]?.id || '',
         purchasePrice: permissions?.viewProductCost !== false ? '' : '0',
         sellingPrice: '',
         currentStock: '0',
         minimumStockAlert: '',
-        status: 'active'
+        status: 'active',
+        barcode: '',
+        barcodeType: 'CODE128',
+        barcodeStatus: 'unassigned',
+        barcodeSource: 'manual',
+        isBarcodeLocked: false,
       });
     }
     setErrors({});
@@ -243,6 +735,10 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
       newErrors.category = 'Category must be 100 characters or less';
     }
 
+    if (!formData.unitId) {
+      newErrors.unitId = 'Base Unit selection is required';
+    }
+
     const costPrice = permissions?.viewProductCost !== false ? parseFloat(formData.purchasePrice) : 0;
     if (permissions?.viewProductCost !== false && (isNaN(costPrice) || costPrice < 0)) {
       newErrors.purchasePrice = 'Enter a valid positive purchase cost';
@@ -251,8 +747,6 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
     const salePrice = parseFloat(formData.sellingPrice);
     if (isNaN(salePrice) || salePrice < 0) {
       newErrors.sellingPrice = 'Enter a valid positive retail price';
-    } else if (salePrice < costPrice) {
-      // Gentle warning, but allow. Or flag as error depending on constraints
     }
 
     const stock = parseInt(formData.currentStock);
@@ -263,6 +757,20 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
     const minAlert = parseInt(formData.minimumStockAlert);
     if (isNaN(minAlert) || minAlert < 0) {
       newErrors.minimumStockAlert = 'Minimum stock alert level must be 0 or greater';
+    }
+
+    // Barcode validation
+    const trimmedBc = formData.barcode.trim();
+    if (trimmedBc) {
+      const bcRes = BarcodeService.validateBarcode(
+        trimmedBc,
+        formData.barcodeType,
+        editingProduct?.id,
+        products
+      );
+      if (!bcRes.isValid && bcRes.error) {
+        newErrors.barcode = bcRes.error;
+      }
     }
 
     setErrors(newErrors);
@@ -278,17 +786,34 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
     const productId = editingProduct ? editingProduct.id : `prod-${Date.now()}`;
     const timestamp = editingProduct?.createdDate || new Date().toISOString();
 
+    const selectedUnit = activeUnits.find(u => u.id === formData.unitId) || activeUnits[0];
+
+    const trimmedBarcode = formData.barcode.trim();
+    const isBarcodeChanged = (editingProduct?.barcode || '') !== trimmedBarcode;
+
     const finalizedData: Product = {
       id: productId,
       name: formData.name.trim(),
+      nameArabic: formData.nameArabic.trim() ? formData.nameArabic.trim() : undefined,
       sku: formData.sku.trim().toUpperCase(),
       category: formData.category.trim(),
+      unitId: selectedUnit?.id || formData.unitId,
+      unitCode: selectedUnit?.unitCode || editingProduct?.unitCode || '',
+      unitName: selectedUnit?.unitName || editingProduct?.unitName || '',
       purchasePrice: permissions?.viewProductCost !== false ? parseFloat(formData.purchasePrice) : (parseFloat(formData.purchasePrice) || 0),
       sellingPrice: parseFloat(formData.sellingPrice),
       currentStock: editingProduct ? editingProduct.currentStock : (parseInt(formData.currentStock) || 0),
       minimumStockAlert: parseInt(formData.minimumStockAlert),
       createdDate: timestamp,
       status: (formData.status as 'active' | 'inactive') || 'active',
+      barcode: trimmedBarcode || undefined,
+      barcodeType: trimmedBarcode ? formData.barcodeType : undefined,
+      barcodeStatus: trimmedBarcode ? (formData.isBarcodeLocked ? 'locked' : 'assigned') : 'unassigned',
+      barcodeSource: trimmedBarcode ? formData.barcodeSource : undefined,
+      isBarcodeLocked: formData.isBarcodeLocked,
+      generatedAt: editingProduct?.generatedAt || (trimmedBarcode ? new Date().toISOString() : undefined),
+      generatedBy: editingProduct?.generatedBy || (trimmedBarcode ? 'System Admin' : undefined),
+      barcodeVersion: (editingProduct?.barcodeVersion ?? 1) + (isBarcodeChanged ? 1 : 0),
       ...(editingProduct 
         ? (editingProduct.initialStock !== undefined ? { initialStock: editingProduct.initialStock } : {}) 
         : { initialStock: parseInt(formData.currentStock) || 0 }
@@ -296,6 +821,10 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
     };
 
     try {
+      const openingStock = parseInt(formData.currentStock) || 0;
+      const purchasePrice = permissions?.viewProductCost !== false ? parseFloat(formData.purchasePrice) : (parseFloat(formData.purchasePrice) || 0);
+      const openingValue = !editingProduct ? (openingStock * purchasePrice) : 0;
+
       if (!auth.currentUser) {
         const saved = localStorage.getItem('inventory_products');
         let currentList: Product[] = saved ? JSON.parse(saved) : INITIAL_PRODUCTS;
@@ -322,6 +851,74 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
         localStorage.setItem('inventory_products', JSON.stringify(currentList));
         setProducts(currentList);
 
+        // Generate Opening Inventory Journal Entry for local offline mode
+        if (!editingProduct && openingValue > 0) {
+          const savedLedgers = localStorage.getItem('inventory_ledger_entries');
+          const localLedgers: LedgerEntry[] = savedLedgers ? JSON.parse(savedLedgers) : [];
+
+          const existingEntry = localLedgers.find(e => e.createdFrom === productId && e.sourceModule === 'OPENING_BALANCE');
+          if (!existingEntry) {
+            const entryId = `le-opening-${productId}`;
+            const postingDate = new Date().toISOString();
+            const transDateYear = new Date().getFullYear();
+            const periodMonth = String(new Date().getMonth() + 1).padStart(2, '0');
+            const accountingPeriod = `${transDateYear}-${periodMonth}`;
+            const postingNumber = `JV-${transDateYear}-${String(localLedgers.length + 1).padStart(6, '0')}`;
+
+            const activeCoa = coa.length > 0 ? coa : INITIAL_CHART_OF_ACCOUNTS;
+            const inventoryAcc = resolveSystemAccount('INVENTORY', activeCoa);
+            const capitalAcc = resolveSystemAccount('CAPITAL', activeCoa);
+
+            const lines: LedgerEntryLine[] = [
+              {
+                accountId: inventoryAcc.id,
+                accountCode: inventoryAcc.code,
+                accountName: inventoryAcc.name,
+                debit: openingValue,
+                credit: 0,
+                baseCurrencyDebit: openingValue,
+                baseCurrencyCredit: 0
+              },
+              {
+                accountId: capitalAcc.id,
+                accountCode: capitalAcc.code,
+                accountName: capitalAcc.name,
+                debit: 0,
+                credit: openingValue,
+                baseCurrencyDebit: 0,
+                baseCurrencyCredit: openingValue
+              }
+            ];
+
+            validateJournalBalance(lines);
+
+            const openingLedgerEntry: LedgerEntry = {
+              id: entryId,
+              postingNumber,
+              companyId: 'comp-default',
+              branchId: 'branch-main',
+              fiscalYear: transDateYear,
+              accountingPeriod,
+              sourceModule: 'OPENING_BALANCE',
+              postingStatus: 'POSTED',
+              currency: 'USD',
+              exchangeRate: 1,
+              baseCurrencyCode: 'USD',
+              version: 1,
+              narration: `Opening Inventory Valuation for product "${finalizedData.name}" (${finalizedData.sku}) - Qty: ${finalizedData.currentStock} @ $${finalizedData.purchasePrice}`,
+              createdFrom: productId,
+              approvalStatus: 'APPROVED',
+              postingDate,
+              createdAt: postingDate,
+              createdBy: 'Offline User',
+              lines
+            };
+
+            localLedgers.push(openingLedgerEntry);
+            localStorage.setItem('inventory_ledger_entries', JSON.stringify(localLedgers));
+          }
+        }
+
         setFeedback({
           message: editingProduct 
             ? `Successfully synchronized product alterations for "${finalizedData.name}" (Local Only)` 
@@ -333,7 +930,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
         return;
       }
 
-      // 1. Live Firestore SKU check (Backend validation bypass protection)
+      // 1. Live Firestore SKU check
       const productsRef = collection(db, 'products');
       const q = query(productsRef, where('sku', '==', finalizedData.sku));
       const querySnapshot = await getDocs(q);
@@ -349,7 +946,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
         return;
       }
 
-      // 2. Prevent duplicate product names with same SKU (strictly enforced)
+      // 2. Prevent duplicate product names with same SKU
       const isNameWithSameSkuDuplicate = querySnapshot.docs.some(docSnap => {
         const prod = docSnap.data() as Product;
         const resolvedId = prod?.id || docSnap.id;
@@ -362,7 +959,89 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
         return;
       }
 
-      await setDoc(doc(db, 'products', productId), finalizedData);
+      await runTransaction(db, async (transaction) => {
+        const isNewProduct = !editingProduct;
+        const shouldCreateOpeningJournal = isNewProduct && openingValue > 0;
+
+        let postingNumber = '';
+        let nextVal = 0;
+        const transDateYear = new Date().getFullYear();
+
+        if (shouldCreateOpeningJournal) {
+          const seqAlloc = await getNextPostingNumber(transaction, 'JV', transDateYear);
+          postingNumber = seqAlloc.postingNumber;
+          nextVal = seqAlloc.nextVal;
+        }
+
+        // Save product document
+        const prodRef = doc(db, 'products', productId);
+        transaction.set(prodRef, finalizedData);
+
+        if (shouldCreateOpeningJournal) {
+          const activeCoa = coa.length > 0 ? coa : INITIAL_CHART_OF_ACCOUNTS;
+          const inventoryAcc = resolveSystemAccount('INVENTORY', activeCoa);
+          const capitalAcc = resolveSystemAccount('CAPITAL', activeCoa);
+
+          const lines: LedgerEntryLine[] = [
+            {
+              accountId: inventoryAcc.id,
+              accountCode: inventoryAcc.code,
+              accountName: inventoryAcc.name,
+              debit: openingValue,
+              credit: 0,
+              baseCurrencyDebit: openingValue,
+              baseCurrencyCredit: 0
+            },
+            {
+              accountId: capitalAcc.id,
+              accountCode: capitalAcc.code,
+              accountName: capitalAcc.name,
+              debit: 0,
+              credit: openingValue,
+              baseCurrencyDebit: 0,
+              baseCurrencyCredit: openingValue
+            }
+          ];
+
+          validateJournalBalance(lines);
+
+          const periodMonth = String(new Date().getMonth() + 1).padStart(2, '0');
+          const accountingPeriod = `${transDateYear}-${periodMonth}`;
+          const entryId = `le-opening-${productId}`;
+          const postingDate = new Date().toISOString();
+
+          const ledgerEntry: LedgerEntry = {
+            id: entryId,
+            postingNumber,
+            companyId: 'comp-default',
+            branchId: 'branch-main',
+            fiscalYear: transDateYear,
+            accountingPeriod,
+            sourceModule: 'OPENING_BALANCE',
+            postingStatus: 'POSTED',
+            currency: 'USD',
+            exchangeRate: 1,
+            baseCurrencyCode: 'USD',
+            version: 1,
+            narration: `Opening Inventory Valuation for product "${finalizedData.name}" (${finalizedData.sku}) - Qty: ${finalizedData.currentStock} @ $${finalizedData.purchasePrice}`,
+            createdFrom: productId,
+            approvalStatus: 'APPROVED',
+            postingDate,
+            createdAt: postingDate,
+            createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+            lines
+          };
+
+          const ledgerRef = doc(db, 'ledgerEntries', entryId);
+          transaction.set(ledgerRef, ledgerEntry);
+
+          commitNextPostingNumber(transaction, 'JV', nextVal);
+
+          const currentCoaIds = activeCoa.map(c => c.id);
+          await ensureSystemAccountsExist(transaction, currentCoaIds);
+        }
+      });
+
       if (editingProduct) {
         await logSystemActivity(
           "Product edited",
@@ -382,6 +1061,16 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
       });
       setIsFormOpen(false);
     } catch (err: any) {
+      if (err?.message === 'SKU_DUPLICATE') {
+        setErrors(prev => ({ ...prev, sku: 'SKU already exists. SKU must be unique.' }));
+        setIsSaving(false);
+        return;
+      }
+      if (err?.message === 'NAME_DUPLICATE') {
+        setErrors(prev => ({ ...prev, name: 'A product with this name and SKU already exists.' }));
+        setIsSaving(false);
+        return;
+      }
       console.error("Save product error:", err);
       try {
         handleFirestoreError(err, OperationType.WRITE, `products/${productId}`);
@@ -483,7 +1172,8 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
     const matchesSearch = 
       prod.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       prod.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      prod.category.toLowerCase().includes(searchQuery.toLowerCase());
+      prod.category.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (prod.barcode && prod.barcode.toLowerCase().includes(searchQuery.toLowerCase()));
     
     const matchesCategory = selectedCategory === 'All' || prod.category === selectedCategory;
 
@@ -532,75 +1222,73 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
       </AnimatePresence>
 
       {/* THREE BENTO METRIC CARDS */}
-      <div className={`grid grid-cols-1 gap-6 ${permissions?.viewProductCost !== false ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
+      <div className={`grid grid-cols-1 gap-4 sm:gap-6 ${permissions?.viewProductCost !== false ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
         {/* Total Registered Products */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between animate-fade-in">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Cataloged Items</span>
-              <span className="p-1 px-2.5 rounded-full text-[10px] font-extrabold bg-indigo-50 border border-indigo-100 text-indigo-600">
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0 animate-fade-in">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Cataloged Items</span>
+              <span className="p-1 px-2.5 rounded-full text-[10px] font-extrabold bg-indigo-50 border border-indigo-100 text-indigo-600 shrink-0">
                 Core Index
               </span>
             </div>
             {loading ? (
-              <div className="h-9 w-12 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
+              <div className="h-8 w-12 bg-slate-100 rounded-lg animate-pulse"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">{totalsCount}</p>
+              <ResponsiveKPIValue value={totalsCount} className="text-slate-900" />
             )}
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center gap-1">
-            <Archive className="h-3 w-3 text-indigo-505" /> Unique product configurations
+          <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center gap-1 truncate">
+            <Archive className="h-3 w-3 text-indigo-500 shrink-0" /> Unique product configurations
           </div>
         </div>
 
         {/* Low Stock Warning Alert State */}
-        <div className={`rounded-[2rem] p-6 sm:p-8 border transition flex flex-col justify-between animate-fade-in ${
+        <div className={`rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border transition flex flex-col justify-between w-full min-w-0 animate-fade-in ${
           criticalAlertsCount > 0 
             ? 'bg-amber-50 border-amber-200 text-amber-900' 
             : 'bg-emerald-50 border-emerald-100 text-emerald-950'
         }`}>
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold uppercase tracking-widest leading-none">Low-Stock Warnings</span>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Low-Stock Warnings</span>
               {criticalAlertsCount > 0 ? (
-                <span className="flex h-2 w-2 rounded-full bg-amber-500 animate-ping"></span>
+                <span className="flex h-2 w-2 rounded-full bg-amber-500 animate-ping shrink-0"></span>
               ) : (
-                <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0"></span>
               )}
             </div>
             {loading ? (
-              <div className="h-9 w-12 bg-amber-200/50 rounded-lg animate-pulse mt-2"></div>
+              <div className="h-8 w-12 bg-amber-200/50 rounded-lg animate-pulse"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight mt-2">{criticalAlertsCount}</p>
+              <ResponsiveKPIValue value={criticalAlertsCount} className={criticalAlertsCount > 0 ? 'text-amber-900' : 'text-emerald-950'} />
             )}
           </div>
-          <div className="mt-4 pt-3 border-t border-dashed border-current/20 text-[11px] opacity-80 flex items-center gap-1.5">
+          <div className="mt-4 pt-3 border-t border-dashed border-current/20 text-[11px] opacity-80 flex items-center gap-1.5 truncate">
             <Bell className="h-3.5 w-3.5 shrink-0" />
             {criticalAlertsCount > 0 
-              ? `${criticalAlertsCount} products require instant restock orders` 
+              ? `${criticalAlertsCount} products require restock` 
               : 'All registered stock levels safe'}
           </div>
         </div>
 
         {/* Asset Capital Valuation */}
         {permissions?.viewProductCost !== false && (
-          <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between animate-fade-in">
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Net Asset Capital value</span>
-                <DollarSign className="h-4 w-4 text-emerald-600" />
+          <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0 animate-fade-in">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Net Asset Capital value</span>
+                <DollarSign className="h-4 w-4 text-emerald-600 shrink-0" />
               </div>
               {loading ? (
-                <div className="h-9 w-28 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
+                <div className="h-8 w-28 bg-slate-100 rounded-lg animate-pulse"></div>
               ) : (
-                <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-                  ${totalValuationPurchase.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </p>
+                <ResponsiveKPIValue value={formatCurrency(totalValuationPurchase)} className="text-slate-900" />
               )}
             </div>
-            <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex justify-between items-center">
-              <span>Potential retail: ${potentialRevenueValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
-              <span className="text-emerald-600 font-bold">Profit Margin: +{totalValuationPurchase > 0 ? Math.round((potentialProfitValue / totalValuationPurchase) * 100) : 0}%</span>
+            <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex justify-between items-center gap-2">
+              <span className="truncate">Potential: {formatCurrency(potentialRevenueValue)}</span>
+              <span className="text-emerald-600 font-bold shrink-0">+{totalValuationPurchase > 0 ? Math.round((potentialProfitValue / totalValuationPurchase) * 100) : 0}%</span>
             </div>
           </div>
         )}
@@ -776,6 +1464,8 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
                         <tr className="bg-slate-50 text-[10px] font-black uppercase tracking-wider text-slate-500">
                           <th className="py-4 px-6">Product Item</th>
                           <th className="py-4 px-5">SKU / Code</th>
+                          <th className="py-4 px-5">Barcode</th>
+                          <th className="py-4 px-5 text-center">Base Unit</th>
                           {permissions?.viewProductCost !== false && <th className="py-4 px-5 text-right font-mono">Purchase Cost</th>}
                           <th className="py-4 px-5 text-right font-mono">Retail Price</th>
                           <th className="py-4 px-5 text-center">Warehouse Stock</th>
@@ -818,21 +1508,62 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
                                   {product.sku}
                                 </span>
                               </td>
+                              <td className="py-4 px-5 whitespace-nowrap">
+                                {product.barcode ? (
+                                  <div className="flex flex-col gap-0.5">
+                                    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold font-mono bg-slate-100 text-slate-800 border border-slate-200 px-2 py-0.5 rounded-md">
+                                      <Barcode className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                                      {product.barcode}
+                                    </span>
+                                    <span className="text-[9px] font-semibold text-slate-400 pl-0.5">
+                                      {product.barcodeType || 'CODE128'} • {product.barcodeStatus || 'assigned'}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-400 italic text-[11px] font-medium">No Barcode</span>
+                                )}
+                              </td>
+                              <td className="py-4 px-5 text-center">
+                                <div className="flex flex-col items-center gap-1">
+                                  <UnitBadge unitCode={product.unitCode || product.unitName || 'No Unit'} size="md" />
+                                  
+                                  {/* Alternate Unit Conversions */}
+                                  {(() => {
+                                    const pConvs = allConversions.filter(
+                                      (c) => c.productId === product.id && c.status === 'active'
+                                    );
+                                    if (pConvs.length === 0) return null;
+                                    return (
+                                      <div className="flex flex-wrap justify-center gap-1 mt-0.5">
+                                        {pConvs.map((conv) => (
+                                          <span
+                                            key={conv.id}
+                                            className="text-[10px] font-mono font-extrabold bg-indigo-50 text-indigo-700 border border-indigo-200/80 px-1.5 py-0.2 rounded"
+                                            title={`1 ${conv.alternateUnitCode} = ${conv.conversionFactor} ${conv.baseUnitCode}`}
+                                          >
+                                            {formatConversionText(conv)}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    );
+                                  })()}
+                                </div>
+                              </td>
                               {permissions?.viewProductCost !== false && (
                                 <td className="py-4 px-5 text-right font-mono font-bold text-slate-700 whitespace-nowrap">
-                                  ${product.purchasePrice.toFixed(2)}
+                                  {formatCurrency(product.purchasePrice)}
                                 </td>
                               )}
                               <td className="py-4 px-5 text-right font-mono font-bold text-slate-900 whitespace-nowrap">
-                                ${product.sellingPrice.toFixed(2)}
+                                {formatCurrency(product.sellingPrice)}
                               </td>
                               <td className="py-4 px-5 text-center whitespace-nowrap">
                                 <span className={`font-mono font-black text-sm ${isLowStock ? 'text-rose-600' : 'text-slate-900'}`}>
-                                  {product.currentStock} Units
+                                  {product.currentStock} {product.unitCode || 'No Unit'}
                                 </span>
                               </td>
                               <td className="py-4 px-5 text-center font-mono text-slate-500 whitespace-nowrap">
-                                {product.minimumStockAlert} Units
+                                {product.minimumStockAlert} {product.unitCode || 'No Unit'}
                               </td>
                               <td className="py-4 px-5 text-center whitespace-nowrap">
                                 {isInactive ? (
@@ -850,10 +1581,18 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
                                   </span>
                                 )}
                               </td>
-                              {(permissions.editProduct || permissions.deleteProduct) && (
-                                <td className="py-4 px-6 text-center whitespace-nowrap">
-                                  <div className="flex items-center justify-center gap-1.5">
-                                    {permissions.editProduct && (
+                              <td className="py-4 px-6 text-center whitespace-nowrap">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedProductDetails(product)}
+                                    className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border border-transparent hover:border-indigo-100 transition cursor-pointer"
+                                    title="View Product Details & Unit Hierarchy"
+                                  >
+                                    <Eye className="h-4 w-4" />
+                                  </button>
+
+                                  {permissions.editProduct && (
                                       <button
                                         type="button"
                                         onClick={() => openForm(product)}
@@ -875,8 +1614,7 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
                                     )}
                                   </div>
                                 </td>
-                              )}
-                            </tr>
+                              </tr>
                           );
                         })}
                       </tbody>
@@ -1008,6 +1746,69 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
                   )}
                 </div>
 
+                {/* Product Name (Arabic) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label htmlFor="product-form-name-arabic-field" className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                      Product Name (Arabic)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setTranslationNotice(null);
+                        const sourceName = (formData.name || '').trim();
+                        if (!sourceName) {
+                          setTranslationNotice({ type: 'warning', message: 'Please enter a Product Name first.' });
+                          return;
+                        }
+                        const res = await TranslationService.translateToArabic(sourceName);
+                        if (res.success && res.translatedText) {
+                          setFormData(prev => ({ ...prev, nameArabic: res.translatedText }));
+                          setTranslationNotice({ type: 'success', message: `Arabic name generated: ${res.translatedText}` });
+                        } else {
+                          setTranslationNotice({ type: 'warning', message: res.message || 'Translation not found in offline dictionary.' });
+                        }
+                      }}
+                      className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-0.5 rounded-md transition border border-indigo-100/80 cursor-pointer"
+                    >
+                      Generate Arabic
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    id="product-form-name-arabic-field"
+                    dir="rtl"
+                    disabled={isSaving}
+                    value={formData.nameArabic}
+                    onChange={(e) => setFormData({ ...formData, nameArabic: e.target.value })}
+                    placeholder="اسم المنتج (اختياري)"
+                    className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 focus:border-indigo-650 h-[42px] text-right font-sans"
+                  />
+                  {translationNotice && (
+                    <div className={`mt-1.5 text-[11px] font-semibold px-3 py-2 rounded-xl flex items-center justify-between border shadow-3xs transition-all ${
+                      translationNotice.type === 'success'
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200/80'
+                        : 'bg-amber-50 text-amber-800 border-amber-200/80'
+                    }`}>
+                      <div className="flex items-center gap-1.5">
+                        {translationNotice.type === 'success' ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                        ) : (
+                          <AlertCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                        )}
+                        <span>{translationNotice.message}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setTranslationNotice(null)}
+                        className="text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   {/* SKU */}
                   <div className="relative w-full">
@@ -1062,6 +1863,50 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
                       </div>
                     )}
                   </div>
+                </div>
+
+                {/* Base Unit Select */}
+                <div className="relative w-full">
+                  <label htmlFor="product-form-unit-select" className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+                    Base Unit <span className="text-rose-500 font-extrabold">*</span>
+                  </label>
+                  <div className="relative">
+                    <select
+                      id="product-form-unit-select"
+                      disabled={isSaving || hasMovement}
+                      value={formData.unitId}
+                      onChange={(e) => setFormData({ ...formData, unitId: e.target.value })}
+                      className={`w-full rounded-xl border px-3.5 py-3 text-xs font-semibold focus:outline-none transition-all appearance-none bg-white focus:ring-1 focus:ring-indigo-600 disabled:opacity-75 disabled:bg-slate-50 ${
+                        errors.unitId
+                          ? 'border-rose-300 text-rose-800 bg-rose-50/10'
+                          : 'border-slate-200 focus:border-indigo-600 text-slate-800'
+                      }`}
+                    >
+                      <option value="">Select Base Unit...</option>
+                      {activeUnits.map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.unitName} ({u.unitCode})
+                        </option>
+                      ))}
+                    </select>
+                    {hasMovement && (
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-amber-500">
+                        <Lock className="h-4 w-4" />
+                      </div>
+                    )}
+                  </div>
+                  {hasMovement && (
+                    <p className="mt-1.5 text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200/80 px-3 py-1.5 rounded-xl flex items-center gap-1.5">
+                      <Lock className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                      <span>This product already contains inventory transactions. Base Unit cannot be changed.</span>
+                    </p>
+                  )}
+                  {errors.unitId && !hasMovement && (
+                    <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
+                      <AlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                      <span>{errors.unitId}</span>
+                    </div>
+                  )}
                 </div>
 
                 <div className={`grid grid-cols-1 ${permissions?.viewProductCost !== false ? 'sm:grid-cols-2' : ''} gap-5`}>
@@ -1288,6 +2133,979 @@ export default function ProductManagement({ userRole = 'admin' }: { userRole?: U
                     )}
                   </button>
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* PRODUCT DETAILS MODAL (SECTION 6: SPRINT 4) */}
+      <AnimatePresence>
+        {selectedProductDetails && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-[2rem] border border-slate-200 shadow-xl max-w-xl w-full overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              {/* Header */}
+              <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
+                    <Package className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">
+                      {selectedProductDetails.name}
+                    </h3>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="text-[10px] font-mono font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-100">
+                        {selectedProductDetails.sku}
+                      </span>
+                      <span className="text-[10px] font-semibold text-slate-400">
+                        Category: {selectedProductDetails.category}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedProductDetails(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="p-6 overflow-y-auto space-y-6 text-xs">
+                {/* ENTERPRISE BARCODE METADATA & INTEGRATION LAYER (SPRINT 6 & 7) */}
+                <div className="bg-indigo-50/50 rounded-2xl border border-indigo-150 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Barcode className="w-4 h-4 text-indigo-600" />
+                      <h4 className="font-bold text-slate-900 uppercase tracking-wider text-[11px]">
+                        Enterprise Barcode Integration
+                      </h4>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] font-extrabold uppercase bg-emerald-100 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full">
+                        Local First Active
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Section 7 Read-Only Provider Indicators */}
+                  <div className="bg-slate-900 text-white p-3.5 rounded-xl border border-slate-800 grid grid-cols-3 gap-2 text-center">
+                    <div className="p-1.5 bg-slate-800/80 rounded-lg border border-slate-700/60">
+                      <span className="text-[9px] font-bold text-slate-400 uppercase block">Integration Provider</span>
+                      <span className="text-xs font-black text-indigo-400 mt-0.5 block uppercase">LOCAL</span>
+                    </div>
+
+                    <div className="p-1.5 bg-slate-800/80 rounded-lg border border-slate-700/60">
+                      <span className="text-[9px] font-bold text-slate-400 uppercase block">Integration Status</span>
+                      <span className="text-xs font-black text-emerald-400 mt-0.5 block uppercase">Ready</span>
+                    </div>
+
+                    <div className="p-1.5 bg-slate-800/80 rounded-lg border border-slate-700/60">
+                      <span className="text-[9px] font-bold text-slate-400 uppercase block">Future Cloud</span>
+                      <span className="text-xs font-black text-amber-300 mt-0.5 block uppercase">Available</span>
+                    </div>
+                  </div>
+
+                  {selectedProductDetails.barcode ? (
+                    <div className="grid grid-cols-2 gap-3 bg-white p-3.5 rounded-xl border border-slate-200">
+                      <div>
+                        <span className="text-[10px] font-bold text-slate-400 uppercase block">Barcode Value</span>
+                        <span className="text-xs font-mono font-black text-slate-900 mt-0.5 block">
+                          {selectedProductDetails.barcode}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-bold text-slate-400 uppercase block">Barcode Standard</span>
+                        <span className="text-xs font-mono font-bold text-indigo-700 mt-0.5 block uppercase">
+                          {selectedProductDetails.barcodeType || 'CODE128'}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-bold text-slate-400 uppercase block">Status & Source</span>
+                        <span className="text-[11px] font-semibold text-slate-700 mt-0.5 block capitalize">
+                          {selectedProductDetails.barcodeStatus || 'assigned'} ({selectedProductDetails.barcodeSource || 'manual'})
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-bold text-slate-400 uppercase block">Lock & Version</span>
+                        <span className="text-[11px] font-semibold text-slate-700 mt-0.5 block">
+                          {selectedProductDetails.isBarcodeLocked ? '🔒 Locked' : '🔓 Unlocked'} • v{selectedProductDetails.barcodeVersion || 1}
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3.5 bg-white rounded-xl border border-dashed border-slate-200 text-center text-slate-400 italic">
+                      No Barcode Assigned to this Product.
+                    </div>
+                  )}
+
+                  {/* SPRINT 11 EXECUTION ENGINE: GENERATE BARCODE ACTION & RESULT */}
+                  <div className="bg-white p-4 rounded-xl border border-slate-200 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="text-[10px] font-black uppercase text-indigo-600 tracking-wider block">
+                          Sprint 13 Desktop Connector Host
+                        </span>
+                        <span className="text-xs font-bold text-slate-900 block mt-0.5">
+                          Execute Barcode Generation
+                        </span>
+                      </div>
+
+                      {DesktopDetector.isWeb() ? (
+                        <span className="text-[9px] font-black uppercase bg-amber-100 text-amber-800 border border-amber-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <Globe className="w-3 h-3 text-amber-600" />
+                          Web Mode Active
+                        </span>
+                      ) : (
+                        <span className="text-[9px] font-black uppercase bg-emerald-100 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <Zap className="w-3 h-3 text-emerald-600" />
+                          Desktop Mode
+                        </span>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleGenerateBarcodeForProduct(selectedProductDetails)}
+                      disabled={isExecutingBarcode}
+                      className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-extrabold rounded-xl shadow-xs transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    >
+                      <Zap className={`w-4 h-4 ${isExecutingBarcode ? 'animate-bounce' : ''}`} />
+                      <span>{isExecutingBarcode ? 'Executing Barcode Generation...' : 'Generate Barcode'}</span>
+                    </button>
+
+                    {barcodeExecResult && (
+                      <div className="bg-slate-950 text-slate-100 p-3.5 rounded-xl border border-slate-800 space-y-3 mt-2">
+                        <div className="flex items-center justify-between text-[11px] border-b border-slate-800 pb-2">
+                          <span className="font-bold text-indigo-300">Execution Status:</span>
+                          <span className={`font-mono font-extrabold uppercase px-2 py-0.5 rounded text-[10px] ${
+                            barcodeExecResult.status === 'SUCCESS' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                            barcodeExecResult.status === 'OFFLINE' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
+                            barcodeExecResult.status === 'TIMEOUT' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
+                            barcodeExecResult.status === 'PROTOCOL_MISMATCH' ? 'bg-purple-950 text-purple-400 border border-purple-800' :
+                            'bg-rose-950 text-rose-400 border border-rose-800'
+                          }`}>
+                            {barcodeExecResult.status}
+                          </span>
+                        </div>
+
+                        {/* 1. SVG PREVIEW */}
+                        {barcodeExecResult.imageDataUrl && (
+                          <div className="p-2.5 bg-white rounded-lg flex flex-col items-center justify-center border border-slate-200">
+                            <img src={barcodeExecResult.imageDataUrl} alt="Barcode Preview" className="max-h-20" />
+                            <span className="text-[10px] font-mono font-bold text-slate-600 mt-1">
+                              {barcodeExecResult.barcodeType}: {barcodeExecResult.barcodeValue}
+                            </span>
+                          </div>
+                        )}
+
+                        {/* 2 - 10: METADATA GRID */}
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[10px] font-mono border-t border-b border-slate-800 py-2">
+                          <div><span className="text-slate-400">Barcode Type:</span> <strong className="text-white">{barcodeExecResult.barcodeType || selectedProductDetails.barcodeType || 'CODE128'}</strong></div>
+                          <div><span className="text-slate-400">Barcode Value:</span> <strong className="text-white">{barcodeExecResult.barcodeValue}</strong></div>
+                          <div><span className="text-slate-400">Execution Time:</span> <strong className="text-sky-300">{barcodeExecResult.executionTimeMs} ms</strong></div>
+                          <div><span className="text-slate-400">Provider:</span> <strong className="text-white">{barcodeExecResult.provider}</strong></div>
+                          <div><span className="text-slate-400">Connector Ver:</span> <strong className="text-indigo-300">{barcodeExecResult.connectorVersion || '1.3.0'}</strong></div>
+                          <div><span className="text-slate-400">Protocol Ver:</span> <strong className="text-indigo-300">{barcodeExecResult.protocolVersion || 'v1.0'}</strong></div>
+                          <div><span className="text-slate-400">Conn Status:</span> <strong className={barcodeExecResult.connectionStatus === 'CONNECTED' ? 'text-emerald-400' : 'text-rose-400'}>{barcodeExecResult.connectionStatus || (barcodeExecResult.success ? 'CONNECTED' : 'OFFLINE')}</strong></div>
+                          <div><span className="text-slate-400">Transport:</span> <strong className="text-emerald-400">{barcodeExecResult.transport || 'LOCAL_HTTP'}</strong></div>
+                          <div className="col-span-2 truncate"><span className="text-slate-400">Request ID:</span> <strong className="text-slate-200">{barcodeExecResult.requestId || 'REQ-DEV-001'}</strong></div>
+                          <div className="col-span-2 truncate"><span className="text-slate-400">Correlation ID:</span> <strong className="text-slate-200">{barcodeExecResult.correlationId || 'CORR-DEV-001'}</strong></div>
+                        </div>
+
+                        {/* ERROR & RETRY CONTROL */}
+                        {!barcodeExecResult.success && (
+                          <div className="space-y-2 pt-1">
+                            <div className="text-[10px] text-rose-300 bg-rose-950/70 p-2.5 rounded-lg border border-rose-800 space-y-1">
+                              <div className="font-bold flex items-center gap-1.5 text-rose-200">
+                                <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                                {barcodeExecResult.status === 'OFFLINE' ? 'Connector Offline' :
+                                 barcodeExecResult.status === 'TIMEOUT' ? 'HTTP Request Timeout' :
+                                 barcodeExecResult.status === 'PROTOCOL_MISMATCH' ? 'Protocol Mismatch' :
+                                 'Execution Failed'}
+                              </div>
+                              <p className="text-rose-300 text-[10px] leading-relaxed">
+                                {barcodeExecResult.errorMessage}
+                              </p>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => handleGenerateBarcodeForProduct(selectedProductDetails)}
+                              disabled={isExecutingBarcode}
+                              className="w-full py-1.5 px-3 bg-rose-900/50 hover:bg-rose-800/60 text-rose-200 border border-rose-700/50 text-[10px] font-bold rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                            >
+                              <RefreshCw className={`w-3 h-3 ${isExecutingBarcode ? 'animate-spin' : ''}`} />
+                              <span>Retry Barcode Generation</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* SPRINT 10 EXECUTION ENGINE: PRINT BARCODE ACTION & RESULT */}
+                  <div className="bg-white p-4 rounded-xl border border-slate-200 space-y-3 mt-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="text-[10px] font-black uppercase text-emerald-600 tracking-wider block">
+                          Sprint 10 Real Thermal Print
+                        </span>
+                        <span className="text-xs font-bold text-slate-900 block mt-0.5">
+                          Execute Thermal Print
+                        </span>
+                      </div>
+
+                      {DesktopDetector.isWeb() ? (
+                        <span className="text-[9px] font-black uppercase bg-amber-100 text-amber-800 border border-amber-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <Globe className="w-3 h-3 text-amber-600" />
+                          Web Mode Active
+                        </span>
+                      ) : (
+                        <span className="text-[9px] font-black uppercase bg-emerald-100 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <Zap className="w-3 h-3 text-emerald-600" />
+                          Desktop Mode
+                        </span>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handlePrintBarcodeForProduct(selectedProductDetails)}
+                      disabled={isExecutingPrint}
+                      className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold rounded-xl shadow-xs transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    >
+                      <Printer className={`w-4 h-4 ${isExecutingPrint ? 'animate-bounce' : ''}`} />
+                      <span>{isExecutingPrint ? 'Executing Thermal Print...' : 'Print Barcode'}</span>
+                    </button>
+
+                    {printExecResult && (
+                      <div className="bg-slate-950 text-slate-100 p-3.5 rounded-xl border border-slate-800 space-y-3 mt-2">
+                        <div className="flex items-center justify-between text-[11px] border-b border-slate-800 pb-2">
+                          <span className="font-bold text-emerald-300 flex items-center gap-1.5">
+                            {printExecResult.success ? (
+                              <>
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                <span>Print Successful</span>
+                              </>
+                            ) : (
+                              <>
+                                <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                                <span>Print Execution Failed</span>
+                              </>
+                            )}
+                          </span>
+                          <span className={`font-mono font-extrabold uppercase px-2 py-0.5 rounded text-[10px] ${
+                            printExecResult.success ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                            printExecResult.status === 'OFFLINE' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
+                            printExecResult.status === 'TIMEOUT' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
+                            'bg-rose-950 text-rose-400 border border-rose-800'
+                          }`}>
+                            {printExecResult.success ? '✓ PRINT COMPLETED' : printExecResult.status}
+                          </span>
+                        </div>
+
+                        {/* METADATA GRID */}
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[10px] font-mono border-t border-b border-slate-800 py-2">
+                          <div><span className="text-slate-400">Print Status:</span> <strong className={printExecResult.success ? 'text-emerald-400' : 'text-rose-400'}>{printExecResult.success ? '✓ PRINT COMPLETED' : 'PRINT FAILED'}</strong></div>
+                          <div><span className="text-slate-400">Printer Name:</span> <strong className="text-white truncate block">{printExecResult.printerName || 'MZ Thermal Printer ZD421'}</strong></div>
+                          <div><span className="text-slate-400">Job ID:</span> <strong className="text-emerald-300">{printExecResult.jobId || 'N/A'}</strong></div>
+                          <div><span className="text-slate-400">Spool Status:</span> <strong className="text-sky-300">{printExecResult.spoolStatus || 'spooled'}</strong></div>
+                          <div><span className="text-slate-400">Copies:</span> <strong className="text-white">{printExecResult.copies || 1}</strong></div>
+                          <div><span className="text-slate-400">Execution Time:</span> <strong className="text-sky-300">{printExecResult.executionTimeMs} ms</strong></div>
+                          <div><span className="text-slate-400">Provider:</span> <strong className="text-white">{printExecResult.provider}</strong></div>
+                          <div><span className="text-slate-400">Transport:</span> <strong className="text-emerald-400">{printExecResult.transport || 'LOCAL_HTTP'}</strong></div>
+                          <div><span className="text-slate-400">Connector Ver:</span> <strong className="text-indigo-300">{printExecResult.connectorVersion || '1.3.0'}</strong></div>
+                          <div><span className="text-slate-400">Protocol Ver:</span> <strong className="text-indigo-300">{printExecResult.protocolVersion || 'v1.0'}</strong></div>
+                          <div className="col-span-2 truncate"><span className="text-slate-400">Request ID:</span> <strong className="text-slate-200">{printExecResult.requestId || 'REQ-PRINT-001'}</strong></div>
+                          <div className="col-span-2 truncate"><span className="text-slate-400">Correlation ID:</span> <strong className="text-slate-200">{printExecResult.correlationId || 'CORR-PRINT-001'}</strong></div>
+                        </div>
+
+                        {/* ERROR & RETRY CONTROL */}
+                        {!printExecResult.success && (
+                          <div className="space-y-2 pt-1">
+                            <div className="text-[10px] text-rose-300 bg-rose-950/70 p-2.5 rounded-lg border border-rose-800 space-y-1">
+                              <div className="font-bold flex items-center gap-1.5 text-rose-200">
+                                <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                                {printExecResult.errorCode === 'PRINTER_OFFLINE' ? 'Printer Offline' :
+                                 printExecResult.errorCode === 'PRINTER_NOT_FOUND' ? 'Printer Not Found' :
+                                 printExecResult.errorCode === 'PAPER_OUT' ? 'Paper Out' :
+                                 printExecResult.errorCode === 'SPOOLER_ERROR' ? 'Spooler Error' :
+                                 printExecResult.status === 'OFFLINE' ? 'Connector Offline' :
+                                 printExecResult.status === 'TIMEOUT' ? 'HTTP Request Timeout' :
+                                 'Print Execution Failed'}
+                              </div>
+                              <p className="text-rose-300 text-[10px] leading-relaxed">
+                                {printExecResult.errorMessage}
+                              </p>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => handlePrintBarcodeForProduct(selectedProductDetails)}
+                              disabled={isExecutingPrint}
+                              className="w-full py-1.5 px-3 bg-rose-900/50 hover:bg-rose-800/60 text-rose-200 border border-rose-700/50 text-[10px] font-bold rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                            >
+                              <RefreshCw className={`w-3 h-3 ${isExecutingPrint ? 'animate-spin' : ''}`} />
+                              <span>Retry Thermal Print</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* SPRINT 10.9 MULTI LABEL PRINTING */}
+                  <div className="bg-white p-4 rounded-xl border border-slate-200 space-y-3 mt-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="text-[10px] font-black uppercase text-indigo-600 tracking-wider block">
+                          Enterprise Batch Dispatch
+                        </span>
+                        <span className="text-xs font-bold text-slate-900 block mt-0.5">
+                          Multi Label Printing
+                        </span>
+                      </div>
+                      <span className="text-[9px] font-black uppercase bg-indigo-100 text-indigo-800 border border-indigo-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                        <Printer className="w-3 h-3 text-indigo-600" />
+                        Batch Engine
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Quantity (Labels)
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={500}
+                          value={multiPrintQuantity}
+                          onChange={(e) => setMultiPrintQuantity(Math.max(1, parseInt(e.target.value) || 1))}
+                          disabled={isMultiPrinting}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Copies per Label
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={50}
+                          value={multiPrintCopies}
+                          onChange={(e) => setMultiPrintCopies(Math.max(1, parseInt(e.target.value) || 1))}
+                          disabled={isMultiPrinting}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="col-span-2">
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Label Template
+                        </label>
+                        <select
+                          value={multiPrintTemplate}
+                          onChange={(e) => setMultiPrintTemplate(e.target.value)}
+                          disabled={isMultiPrinting}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                        >
+                          <option value="STD_PRODUCT_38X25MM">Standard Product Label (38x25 mm)</option>
+                          <option value="COMPACT_PRICE_25X15MM">Compact Price Tag (25x15 mm)</option>
+                          <option value="SHIPPING_TAG_50X30MM">Shipping Tag (50x30 mm)</option>
+                          <option value="LARGE_PALLET_100X150MM">Large Pallet Label (100x150 mm)</option>
+                        </select>
+                      </div>
+
+                      <div className="col-span-2">
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Target Thermal Printer
+                        </label>
+                        <input
+                          type="text"
+                          value={multiPrintPrinter}
+                          onChange={(e) => setMultiPrintPrinter(e.target.value)}
+                          disabled={isMultiPrinting}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-mono text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                          placeholder="e.g. MZ Thermal Printer ZD421"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => handleBatchPrintBarcodeForProduct(selectedProductDetails)}
+                        disabled={isMultiPrinting}
+                        className="flex-1 py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-extrabold rounded-xl shadow-xs transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                      >
+                        <Printer className={`w-4 h-4 ${isMultiPrinting ? 'animate-bounce' : ''}`} />
+                        <span>{isMultiPrinting ? 'Printing Batch...' : `Print ${multiPrintQuantity} Labels`}</span>
+                      </button>
+
+                      {isMultiPrinting && (
+                        <button
+                          type="button"
+                          onClick={handleCancelMultiPrint}
+                          className="py-2.5 px-3 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-xl transition cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+
+                    {multiPrintProgress && (
+                      <div className="bg-slate-950 text-slate-100 p-3.5 rounded-xl border border-slate-800 space-y-3 mt-2">
+                        <div className="flex items-center justify-between text-[11px] border-b border-slate-800 pb-2">
+                          <span className="font-bold text-indigo-300 flex items-center gap-1.5">
+                            {isMultiPrinting ? (
+                              <RefreshCw className="w-3.5 h-3.5 text-indigo-400 animate-spin shrink-0" />
+                            ) : multiPrintProgress.failed === 0 && multiPrintProgress.skipped === 0 ? (
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                            ) : (
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                            )}
+                            <span>{multiPrintProgress.statusMessage}</span>
+                          </span>
+                          <span className={`font-mono font-extrabold uppercase px-2 py-0.5 rounded text-[10px] ${
+                            isMultiPrinting ? 'bg-indigo-950 text-indigo-400 border border-indigo-800' :
+                            multiPrintProgress.failed === 0 ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                            'bg-amber-950 text-amber-400 border border-amber-800'
+                          }`}>
+                            {isMultiPrinting ? `${multiPrintProgress.current} / ${multiPrintProgress.total}` : 'BATCH COMPLETE'}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[10px] font-mono border-b border-slate-800 pb-2">
+                          <div><span className="text-slate-400">Total Requested:</span> <strong className="text-white">{multiPrintProgress.total}</strong></div>
+                          <div><span className="text-slate-400">Completed:</span> <strong className="text-emerald-400">{multiPrintProgress.completed}</strong></div>
+                          <div><span className="text-slate-400">Failed:</span> <strong className={multiPrintProgress.failed > 0 ? 'text-rose-400' : 'text-slate-200'}>{multiPrintProgress.failed}</strong></div>
+                          <div><span className="text-slate-400">Skipped:</span> <strong className={multiPrintProgress.skipped > 0 ? 'text-amber-400' : 'text-slate-200'}>{multiPrintProgress.skipped}</strong></div>
+                          <div><span className="text-slate-400">Elapsed Time:</span> <strong className="text-sky-300">{((multiPrintProgress.endTime || Date.now()) - multiPrintProgress.startTime)} ms</strong></div>
+                          <div><span className="text-slate-400">Last Job ID:</span> <strong className="text-indigo-300">{multiPrintProgress.lastJobId || 'N/A'}</strong></div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* CARTON LABEL PRINTING CARD (Sprint 11.3) */}
+                <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Archive className="w-4 h-4 text-indigo-600" />
+                      <h4 className="font-bold text-slate-900 uppercase tracking-wider text-[11px]">
+                        📦 Carton Label Printing
+                      </h4>
+                    </div>
+                    <span className="text-[10px] font-extrabold uppercase bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-full">
+                      Sprint 11.3 Standard
+                    </span>
+                  </div>
+
+                  <div className="bg-white p-3.5 rounded-xl border border-slate-200 space-y-3">
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Carton Quantity
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={cartonQuantity}
+                          onChange={(e) => setCartonQuantity(Math.max(1, parseInt(e.target.value) || 1))}
+                          disabled={isPrintingCarton}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                          placeholder="e.g. 24"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Copies
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={50}
+                          value={cartonCopies}
+                          onChange={(e) => setCartonCopies(Math.max(1, parseInt(e.target.value) || 1))}
+                          disabled={isPrintingCarton}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Carton Number <span className="font-normal text-slate-400">(optional)</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={cartonNumber}
+                          onChange={(e) => setCartonNumber(e.target.value)}
+                          disabled={isPrintingCarton}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-mono text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                          placeholder="e.g. CTN-01 or 1"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Total Cartons <span className="font-normal text-slate-400">(optional)</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={totalCartons}
+                          onChange={(e) => setTotalCartons(e.target.value)}
+                          disabled={isPrintingCarton}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-mono text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                          placeholder="e.g. 10"
+                        />
+                      </div>
+
+                      <div className="col-span-2">
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Label Template
+                        </label>
+                        <select
+                          value={cartonTemplate}
+                          onChange={(e) => setCartonTemplate(e.target.value)}
+                          disabled={isPrintingCarton}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                        >
+                          <option value="STD_PRODUCT_38X25MM">Standard Product Label (38x25 mm)</option>
+                          <option value="SHIPPING_TAG_50X30MM">Shipping Tag (50x30 mm)</option>
+                          <option value="LARGE_PALLET_100X150MM">Large Pallet Label (100x150 mm)</option>
+                        </select>
+                      </div>
+
+                      <div className="col-span-2">
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Target Thermal Printer
+                        </label>
+                        <input
+                          type="text"
+                          value={cartonPrinter}
+                          onChange={(e) => setCartonPrinter(e.target.value)}
+                          disabled={isPrintingCarton}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-mono text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                          placeholder="e.g. MZ Thermal Printer ZD421"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => handlePrintCartonLabelForProduct(selectedProductDetails)}
+                        disabled={isPrintingCarton}
+                        className="flex-1 py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-extrabold rounded-xl shadow-xs transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                      >
+                        <Printer className={`w-4 h-4 ${isPrintingCarton ? 'animate-spin' : ''}`} />
+                        <span>{isPrintingCarton ? 'Printing Carton Label...' : 'Print Carton Label'}</span>
+                      </button>
+
+                      {isPrintingCarton && (
+                        <button
+                          type="button"
+                          onClick={() => setIsPrintingCarton(false)}
+                          className="py-2.5 px-3 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+
+                    {cartonPrintResult && (
+                      <div className="bg-slate-950 text-slate-100 p-3.5 rounded-xl border border-slate-800 space-y-2 mt-2">
+                        <div className="flex items-center justify-between text-[11px] border-b border-slate-800 pb-2">
+                          <span className="font-bold text-indigo-300 flex items-center gap-1.5">
+                            {cartonPrintResult.success ? (
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                            ) : (
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                            )}
+                            <span>{cartonPrintResult.success ? 'Carton Label Printed Successfully' : 'Carton Print Execution Failed'}</span>
+                          </span>
+                          <span className={`font-mono font-extrabold uppercase px-2 py-0.5 rounded text-[10px] ${
+                            cartonPrintResult.success ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-rose-950 text-rose-400 border border-rose-800'
+                          }`}>
+                            {cartonPrintResult.status}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] font-mono">
+                          <div><span className="text-slate-400">Carton Qty:</span> <strong className="text-white">{cartonQuantity} {selectedProductDetails.unitCode || 'PCS'}</strong></div>
+                          {cartonNumber && <div><span className="text-slate-400">Carton #:</span> <strong className="text-white">{cartonNumber}</strong></div>}
+                          {totalCartons && <div><span className="text-slate-400">Total Cartons:</span> <strong className="text-white">{totalCartons}</strong></div>}
+                          <div><span className="text-slate-400">Printer:</span> <strong className="text-indigo-300">{cartonPrintResult.printerName}</strong></div>
+                          <div><span className="text-slate-400">Job ID:</span> <strong className="text-emerald-400">{cartonPrintResult.jobId || 'N/A'}</strong></div>
+                          <div><span className="text-slate-400">Execution Time:</span> <strong className="text-sky-300">{cartonPrintResult.executionTimeMs} ms</strong></div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* UNIT CONVERSION LABEL PRINTING CARD (Sprint 11.4) */}
+                <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Scale className="w-4 h-4 text-emerald-600" />
+                      <h4 className="font-bold text-slate-900 uppercase tracking-wider text-[11px]">
+                        ⚖️ Unit Conversion Label Printing
+                      </h4>
+                    </div>
+                    <span className="text-[10px] font-extrabold uppercase bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full">
+                      Sprint 11.4 Standard
+                    </span>
+                  </div>
+
+                  <div className="bg-white p-3.5 rounded-xl border border-slate-200 space-y-3">
+                    {/* Read-Only Product & Base Unit Info Summary */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-2.5 bg-slate-50 rounded-lg border border-slate-200 text-[11px]">
+                      <div>
+                        <span className="text-slate-400 block font-medium">Base Product</span>
+                        <strong className="text-slate-800 font-mono">{selectedProductDetails.unitCode || selectedProductDetails.unitName || 'PCS'}</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block font-medium">Product Name</span>
+                        <strong className="text-slate-800 truncate block">{selectedProductDetails.name}</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block font-medium">SKU</span>
+                        <strong className="text-slate-800 font-mono">{selectedProductDetails.sku}</strong>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block font-medium">Barcode</span>
+                        <strong className="text-slate-800 font-mono">{selectedProductDetails.barcode || selectedProductDetails.sku}</strong>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Conversion Unit
+                        </label>
+                        <select
+                          value={unitConversionUnit}
+                          onChange={(e) => setUnitConversionUnit(e.target.value)}
+                          disabled={isPrintingUnitConversion}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                        >
+                          <option value="Piece">Piece (PCS)</option>
+                          <option value="Box">Box (BOX)</option>
+                          <option value="Pack">Pack (PACK)</option>
+                          <option value="KG">KG (Kilogram)</option>
+                          <option value="Gram">Gram (g)</option>
+                          <option value="Liter">Liter (L)</option>
+                          <option value="ML">ML (Milliliter)</option>
+                          <option value="Carton">Carton (CTN)</option>
+                          <option value="Bundle">Bundle (BDL)</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Conversion Quantity
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={unitConversionQty}
+                          onChange={(e) => setUnitConversionQty(Math.max(1, parseInt(e.target.value) || 1))}
+                          disabled={isPrintingUnitConversion}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                          placeholder="e.g. 10 or 25"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Copies
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={50}
+                          value={unitConversionCopies}
+                          onChange={(e) => setUnitConversionCopies(Math.max(1, parseInt(e.target.value) || 1))}
+                          disabled={isPrintingUnitConversion}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Label Template
+                        </label>
+                        <select
+                          value={unitConversionTemplate}
+                          onChange={(e) => setUnitConversionTemplate(e.target.value)}
+                          disabled={isPrintingUnitConversion}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                        >
+                          <option value="STD_PRODUCT_38X25MM">Standard Product Label (38x25 mm)</option>
+                          <option value="UNIT_CONVERSION_50X30MM">Unit Conversion Label (50x30 mm)</option>
+                          <option value="LARGE_SHELF_100X50MM">Large Shelf Label (100x50 mm)</option>
+                        </select>
+                      </div>
+
+                      <div className="col-span-2">
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          Target Thermal Printer
+                        </label>
+                        <input
+                          type="text"
+                          value={unitConversionPrinter}
+                          onChange={(e) => setUnitConversionPrinter(e.target.value)}
+                          disabled={isPrintingUnitConversion}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-mono text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                          placeholder="e.g. MZ Thermal Printer ZD421"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => handlePrintUnitConversionLabelForProduct(selectedProductDetails)}
+                        disabled={isPrintingUnitConversion}
+                        className="flex-1 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold rounded-xl shadow-xs transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                      >
+                        <Printer className={`w-4 h-4 ${isPrintingUnitConversion ? 'animate-spin' : ''}`} />
+                        <span>{isPrintingUnitConversion ? 'Printing Unit Label...' : 'Print Unit Label'}</span>
+                      </button>
+
+                      {isPrintingUnitConversion && (
+                        <button
+                          type="button"
+                          onClick={() => setIsPrintingUnitConversion(false)}
+                          className="py-2.5 px-3 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+
+                    {unitConversionPrintResult && (
+                      <div className="bg-slate-950 text-slate-100 p-3.5 rounded-xl border border-slate-800 space-y-2 mt-2">
+                        <div className="flex items-center justify-between text-[11px] border-b border-slate-800 pb-2">
+                          <span className="font-bold text-emerald-300 flex items-center gap-1.5">
+                            {unitConversionPrintResult.success ? (
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                            ) : (
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                            )}
+                            <span>{unitConversionPrintResult.success ? 'Unit Conversion Label Printed Successfully' : 'Unit Label Print Execution Failed'}</span>
+                          </span>
+                          <span className={`font-mono font-extrabold uppercase px-2 py-0.5 rounded text-[10px] ${
+                            unitConversionPrintResult.success ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-rose-950 text-rose-400 border border-rose-800'
+                          }`}>
+                            {unitConversionPrintResult.status}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] font-mono">
+                          <div><span className="text-slate-400">Conversion Unit:</span> <strong className="text-white">{unitConversionUnit}</strong></div>
+                          <div><span className="text-slate-400">Conversion Qty:</span> <strong className="text-white">{unitConversionQty} {selectedProductDetails.unitCode || 'PCS'}</strong></div>
+                          <div><span className="text-slate-400">Base Unit:</span> <strong className="text-slate-300">{selectedProductDetails.unitCode || 'PCS'}</strong></div>
+                          <div><span className="text-slate-400">Printer:</span> <strong className="text-emerald-300">{unitConversionPrintResult.printerName}</strong></div>
+                          <div><span className="text-slate-400">Job ID:</span> <strong className="text-emerald-400">{unitConversionPrintResult.jobId || 'N/A'}</strong></div>
+                          <div><span className="text-slate-400">Execution Time:</span> <strong className="text-sky-300">{unitConversionPrintResult.executionTimeMs} ms</strong></div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* SECTION 6: UNIT HIERARCHY */}
+                <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Scale className="w-4 h-4 text-indigo-600" />
+                      <h4 className="font-bold text-slate-900 uppercase tracking-wider text-[11px]">
+                        Enterprise Unit Hierarchy
+                      </h4>
+                    </div>
+                    <span className="text-[10px] font-extrabold uppercase bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full">
+                      Sprint 4 Foundation
+                    </span>
+                  </div>
+
+                  {/* Base Unit */}
+                  <div className="p-3 bg-white rounded-xl border border-slate-200 flex items-center justify-between">
+                    <div>
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                        Base Unit (Primary Stock Unit)
+                      </span>
+                      <div className="flex items-center gap-2 mt-1">
+                        <UnitBadge unitCode={selectedProductDetails.unitCode || selectedProductDetails.unitName || 'PCS'} size="md" />
+                        <span className="font-extrabold text-slate-800">
+                          {selectedProductDetails.unitName || selectedProductDetails.unitCode || 'PCS'}
+                        </span>
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-semibold text-slate-400 italic bg-slate-50 px-2 py-1 rounded-lg">
+                      1.00 Base Ratio
+                    </span>
+                  </div>
+
+                  {/* Alternate Units & Conversion List */}
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-2">
+                      Alternate Unit Conversion List
+                    </span>
+
+                    {(() => {
+                      const pConvs = allConversions.filter(
+                        (c) => c.productId === selectedProductDetails.id
+                      );
+
+                      if (pConvs.length === 0) {
+                        return (
+                          <div className="p-3 bg-white rounded-xl border border-dashed border-slate-200 text-center text-slate-400 italic">
+                            No alternate unit conversions configured for this product.
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div className="divide-y divide-slate-100 bg-white rounded-xl border border-slate-200 overflow-hidden">
+                          {pConvs.map((conv) => (
+                            <div key={conv.id} className="p-3 flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <UnitBadge unitCode={conv.alternateUnitCode} size="sm" />
+                                <div>
+                                  <span className="font-bold text-slate-900 block">
+                                    1 {conv.alternateUnitCode}
+                                  </span>
+                                  <span className="text-[10px] text-slate-500 font-mono">
+                                    Alternate Unit Ratio
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="text-right">
+                                <span className="font-mono font-extrabold text-indigo-900 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded text-xs block">
+                                  {formatConversionText(conv)}
+                                </span>
+                                <span className={`text-[9px] font-bold uppercase mt-0.5 inline-block ${
+                                  conv.status === 'active' ? 'text-emerald-600' : 'text-amber-600'
+                                }`}>
+                                  Status: {conv.status}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                {/* Stock & Commercial Metrics */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase block">
+                      Current Stock
+                    </span>
+                    <span className="text-base font-mono font-black text-slate-900 mt-0.5 block">
+                      {selectedProductDetails.currentStock} {selectedProductDetails.unitCode || 'PCS'}
+                    </span>
+                  </div>
+
+                  <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase block">
+                      Min Alert Threshold
+                    </span>
+                    <span className="text-base font-mono font-black text-slate-700 mt-0.5 block">
+                      {selectedProductDetails.minimumStockAlert} {selectedProductDetails.unitCode || 'PCS'}
+                    </span>
+                  </div>
+
+                  <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase block">
+                      Retail Selling Price
+                    </span>
+                    <span className="text-base font-mono font-black text-indigo-700 mt-0.5 block">
+                      {formatCurrency(selectedProductDetails.sellingPrice)}
+                    </span>
+                  </div>
+
+                  {permissions.viewProductCost !== false && (
+                    <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase block">
+                        Purchase Cost
+                      </span>
+                      <span className="text-base font-mono font-black text-slate-700 mt-0.5 block">
+                        {formatCurrency(selectedProductDetails.purchasePrice)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Location & Supplier Info */}
+                {(selectedProductDetails.location || selectedProductDetails.supplierName) && (
+                  <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+                    {selectedProductDetails.location && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">
+                          Warehouse Location
+                        </span>
+                        <span className="font-semibold text-slate-800">
+                          {selectedProductDetails.location}
+                        </span>
+                      </div>
+                    )}
+                    {selectedProductDetails.supplierName && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">
+                          Supplier
+                        </span>
+                        <span className="font-semibold text-slate-800">
+                          {selectedProductDetails.supplierName} ({selectedProductDetails.supplierEmail || 'No Email'})
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const prod = selectedProductDetails;
+                    setSelectedProductDetails(null);
+                    openForm(prod);
+                  }}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Edit2 className="w-3.5 h-3.5" />
+                  <span>Edit Product & Conversions</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedProductDetails(null)}
+                  className="px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-100 rounded-xl text-xs font-bold transition cursor-pointer"
+                >
+                  Close
+                </button>
               </div>
             </motion.div>
           </div>

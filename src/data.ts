@@ -2,6 +2,26 @@ import { ActivityLog, Supplier, Product } from './types';
 
 export const INITIAL_PRODUCTS: Product[] = [
   {
+    id: 'prod-rice-001',
+    name: 'RICE',
+    sku: 'RE-1',
+    category: 'Grocery',
+    brand: 'GrainMaster',
+    purchasePrice: 15.00,
+    sellingPrice: 25.00,
+    currentStock: 100,
+    minimumStockAlert: 20,
+    location: 'Warehouse A - Shelf R1',
+    description: 'Premium Long Grain Rice',
+    createdDate: '2026-06-01T08:00:00Z',
+    status: 'active',
+    barcode: 'RE-1',
+    barcodeType: 'CODE128',
+    unitId: 'unit-kg',
+    unitCode: 'KG',
+    unitName: 'KG'
+  },
+  {
     id: 'prod-1',
     name: 'Pro Display XDR 32"',
     sku: 'DISP-XDR-001',
@@ -15,7 +35,10 @@ export const INITIAL_PRODUCTS: Product[] = [
     location: 'Warehouse A - Shelf B2',
     description: '32-inch Retina 6K display with 1,000,000:1 contrast ratio, extreme dynamic range (XDR), and superwide viewing angle.',
     createdDate: '2026-05-30T14:22:00Z',
-    status: 'active'
+    status: 'active',
+    unitId: 'unit-pcs',
+    unitCode: 'PCS',
+    unitName: 'Pieces'
   },
   {
     id: 'prod-2',
@@ -31,7 +54,10 @@ export const INITIAL_PRODUCTS: Product[] = [
     location: 'Warehouse A - Shelf B1',
     description: '16-inch liquid retina XDR screen, 36GB unified memory, 1TB SSD, M3 Max 14-core CPU and 30-core GPU.',
     createdDate: '2026-05-31T09:15:00Z',
-    status: 'active'
+    status: 'active',
+    unitId: 'unit-pcs',
+    unitCode: 'PCS',
+    unitName: 'Pieces'
   },
   {
     id: 'prod-3',
@@ -47,7 +73,10 @@ export const INITIAL_PRODUCTS: Product[] = [
     location: 'Warehouse B - Room 1',
     description: 'PostureFit SL lumbar support, fully adjustable armrests, Tilt Limiter mechanism with seat angle adjustment, Graphite finish.',
     createdDate: '2026-05-28T11:45:00Z',
-    status: 'active'
+    status: 'active',
+    unitId: 'unit-pcs',
+    unitCode: 'PCS',
+    unitName: 'Pieces'
   },
   {
     id: 'prod-4',
@@ -63,7 +92,10 @@ export const INITIAL_PRODUCTS: Product[] = [
     location: 'Warehouse A - Shelf C4',
     description: 'Fully customizable mechanical keyboard, 75% layout, hot-swappable switches, CNC aluminum body, double-gasket design.',
     createdDate: '2026-06-01T08:00:00Z',
-    status: 'active'
+    status: 'active',
+    unitId: 'unit-pcs',
+    unitCode: 'PCS',
+    unitName: 'Pieces'
   },
   {
     id: 'prod-5',
@@ -79,7 +111,10 @@ export const INITIAL_PRODUCTS: Product[] = [
     location: 'Warehouse A - Shelf C10',
     description: 'Industry-leading noise-canceling headphones with auto-NC optimizer, 8 mics, and precise voice pickup system.',
     createdDate: '2026-05-25T16:30:00Z',
-    status: 'active'
+    status: 'active',
+    unitId: 'unit-pcs',
+    unitCode: 'PCS',
+    unitName: 'Pieces'
   },
   {
     id: 'prod-6',
@@ -95,7 +130,10 @@ export const INITIAL_PRODUCTS: Product[] = [
     location: 'Warehouse C - Rack 3',
     description: 'Simple and unpretentious 3-layer waterproof/breathable H2No Performance Standard shell for high comfort and performance.',
     createdDate: '2026-05-29T10:05:00Z',
-    status: 'active'
+    status: 'active',
+    unitId: 'unit-pcs',
+    unitCode: 'PCS',
+    unitName: 'Pieces'
   },
   {
     id: 'prod-7',
@@ -111,7 +149,10 @@ export const INITIAL_PRODUCTS: Product[] = [
     location: 'Warehouse B - Room 2',
     description: 'Double-wall vacuum insulted tumbler with MagSlider lid, durable Duracoat color, stainless steel premium body.',
     createdDate: '2026-06-01T06:45:00Z',
-    status: 'active'
+    status: 'active',
+    unitId: 'unit-pcs',
+    unitCode: 'PCS',
+    unitName: 'Pieces'
   },
   {
     id: 'prod-8',
@@ -246,9 +287,9 @@ export const INITIAL_CHART_OF_ACCOUNTS: any[] = [
     editable: false
   },
   {
-    id: 'coa-1100',
-    code: '1100',
-    name: 'Cash in Hand',
+    id: 'coa-1010',
+    code: '1010',
+    name: 'Cash',
     type: 'Asset',
     parentAccount: '1000',
     normalBalance: 'Debit',

@@ -30,6 +30,27 @@ interface SetupWizardProps {
 
 export default function SetupWizard({ db, auth, onComplete }: SetupWizardProps) {
   const [step, setStep] = useState<number>(1);
+
+  // Hardening: Verify if system is already bootstrapped on load
+  React.useEffect(() => {
+    const verifyBootstrapStatus = async () => {
+      try {
+        const { getDoc, doc } = await import('firebase/firestore');
+        const bootSnap = await getDoc(doc(db, 'system', 'bootstrap'));
+        if (bootSnap.exists() && bootSnap.data()?.initialized === true) {
+          console.warn("SetupWizard Hardening: System already initialized. Denying access to Setup Wizard.");
+          if (auth.currentUser) {
+            onComplete(auth.currentUser);
+          } else {
+            window.location.reload();
+          }
+        }
+      } catch (err) {
+        console.error("SetupWizard: Failed to verify system bootstrap status:", err);
+      }
+    };
+    verifyBootstrapStatus();
+  }, [db, auth, onComplete]);
   
   // Step 2: Company Information
   const [companyName, setCompanyName] = useState('');
@@ -119,6 +140,23 @@ export default function SetupWizard({ db, auth, onComplete }: SetupWizardProps) 
       });
 
       // 2. Create Company Profile Config (businessProfile/config)
+      let sym = '$';
+      let code = 'USD';
+      let name = 'US Dollar';
+      let position = 'Before';
+      let thousands = ',';
+      let decimal = '.';
+      let precision = 2;
+
+      if (currency === 'SAR (﷼)' || currency === 'SAR (Classic)') { sym = '﷼'; code = 'SAR'; name = 'Saudi Riyal'; position = 'Before'; }
+      else if (currency === 'SAR (SAR)' || currency === 'SAR (ISO)') { sym = 'SAR'; code = 'SAR'; name = 'Saudi Riyal'; position = 'After'; }
+      else if (currency === 'SAR (⃁)' || currency === 'SAR (Official)' || currency.includes('Official') || currency.includes('⃁') || currency.includes('New Symbol') || currency.includes('U+20C1')) { sym = '\u20C1'; code = 'SAR'; name = 'Saudi Riyal'; position = 'Before'; }
+      else if (currency.includes('SAR') || currency.includes('SR')) { sym = '﷼'; code = 'SAR'; name = 'Saudi Riyal'; position = 'Before'; }
+      else if (currency.includes('AED') || currency.includes('DH')) { sym = 'د.إ'; code = 'AED'; name = 'UAE Dirham'; position = 'After'; }
+      else if (currency.includes('GBP')) { sym = '£'; code = 'GBP'; name = 'British Pound'; }
+      else if (currency.includes('EUR')) { sym = '€'; code = 'EUR'; name = 'Euro'; thousands = '.'; decimal = ','; }
+      else if (currency.includes('BDT')) { sym = '৳'; code = 'BDT'; name = 'Bangladeshi Taka'; }
+
       const cleanProfile = {
         name: companyName.trim(),
         tradeName: companyName.trim(),
@@ -133,7 +171,14 @@ export default function SetupWizard({ db, auth, onComplete }: SetupWizardProps) 
         taxRatePercent: 15,
         currency,
         timezone,
-        businessType
+        businessType,
+        currencyName: name,
+        currencyCode: code,
+        currencySymbol: sym,
+        currencyPosition: position,
+        thousandsSeparator: thousands,
+        decimalSeparator: decimal,
+        decimalPrecision: precision
       };
       await setDoc(doc(db, 'businessProfile', 'config'), cleanProfile);
 
@@ -359,7 +404,9 @@ export default function SetupWizard({ db, auth, onComplete }: SetupWizardProps) 
                   >
                     <option value="USD ($)">USD ($)</option>
                     <option value="EUR (€)">EUR (€)</option>
-                    <option value="SAR (SR)">SAR (SR)</option>
+                    <option value="SAR (﷼)">SAR (﷼) - Saudi Riyal (Classic)</option>
+                    <option value="SAR (SAR)">SAR (SAR) - Saudi Riyal (ISO)</option>
+                    <option value="SAR (⃁)">SAR (⃁) - Official Saudi Riyal Symbol</option>
                     <option value="GBP (£)">GBP (£)</option>
                     <option value="AED (DH)">AED (DH)</option>
                   </select>

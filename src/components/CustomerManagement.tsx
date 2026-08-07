@@ -17,13 +17,19 @@ import {
   DollarSign, 
   TrendingUp,
   ChevronRight,
-  FileText
+  FileText,
+  CheckCircle2,
+  AlertCircle
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { Customer } from '../types';
 import { calculateCustomerLedger, isInactiveStatus } from '../lib/utils';
+import { ResponsiveKPIValue } from './MetricCard';
 import { usePermission, UserRole } from '../hooks/usePermission';
+import { formatCurrency } from '../utils/currencyFormatter';
+import { EnterpriseIdentityValidationService } from '../services/validation/EnterpriseIdentityValidationService';
+import { TranslationService } from '../services/translation/TranslationService';
 
 export default function CustomerManagement({ userRole = 'admin' }: { userRole?: UserRole }) {
   const { permissions } = usePermission({ role: userRole });
@@ -43,6 +49,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
   // --- Form Fields State ---
   const [formData, setFormData] = useState({
     name: '',
+    nameArabic: '',
     phone: '',
     address: '',
     customerType: 'Cash' as 'Cash' | 'Credit',
@@ -54,6 +61,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
   
   // --- Validation Errors State ---
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [translationNotice, setTranslationNotice] = useState<{ type: 'success' | 'warning'; message: string } | null>(null);
 
   const [sales, setSales] = useState<any[]>([]);
   const [customerPayments, setCustomerPayments] = useState<any[]>([]);
@@ -168,6 +176,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
       const openingBalance = originalCust ? originalCust.dueBalance : customer.dueBalance;
       setFormData({
         name: customer.name,
+        nameArabic: customer.nameArabic || '',
         phone: customer.phone,
         address: customer.address,
         customerType: customer.customerType,
@@ -180,6 +189,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
       setEditingCustomer(null);
       setFormData({
         name: '',
+        nameArabic: '',
         phone: '',
         address: '',
         customerType: 'Cash',
@@ -194,7 +204,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
   };
 
   // --- Form Validation ---
-  const validateForm = () => {
+  const validateForm = async () => {
     const newErrors: Record<string, string> = {};
     if (!formData.name.trim()) newErrors.name = 'Customer name is required';
     if (formData.name.length > 200) newErrors.name = 'Name must be 200 characters or less';
@@ -216,39 +226,20 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
       newErrors.dueBalance = 'Due balance cannot be negative';
     }
 
-    // Uniqueness checks
-    const normName = formData.name.trim().toLowerCase();
-    const normPhone = formData.phone.trim();
-    const normVat = formData.vatNumber.trim().toLowerCase();
+    // Centralized Enterprise Identity Validation
+    const validationResult = await EnterpriseIdentityValidationService.validateIdentity({
+      name: formData.name,
+      phone: formData.phone,
+      email: formData.email,
+      vatNumber: formData.vatNumber,
+      currentEntityId: editingCustomer ? editingCustomer.id : undefined,
+      currentCollection: 'customers',
+      localCustomers: customersState
+    });
 
-    const nameExists = customersState.some(c => 
-      c.name.trim().toLowerCase() === normName && 
-      (!editingCustomer || c.id !== editingCustomer.id)
-    );
-    if (nameExists) {
-      newErrors.name = 'Customer name already exists.';
-    }
-
-    const phoneExists = customersState.some(c => 
-      c.phone.trim() === normPhone && 
-      (!editingCustomer || c.id !== editingCustomer.id)
-    );
-    if (phoneExists) {
-      newErrors.phone = 'Customer phone already exists.';
-    }
-
-    if (normVat) {
-      const vatExists = customersState.some(c => 
-        c.vatNumber && c.vatNumber.trim().toLowerCase() === normVat && 
-        (!editingCustomer || c.id !== editingCustomer.id)
-      );
-      if (vatExists) {
-        newErrors.vatNumber = 'VAT Number already exists.';
-      }
-    }
-
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    const combinedErrors = { ...newErrors, ...validationResult.errors };
+    setErrors(combinedErrors);
+    return Object.keys(combinedErrors).length === 0;
   };
 
   // --- Submit Create / Edit ---
@@ -277,42 +268,21 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
       newErrors.dueBalance = 'Due balance cannot be negative';
     }
 
-    const normName = formData.name.trim().toLowerCase();
-    const normPhone = formData.phone.trim();
-    const normVat = formData.vatNumber.trim().toLowerCase();
+    // Centralized Enterprise Identity Validation
+    const validationResult = await EnterpriseIdentityValidationService.validateIdentity({
+      name: formData.name,
+      phone: formData.phone,
+      email: formData.email,
+      vatNumber: formData.vatNumber,
+      currentEntityId: editingCustomer ? editingCustomer.id : undefined,
+      currentCollection: 'customers',
+      localCustomers: customersState
+    });
 
-    // Name uniqueness
-    const nameExists = customersState.some(c => 
-      c.name.trim().toLowerCase() === normName && 
-      (!editingCustomer || c.id !== editingCustomer.id)
-    );
-    if (nameExists) {
-      newErrors.name = 'Customer name already exists.';
-    }
-
-    // Phone uniqueness
-    const phoneExists = customersState.some(c => 
-      c.phone.trim() === normPhone && 
-      (!editingCustomer || c.id !== editingCustomer.id)
-    );
-    if (phoneExists) {
-      newErrors.phone = 'Customer phone already exists.';
-    }
-
-    // VAT uniqueness
-    if (normVat) {
-      const vatExists = customersState.some(c => 
-        c.vatNumber && c.vatNumber.trim().toLowerCase() === normVat && 
-        (!editingCustomer || c.id !== editingCustomer.id)
-      );
-      if (vatExists) {
-        newErrors.vatNumber = 'VAT Number already exists.';
-      }
-    }
-
-    setErrors(newErrors);
-    if (Object.keys(newErrors).length > 0) {
-      const firstError = Object.values(newErrors)[0];
+    const combinedErrors = { ...newErrors, ...validationResult.errors };
+    setErrors(combinedErrors);
+    if (Object.keys(combinedErrors).length > 0) {
+      const firstError = Object.values(combinedErrors)[0];
       setFeedback({ message: firstError, type: 'error' });
       return;
     }
@@ -325,6 +295,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
     const finalCustomerData: Customer = {
       id: customerId,
       name: formData.name.trim(),
+      nameArabic: formData.nameArabic.trim() ? formData.nameArabic.trim() : undefined,
       phone: formData.phone.trim(),
       address: formData.address.trim(),
       customerType: formData.customerType,
@@ -411,7 +382,7 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
       const reasons: string[] = [];
       if (hasSales) reasons.push("sales history");
       if (hasPayments) reasons.push("payment history");
-      if (hasBalance) reasons.push(`outstanding ledger balance ($${(customerToDelete.dueBalance ?? 0).toFixed(2)})`);
+      if (hasBalance) reasons.push(`outstanding ledger balance (${formatCurrency(customerToDelete.dueBalance ?? 0)})`);
 
       const reasonText = reasons.join(", ");
       setFeedback({
@@ -514,89 +485,85 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
       </AnimatePresence>
 
       {/* METRIC BENTO CARDS */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:gap-6 sm:grid-cols-2 lg:grid-cols-4">
         {/* Total Customers */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between animate-fade-in">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Total Customers</span>
-              <div className="p-1 px-2.5 rounded-full text-[10px] font-extrabold bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center gap-1">
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0 animate-fade-in">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Total Customers</span>
+              <div className="p-1 px-2.5 rounded-full text-[10px] font-extrabold bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center gap-1 shrink-0">
                 Active <ChevronRight className="h-2.5 w-2.5" />
               </div>
             </div>
             {loading ? (
-              <div className="h-9 w-12 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
+              <div className="h-8 w-12 bg-slate-100 rounded-lg animate-pulse"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">{customers.filter(c => !isInactiveStatus(c.status)).length}</p>
+              <ResponsiveKPIValue value={customers.filter(c => !isInactiveStatus(c.status)).length} className="text-slate-900" />
             )}
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400">
+          <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 truncate">
             Registered ledger records
           </div>
         </div>
 
         {/* Due Portfolio Balance */}
-        <div className="bg-rose-50 rounded-[2rem] p-6 sm:p-8 border border-rose-100 flex flex-col justify-between animate-fade-in">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-rose-600 uppercase tracking-widest leading-none">Total Outstanding</span>
-              <span className="flex h-1.5 w-1.5 rounded-full bg-rose-500"></span>
+        <div className="bg-rose-50 rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-rose-100 flex flex-col justify-between w-full min-w-0 animate-fade-in">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-rose-600 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Total Outstanding</span>
+              <span className="flex h-1.5 w-1.5 rounded-full bg-rose-500 shrink-0"></span>
             </div>
             {loading ? (
-              <div className="h-9 w-28 bg-rose-200/50 rounded-lg animate-pulse mt-2"></div>
+              <div className="h-8 w-28 bg-rose-200/50 rounded-lg animate-pulse"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-rose-900 mt-2">
-                ${outstandingBalanceTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </p>
+              <ResponsiveKPIValue value={formatCurrency(outstandingBalanceTotal)} className="text-rose-900" />
             )}
           </div>
-          <div className="mt-4 pt-3 border-t border-rose-200/50 text-[11px] text-rose-700/80">
+          <div className="mt-4 pt-3 border-t border-rose-200/50 text-[11px] text-rose-700/80 truncate">
             Aggregate active customer dues
           </div>
         </div>
 
         {/* Customer Credit Portfolio Balance */}
-        <div className="bg-emerald-50 rounded-[2rem] p-6 sm:p-8 border border-emerald-100 flex flex-col justify-between animate-fade-in">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest leading-none">Customer Credit</span>
-              <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+        <div className="bg-emerald-50 rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-emerald-100 flex flex-col justify-between w-full min-w-0 animate-fade-in">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Customer Credit</span>
+              <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0"></span>
             </div>
             {loading ? (
-              <div className="h-9 w-28 bg-emerald-200/50 rounded-lg animate-pulse mt-2"></div>
+              <div className="h-8 w-28 bg-emerald-200/50 rounded-lg animate-pulse"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-                ${customerCreditTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </p>
+              <ResponsiveKPIValue value={formatCurrency(customerCreditTotal)} className="text-slate-900" />
             )}
           </div>
-          <div className="mt-4 pt-3 border-t border-emerald-200/50 text-[11px] text-emerald-700/85">
+          <div className="mt-4 pt-3 border-t border-emerald-200/50 text-[11px] text-emerald-700/85 truncate">
             Advance overpaid customer balances
           </div>
         </div>
 
         {/* Account Distribution */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between animate-fade-in">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Account Types</span>
-              <CreditCard className="h-4 w-4 text-indigo-500" />
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0 animate-fade-in">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Account Types</span>
+              <CreditCard className="h-4 w-4 text-indigo-500 shrink-0" />
             </div>
             <div className="grid grid-cols-2 gap-2 mt-2">
-              <div>
-                <p className="text-xs text-slate-400 font-bold uppercase leading-none">Cash</p>
+              <div className="min-w-0">
+                <p className="text-[10px] text-slate-400 font-bold uppercase leading-none truncate">Cash</p>
                 {loading ? (
                   <div className="h-7 w-10 bg-slate-100 rounded-lg animate-pulse mt-1"></div>
                 ) : (
-                  <p className="text-xl font-bold text-slate-800 mt-1">{cashAccountsCount}</p>
+                  <p className="text-lg sm:text-xl font-bold text-slate-800 mt-1 truncate">{cashAccountsCount}</p>
                 )}
               </div>
-              <div className="border-l border-slate-100 pl-4">
-                <p className="text-xs text-slate-400 font-bold uppercase leading-none">Credit</p>
+              <div className="border-l border-slate-100 pl-3 min-w-0">
+                <p className="text-[10px] text-slate-400 font-bold uppercase leading-none truncate">Credit</p>
                 {loading ? (
                   <div className="h-7 w-10 bg-slate-100 rounded-lg animate-pulse mt-1"></div>
                 ) : (
-                  <p className="text-xl font-bold text-slate-800 mt-1">{creditAccountsCount}</p>
+                  <p className="text-lg sm:text-xl font-bold text-slate-800 mt-1 truncate">{creditAccountsCount}</p>
                 )}
               </div>
             </div>
@@ -815,11 +782,11 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                             <td className={`py-4 px-5 text-right font-black font-mono whitespace-nowrap text-sm ${
                               customer.dueBalance > 0 ? 'text-rose-600' : 'text-slate-700'
                             }`}>
-                              ${customer.dueBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              {formatCurrency(customer.dueBalance)}
                             </td>
                             <td className="py-4 px-5 text-right font-black font-mono text-emerald-600 whitespace-nowrap text-sm">
                               {(customer.customerCredit || 0) > 0 ? (
-                                `$${customer.customerCredit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                                formatCurrency(customer.customerCredit)
                               ) : (
                                 <span className="text-slate-300">-</span>
                               )}
@@ -990,6 +957,69 @@ export default function CustomerManagement({ userRole = 'admin' }: { userRole?: 
                     <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
                       <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
                       <span>{errors.name}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Customer Name (Arabic) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label htmlFor="form-customer-name-arabic-field" className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                      Customer Name (Arabic)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setTranslationNotice(null);
+                        const sourceName = (formData.name || '').trim();
+                        if (!sourceName) {
+                          setTranslationNotice({ type: 'warning', message: 'Please enter a Customer Name first.' });
+                          return;
+                        }
+                        const res = await TranslationService.translateToArabic(sourceName);
+                        if (res.success && res.translatedText) {
+                          setFormData(prev => ({ ...prev, nameArabic: res.translatedText }));
+                          setTranslationNotice({ type: 'success', message: `Arabic name generated: ${res.translatedText}` });
+                        } else {
+                          setTranslationNotice({ type: 'warning', message: res.message || 'Translation not found in offline dictionary.' });
+                        }
+                      }}
+                      className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-0.5 rounded-md transition border border-indigo-100/80 cursor-pointer"
+                    >
+                      Generate Arabic
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    id="form-customer-name-arabic-field"
+                    dir="rtl"
+                    disabled={isSaving}
+                    value={formData.nameArabic}
+                    onChange={(e) => setFormData({ ...formData, nameArabic: e.target.value })}
+                    placeholder="اسم العميل (اختياري)"
+                    className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 focus:border-indigo-650 h-[42px] text-right font-sans"
+                  />
+                  {translationNotice && (
+                    <div className={`mt-1.5 text-[11px] font-semibold px-3 py-2 rounded-xl flex items-center justify-between border shadow-3xs transition-all ${
+                      translationNotice.type === 'success'
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200/80'
+                        : 'bg-amber-50 text-amber-800 border-amber-200/80'
+                    }`}>
+                      <div className="flex items-center gap-1.5">
+                        {translationNotice.type === 'success' ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                        ) : (
+                          <AlertCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                        )}
+                        <span>{translationNotice.message}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setTranslationNotice(null)}
+                        className="text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
                     </div>
                   )}
                 </div>

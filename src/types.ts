@@ -1,3 +1,13 @@
+export * from './types/barcodeIntegration';
+export * from './types/barcodeProtocol';
+export * from './types/barcodeTransport';
+export * from './types/barcodeGateway';
+export * from './types/barcodeExecution';
+export * from './types/barcodeBridge';
+export * from './types/barcodeConnectorHost';
+export * from './types/barcodeLocalClient';
+export * from './types/barcodeRuntime';
+
 export interface ActivityLog {
   id: string;
   itemId: string;
@@ -9,9 +19,72 @@ export interface ActivityLog {
   reason?: string;
 }
 
+export type UnitCategory =
+  | 'Packaging'
+  | 'Quantity'
+  | 'Weight'
+  | 'Liquid'
+  | 'Length'
+  | 'Area'
+  | 'Volume'
+  | string;
+
+export type UnitStatus = 'active' | 'inactive' | 'archived';
+
+export interface UnitMaster {
+  id: string;
+  unitName: string;
+  unitCode: string;
+  symbol: string;
+  category: UnitCategory;
+  status: UnitStatus;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  isSystem: boolean;
+  isDefault?: boolean;
+  sortOrder: number;
+  allowDecimal: boolean;
+  decimalPlaces: number;
+  badgeColor?: string;
+  icon?: string;
+  translations?: {
+    en?: string;
+    ar?: string;
+    bn?: string;
+    [key: string]: string | undefined;
+  };
+}
+
+export type Unit = UnitMaster;
+
+export interface UnitConversion {
+  id: string;
+  productId: string;
+  productName?: string;
+  productSku?: string;
+  baseUnitId: string;
+  baseUnitCode: string;
+  alternateUnitId: string;
+  alternateUnitCode: string;
+  conversionFactor: number; // 1 Alternate Unit = conversionFactor Base Units
+  direction?: 'multiply' | 'divide';
+  status: 'active' | 'inactive';
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+  updatedBy?: string;
+  isDefault?: boolean;
+  isActive?: boolean;
+  description?: string;
+}
+
+
 export interface Supplier {
   id: string;
   name: string;
+  nameArabic?: string;
   contactPerson?: string;
   email?: string;
   phone: string;
@@ -19,6 +92,9 @@ export interface Supplier {
   address?: string;
   paymentType?: 'Cash' | 'Credit';
   dueBalance?: number;
+  totalPurchase?: number;
+  purchaseCount?: number;
+  lastPurchaseDate?: string;
   supplierAdvance?: number;
   createdDate?: string;
   status?: 'active' | 'inactive';
@@ -29,6 +105,7 @@ export interface Supplier {
 export interface Customer {
   id: string;
   name: string;
+  nameArabic?: string;
   phone: string;
   address: string;
   customerType: 'Cash' | 'Credit';
@@ -41,11 +118,25 @@ export interface Customer {
   updatedAt?: string;
 }
 
+export type BarcodeType =
+  | 'CODE128'
+  | 'EAN13'
+  | 'EAN8'
+  | 'UPCA'
+  | 'UPCE'
+  | 'QR_CODE'
+  | 'DATA_MATRIX';
+
+export type BarcodeStatus = 'generated' | 'assigned' | 'unassigned' | 'locked' | 'invalid';
+export type BarcodeSource = 'manual' | 'auto_generated' | 'mz_suite' | 'imported';
+
 export interface Product {
   id: string;
   name: string;
+  nameArabic?: string;
   sku: string;
   category: string;
+  brand?: string;
   purchasePrice: number;
   sellingPrice: number;
   currentStock: number;
@@ -57,14 +148,37 @@ export interface Product {
   supplierEmail?: string;
   description?: string;
   initialStock?: number;
+  unitId?: string;
+  unitCode?: string;
+  unitName?: string;
+  // Enterprise Barcode Metadata (Sprint 6)
+  barcode?: string;
+  barcodeType?: BarcodeType;
+  barcodeStatus?: BarcodeStatus;
+  barcodeSource?: BarcodeSource;
+  generatedAt?: string;
+  generatedBy?: string;
+  isBarcodeLocked?: boolean;
+  barcodeVersion?: number;
 }
 
 export interface CustomerSnapshot {
   id: string;
   name: string;
+  nameArabic?: string;
   phone: string;
   address: string;
   customerType: 'Cash' | 'Credit';
+  vatNumber?: string;
+  email?: string;
+}
+
+export interface SupplierSnapshot {
+  id: string;
+  name: string;
+  nameArabic?: string;
+  phone?: string;
+  address?: string;
   vatNumber?: string;
   email?: string;
 }
@@ -81,19 +195,39 @@ export interface CompanySnapshot {
   website?: string;
   logo?: string;
   taxRatePercent: number;
+  companyNameArabic?: string;
+  tradeNameArabic?: string;
+}
+
+export interface CompanyProfile {
+  name?: string;
+  companyName?: string;
+  companyNameArabic?: string;
+  tradeName?: string;
+  tradeNameArabic?: string;
+  taxRegistrationId?: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  [key: string]: any;
 }
 
 export interface ProductSnapshot {
   id: string;
   name: string;
+  nameArabic?: string;
   sku: string;
   category: string;
   description?: string;
+  unitId?: string;
+  unitCode?: string;
+  unitName?: string;
 }
 
 export interface LineItem {
   productId: string;
   productName: string;
+  productNameArabic?: string;
   quantity: number;
   unitPrice: number;
   subtotal: number;
@@ -104,14 +238,27 @@ export interface LineItem {
   costOfGoodsSold?: number;
   grossProfit?: number;
   productSnapshot?: ProductSnapshot;
+  unitId?: string;
+  unitCode?: string;
+  unitName?: string;
+  // Multi-Unit Conversion fields (Sprint 5)
+  enteredQuantity?: number;
+  enteredUnitCode?: string;
+  baseQuantity?: number;
+  baseUnitCode?: string;
+  conversionFactor?: number;
+  isAlternateUnit?: boolean;
 }
 
 export interface Sale {
   id: string;
   customerId: string;
   customerName: string;
+  customerNameArabic?: string;
+  companyNameArabic?: string;
   productId: string;
   productName: string;
+  productNameArabic?: string;
   quantity: number;
   sellingPrice: number;
   unitPrice?: number;
@@ -131,16 +278,32 @@ export interface Sale {
   customerSnapshot?: CustomerSnapshot;
   companySnapshot?: CompanySnapshot;
   invoiceNumber?: string;
+  unitId?: string;
+  unitCode?: string;
+  unitName?: string;
+  // Multi-Unit Conversion fields (Sprint 5)
+  enteredQuantity?: number;
+  enteredUnitCode?: string;
+  baseQuantity?: number;
+  baseUnitCode?: string;
+  conversionFactor?: number;
+  isAlternateUnit?: boolean;
 }
 
 export interface Purchase {
   id: string;
   supplierId: string;
   supplierName: string;
+  supplierNameArabic?: string;
+  companyNameArabic?: string;
   productId: string;
   productName: string;
+  productNameArabic?: string;
   quantity: number;
   purchasePrice: number;
+  subtotal?: number;
+  taxAmount?: number;
+  taxRatePercent?: number;
   totalAmount: number;
   paymentType: 'Cash' | 'Credit';
   purchaseDate: string;
@@ -149,9 +312,19 @@ export interface Purchase {
   invoiceNumber?: string;
   vatAmount?: number;
   discountAmount?: number;
-  supplierSnapshot?: any;
-  productSnapshot?: any;
+  unitId?: string;
+  unitCode?: string;
+  unitName?: string;
+  supplierSnapshot?: SupplierSnapshot | any;
+  productSnapshot?: ProductSnapshot | any;
   companySnapshot?: CompanySnapshot;
+  // Multi-Unit Conversion fields (Sprint 5)
+  enteredQuantity?: number;
+  enteredUnitCode?: string;
+  baseQuantity?: number;
+  baseUnitCode?: string;
+  conversionFactor?: number;
+  isAlternateUnit?: boolean;
 }
 
 export function calculateLineTotals(
@@ -170,20 +343,39 @@ export function calculateTransactionTotals(items: LineItem[]): {
   taxAmount: number;
   totalAmount: number;
 } {
-  return items.reduce(
+  const summary = items.reduce(
     (acc, item) => {
-      acc.subtotal += item.subtotal;
-      acc.taxAmount += item.taxAmount ?? 0;
-      acc.totalAmount += item.totalAmount;
+      const itemSubtotal = item.subtotal ?? ((item.quantity || 0) * (item.unitPrice || 0));
+      const itemTax = item.taxAmount ?? ((itemSubtotal * (item.taxRatePercent ?? 0)) / 100);
+      acc.subtotal += itemSubtotal;
+      acc.taxAmount += itemTax;
       return acc;
     },
     { subtotal: 0, taxAmount: 0, totalAmount: 0 }
   );
+  summary.totalAmount = summary.subtotal + summary.taxAmount;
+  return summary;
 }
 
 export function getNormalizedItems(transaction: any): LineItem[] {
   if (transaction && Array.isArray(transaction.items) && transaction.items.length > 0) {
-    return transaction.items;
+    return transaction.items.map((item: any) => {
+      const quantity = item.quantity || 0;
+      const unitPrice = item.unitPrice ?? item.sellingPrice ?? 0;
+      const subtotal = item.subtotal ?? (quantity * unitPrice);
+      const taxRatePercent = item.taxRatePercent ?? transaction.taxRatePercent ?? 0;
+      const taxAmount = item.taxAmount ?? ((subtotal * taxRatePercent) / 100);
+      const totalAmount = subtotal + taxAmount;
+      return {
+        ...item,
+        quantity,
+        unitPrice,
+        subtotal,
+        taxRatePercent,
+        taxAmount,
+        totalAmount
+      };
+    });
   }
   
   if (!transaction) {
@@ -199,31 +391,14 @@ export function getNormalizedItems(transaction: any): LineItem[] {
     unitPrice = transaction.purchasePrice;
   }
 
-  let subtotal = 0;
-  if (transaction.subtotal !== undefined) {
-    subtotal = transaction.subtotal;
-  } else {
-    subtotal = (transaction.quantity || 0) * unitPrice;
-  }
-
+  const quantity = transaction.quantity !== undefined ? transaction.quantity : 0;
+  const subtotal = transaction.subtotal !== undefined ? transaction.subtotal : (quantity * unitPrice);
   const taxRatePercent = transaction.taxRatePercent ?? 0;
-  let taxAmount = 0;
-  if (transaction.taxAmount !== undefined) {
-    taxAmount = transaction.taxAmount;
-  } else {
-    taxAmount = (subtotal * taxRatePercent) / 100;
-  }
-
-  let totalAmount = 0;
-  if (transaction.totalAmount !== undefined) {
-    totalAmount = transaction.totalAmount;
-  } else {
-    totalAmount = subtotal + taxAmount;
-  }
+  const taxAmount = transaction.taxAmount !== undefined ? transaction.taxAmount : ((subtotal * taxRatePercent) / 100);
+  const totalAmount = subtotal + taxAmount;
 
   const productId = transaction.productId || '';
   const productName = transaction.productName || '';
-  const quantity = transaction.quantity !== undefined ? transaction.quantity : 0;
 
   return [{
     productId,
@@ -317,11 +492,15 @@ export interface SupplierPayment {
 export interface CashLedgerEntry {
   id: string;
   type: 'inflow' | 'outflow';
-  source: 'sale' | 'purchase' | 'payment' | 'manual' | 'expense';
+  source: 'sale' | 'purchase' | 'procurement' | 'payment' | 'manual' | 'expense' | 'capital';
   amount: number;
-  referenceId?: string;
+  referenceId?: string | null;
   description: string;
   timestamp: string;
+  status?: string;
+  isReversal?: boolean;
+  reversesCashEntryId?: string;
+  postingStatus?: string;
 }
 
 export interface Expense {
@@ -332,6 +511,10 @@ export interface Expense {
   vendor: string;
   description: string;
   amount: number;
+  subtotal?: number;
+  taxAmount?: number;
+  taxRatePercent?: number;
+  vatAmount?: number;
   paymentMethod: string;
   referenceNumber: string;
   status: 'active' | 'void';
@@ -402,6 +585,20 @@ export interface LedgerEntry {
   createdBy: string;
   lines: LedgerEntryLine[];
   originalEntryId?: string;
+  isVoided?: boolean;
+  voidedAt?: string;
+  voidedBy?: string;
+  voidReason?: string;
+  reversalEntryId?: string;
+  isReversal?: boolean;
+  reversesEntryId?: string;
+  supplierId?: string;
+  supplierName?: string;
+  customerId?: string;
+  customerName?: string;
+  projectId?: string;
+  costCenterId?: string;
+  warehouseId?: string;
 }
 
 

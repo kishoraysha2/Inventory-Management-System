@@ -45,4 +45,30 @@ export function calculateSupplierLedger(purchases: any[], payments: any[], suppl
   return supplierService.calculateSupplierLedger(purchases, payments, supplierId, openingBalance);
 }
 
+/**
+ * Formats a quantity with its unit code.
+ * Examples: formatQuantity(250, 'PCS') => "250 PCS"
+ *           formatQuantity(15, 'KG') => "15 KG"
+ *           formatQuantity(10) => "10 Units"
+ */
+export function formatQuantity(quantity: number | string | undefined | null, unitCode?: string, fallback = 'Units'): string {
+  const qtyNum = typeof quantity === 'number' ? quantity : parseFloat(String(quantity ?? 0)) || 0;
+  const formattedQty = Number.isInteger(qtyNum) ? qtyNum.toString() : qtyNum.toFixed(3).replace(/\.?0+$/, '');
+  const code = (unitCode && unitCode.trim()) ? unitCode.trim() : fallback;
+  return `${formattedQty} ${code}`;
+}
+
+/**
+ * Formats a unit price with currency and unit code suffix.
+ * Examples: formatUnitPrice(150, 'PCS', 'SAR') => "150.00 SAR / PCS"
+ *           formatUnitPrice(80, 'KG', 'SAR') => "80.00 SAR / KG"
+ */
+export function formatUnitPrice(price: number | string | undefined | null, unitCode?: string, currency = 'SAR'): string {
+  const priceNum = typeof price === 'number' ? price : parseFloat(String(price ?? 0)) || 0;
+  const formattedPrice = priceNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const code = (unitCode && unitCode.trim()) ? unitCode.trim() : 'Unit';
+  return `${formattedPrice} ${currency} / ${code}`;
+}
+
+
 

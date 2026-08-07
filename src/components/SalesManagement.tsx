@@ -1,6 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { calculateCustomerLedger, isVoidStatus, isInactiveStatus } from '../lib/utils';
+import { calculateCustomerLedger, isVoidStatus, isInactiveStatus, formatQuantity, formatUnitPrice } from '../lib/utils';
+import { formatCurrency } from '../utils/currencyFormatter';
+import { UnitBadge } from './ui/UnitBadge';
+import { ResponsiveKPIValue } from './MetricCard';
 import { 
   TrendingUp, 
   Search, 
@@ -22,15 +25,19 @@ import {
   ArrowRight,
   BookOpen,
   ArrowUpRight,
-  FileText
+  FileText,
+  Printer,
+  CheckCircle2,
+  Loader2
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity, logFinancialAudit } from '../lib/firebase';
 import { collection, onSnapshot, doc, runTransaction, setDoc } from 'firebase/firestore';
-import { Sale, Customer, Product, LineItem, getNormalizedItems, calculateTransactionTotals, calculateLineTotals } from '../types';
-import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveSystemAccount } from '../lib/postingEngine';
+import { Sale, Customer, Product, LineItem, getNormalizedItems, calculateTransactionTotals, calculateLineTotals, BarcodeType } from '../types';
+import { getNextPostingNumber, commitNextPostingNumber, ensureSystemAccountsExist, SYSTEM_ACCOUNTS, resolveSystemAccount, validateJournalBalance } from '../lib/postingEngine';
 import TaxInvoiceModal from './TaxInvoiceModal';
 import LineItemTable from './LineItemTable';
 import { usePermission, UserRole } from '../hooks/usePermission';
+import { BarcodeExecutionService } from '../services/barcode/execution/BarcodeExecutionService';
 
 export const INITIAL_SALES: Sale[] = [
   {
@@ -77,8 +84,226 @@ export const INITIAL_SALES: Sale[] = [
   }
 ];
 
+interface PrintableSaleItem {
+  productId: string;
+  productName: string;
+  sku: string;
+  barcodeValue: string;
+  barcodeType: BarcodeType;
+  quantityToPrint: number;
+  copies: number;
+  selected: boolean;
+}
+
 export default function SalesManagement({ userRole = 'admin' }: { userRole?: UserRole }) {
   const { permissions } = usePermission({ role: userRole });
+
+  // --- Barcode & Invoice Print States (Enterprise Sprint 11.1A Integration) ---
+  const [pendingBarcodeSale, setPendingBarcodeSale] = useState<Sale | null>(null);
+  const [showSalesPrintOfferModal, setShowSalesPrintOfferModal] = useState<boolean>(false);
+  const [showBarcodePrintDialog, setShowBarcodePrintDialog] = useState<boolean>(false);
+
+  const [printableItems, setPrintableItems] = useState<PrintableSaleItem[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<string>('STD_PRODUCT_38X25MM');
+  const [selectedPrinter, setSelectedPrinter] = useState<string>('MZ Thermal Printer ZD421');
+
+  const [isPrintingBatch, setIsPrintingBatch] = useState<boolean>(false);
+  const [batchProgress, setBatchProgress] = useState<{
+    current: number;
+    total: number;
+    statusMessage: string;
+    completed: number;
+    failed: number;
+    skipped: number;
+    startTime: number;
+    endTime?: number;
+    lastJobId?: string;
+  } | null>(null);
+
+  const cancelBatchRef = useRef<boolean>(false);
+
+  const openBarcodePrintForSale = (sale: Sale) => {
+    let itemsToProcess: any[] = [];
+    if (sale.items && sale.items.length > 0) {
+      itemsToProcess = sale.items;
+    } else {
+      itemsToProcess = [{
+        productId: sale.productId,
+        productName: sale.productName,
+        quantity: sale.quantity || 1,
+        productSnapshot: undefined
+      }];
+    }
+
+    const items: PrintableSaleItem[] = itemsToProcess.map((item) => {
+      const matchedProduct = products.find(p => p.id === item.productId) || item.productSnapshot;
+      const prodName = item.productName || matchedProduct?.name || sale.productName || 'Unknown Product';
+      const prodSku = matchedProduct?.sku || `SKU-${(item.productId || '000').substring(0, 6).toUpperCase()}`;
+      const prodBarcode = matchedProduct?.barcode || prodSku;
+      const prodBarcodeType: BarcodeType = (matchedProduct?.barcodeType as BarcodeType) || 'CODE128';
+      const qty = Math.max(1, Math.round(item.quantity || sale.quantity || 1));
+
+      return {
+        productId: item.productId || sale.productId,
+        productName: prodName,
+        sku: prodSku,
+        barcodeValue: prodBarcode,
+        barcodeType: prodBarcodeType,
+        quantityToPrint: qty,
+        copies: 1,
+        selected: true,
+      };
+    });
+
+    setPrintableItems(items);
+    setPendingBarcodeSale(sale);
+    setShowSalesPrintOfferModal(false);
+    setShowBarcodePrintDialog(true);
+    setBatchProgress(null);
+  };
+
+  const executeBatchPrintForSale = async () => {
+    const selectedItems = printableItems.filter(item => item.selected && item.quantityToPrint > 0);
+    if (selectedItems.length === 0) return;
+
+    setIsPrintingBatch(true);
+    cancelBatchRef.current = false;
+
+    const totalLabels = selectedItems.reduce((sum, item) => sum + item.quantityToPrint, 0);
+    const startTime = Date.now();
+
+    setBatchProgress({
+      current: 0,
+      total: totalLabels,
+      statusMessage: 'Preparing labels...',
+      completed: 0,
+      failed: 0,
+      skipped: 0,
+      startTime,
+    });
+
+    let labelCounter = 0;
+    let completed = 0;
+    let failed = 0;
+    let skipped = 0;
+    let lastJobId = '';
+
+    const service = BarcodeExecutionService.getInstance();
+
+    for (const item of selectedItems) {
+      for (let q = 1; q <= item.quantityToPrint; q++) {
+        if (cancelBatchRef.current) {
+          skipped = totalLabels - labelCounter;
+          setBatchProgress(prev => prev ? {
+            ...prev,
+            statusMessage: 'Batch Printing Cancelled by User',
+            skipped,
+            endTime: Date.now(),
+          } : null);
+          break;
+        }
+
+        labelCounter++;
+        setBatchProgress(prev => prev ? {
+          ...prev,
+          current: labelCounter,
+          statusMessage: `Printing label ${labelCounter} / ${totalLabels}: ${item.productName}`,
+        } : null);
+
+        try {
+          const matchedProd = products.find(p => p.id === item.productId || p.sku === item.sku);
+          const categoryVal = matchedProd?.category;
+          const brandVal = matchedProd?.brand;
+          const unitVal = matchedProd?.unitCode || matchedProd?.unitName || 'PCS';
+          const whId = pendingBarcodeSale?.warehouseId || 'WH-MAIN';
+          const whName = pendingBarcodeSale?.warehouseName || 'Main Warehouse';
+
+          const result = await service.executePrintBarcode({
+            productId: item.productId,
+            sku: item.sku,
+            productName: item.productName,
+            barcodeValue: item.barcodeValue,
+            barcodeType: item.barcodeType,
+            category: categoryVal,
+            categoryName: categoryVal,
+            brand: brandVal,
+            brandName: brandVal,
+            unit: unitVal,
+            unitName: unitVal,
+            warehouse: whId,
+            warehouseName: whName,
+            printerName: selectedPrinter || 'MZ Thermal Printer ZD421',
+            labelTemplateId: selectedTemplate || 'STD_PRODUCT_38X25MM',
+            copies: Math.max(1, item.copies),
+            labelWidthMm: 38,
+            labelHeightMm: 25,
+            rotation: 0,
+            printDensity: 15,
+            labelType: 'SALES_DISPATCH_LABEL',
+            originSource: 'SALES_DISPATCH',
+            context: {
+              product: {
+                id: item.productId,
+                name: item.productName,
+                sku: item.sku,
+                barcode: item.barcodeValue,
+                barcodeType: item.barcodeType,
+                category: categoryVal,
+                brand: brandVal,
+                unit: unitVal,
+              },
+              customer: pendingBarcodeSale?.customerSnapshot ? {
+                customerId: pendingBarcodeSale.customerSnapshot.id,
+                customerName: pendingBarcodeSale.customerSnapshot.name,
+              } : (pendingBarcodeSale?.customerName ? {
+                customerId: pendingBarcodeSale.customerId,
+                customerName: pendingBarcodeSale.customerName,
+              } : undefined),
+              salesOrder: pendingBarcodeSale ? {
+                soId: pendingBarcodeSale.id,
+                invoiceNumber: pendingBarcodeSale.invoiceNumber,
+                saleDate: pendingBarcodeSale.saleDate,
+              } : undefined,
+              warehouse: {
+                warehouseId: 'WH-MAIN',
+                warehouseName: 'Main Warehouse',
+              },
+              user: {
+                userName: auth.currentUser?.email || 'admin_01@nexus.erp',
+                role: userRole,
+              },
+            },
+          });
+
+          if (result.success) {
+            completed++;
+            lastJobId = result.jobId || lastJobId;
+          } else {
+            failed++;
+          }
+        } catch {
+          failed++;
+        }
+
+        setBatchProgress(prev => prev ? {
+          ...prev,
+          completed,
+          failed,
+          skipped,
+          lastJobId,
+        } : null);
+      }
+
+      if (cancelBatchRef.current) break;
+    }
+
+    setIsPrintingBatch(false);
+    setBatchProgress(prev => prev ? {
+      ...prev,
+      statusMessage: cancelBatchRef.current ? 'Batch Printing Cancelled' : 'Batch Printing Completed',
+      endTime: Date.now(),
+    } : null);
+  };
 
   // --- States ---
   const [sales, setSales] = useState<Sale[]>([]);
@@ -86,6 +311,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
   const [customerPayments, setCustomerPayments] = useState<any[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [coa, setCoa] = useState<any[]>([]);
+  const [companyProfile, setCompanyProfile] = useState<any>({ taxRatePercent: 15 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -296,6 +522,12 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [selectedSaleForInvoice, setSelectedSaleForInvoice] = useState<Sale | null>(null);
   const [voidConfirmationSale, setVoidConfirmationSale] = useState<Sale | null>(null);
+  const [blockedVoidInfo, setBlockedVoidInfo] = useState<{
+    sale: Sale;
+    invoiceAmount: number;
+    settledAmount: number;
+    outstandingBalance: number;
+  } | null>(null);
 
   // --- Transaction Voiding securely via Transactions (instead of deletions) ---
   const voidTransaction = async (saleId: string) => {
@@ -305,12 +537,62 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
       console.error("Sale not found for voiding:", saleId);
       return;
     }
+
+    // Check if customer payment(s) exist or settled amount > 0
+    const payInfo = creditSalesPaymentInfo.get(sale.id);
+    const invoiceAmount = sale.totalAmount || 0;
+    const settledAmount = payInfo
+      ? payInfo.amountPaid
+      : (sale.paymentType === 'Credit' ? Math.max(0, invoiceAmount - ((sale as any).dueAmount ?? (sale as any).remainingBalance ?? invoiceAmount)) : 0);
+    const outstandingBalance = payInfo
+      ? payInfo.remainingBalance
+      : (sale.paymentType === 'Credit' ? ((sale as any).dueAmount ?? (sale as any).remainingBalance ?? invoiceAmount) : 0);
+
+    const hasPayments = customerPayments.some(p => 
+      !isVoidStatus(p.status) && (p.saleId === sale.id || p.invoiceId === sale.id || (p.customerId === sale.customerId && sale.paymentType === 'Credit' && settledAmount > 0))
+    );
+
+    if (settledAmount > 0.001 || hasPayments) {
+      setBlockedVoidInfo({
+        sale,
+        invoiceAmount,
+        settledAmount,
+        outstandingBalance: Math.max(0, outstandingBalance)
+      });
+      return;
+    }
+
     setVoidConfirmationSale(sale);
   };
 
   const handleVoidSale = async (sale: Sale) => {
     console.log("handleVoidSale direct invocation for:", sale.id);
     setFeedback(null);
+
+    // Safeguard check for applied payments
+    const payInfo = creditSalesPaymentInfo.get(sale.id);
+    const invoiceAmount = sale.totalAmount || 0;
+    const settledAmount = payInfo
+      ? payInfo.amountPaid
+      : (sale.paymentType === 'Credit' ? Math.max(0, invoiceAmount - ((sale as any).dueAmount ?? (sale as any).remainingBalance ?? invoiceAmount)) : 0);
+    const outstandingBalance = payInfo
+      ? payInfo.remainingBalance
+      : (sale.paymentType === 'Credit' ? ((sale as any).dueAmount ?? (sale as any).remainingBalance ?? invoiceAmount) : 0);
+
+    const hasPayments = customerPayments.some(p => 
+      !isVoidStatus(p.status) && (p.saleId === sale.id || p.invoiceId === sale.id || (p.customerId === sale.customerId && sale.paymentType === 'Credit' && settledAmount > 0))
+    );
+
+    if (settledAmount > 0.001 || hasPayments) {
+      setBlockedVoidInfo({
+        sale,
+        invoiceAmount,
+        settledAmount,
+        outstandingBalance: Math.max(0, outstandingBalance)
+      });
+      return;
+    }
+
     try {
       const normalizedItems = getNormalizedItems(sale);
 
@@ -348,7 +630,20 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
         if (sale.paymentType === 'Cash') {
           const savedLedger = localStorage.getItem('inventory_cash_ledger') || '[]';
           let ledgerList = JSON.parse(savedLedger);
-          ledgerList = ledgerList.map((l: any) => l.id === `cl-${sale.id}` ? { ...l, status: 'VOID' } : l);
+          const revCashEntry = {
+            id: `cl-rev-${sale.id}`,
+            type: 'outflow',
+            source: 'sale',
+            amount: sale.totalAmount ?? 0,
+            referenceId: sale.id,
+            description: `Cash Reversal for Voided Sale #${sale.invoiceNumber || sale.id}`,
+            timestamp: new Date().toISOString(),
+            status: 'active',
+            isReversal: true,
+            reversesCashEntryId: `cl-${sale.id}`,
+            postingStatus: 'POSTED'
+          };
+          ledgerList.push(revCashEntry);
           localStorage.setItem('inventory_cash_ledger', JSON.stringify(ledgerList));
         }
 
@@ -402,9 +697,23 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
         const saleRef = doc(db, 'sales', sale.id);
         transaction.update(saleRef, { status: 'VOID' });
 
+        // --- CASH LEDGER REVERSAL ---
         if (sale.paymentType === 'Cash') {
-          const cashLedgerRef = doc(db, 'cashLedger', `cl-${sale.id}`);
-          transaction.update(cashLedgerRef, { status: 'VOID' });
+          const revCashId = `cl-rev-${sale.id}`;
+          const revCashRef = doc(db, 'cashLedger', revCashId);
+          transaction.set(revCashRef, {
+            id: revCashId,
+            type: 'outflow',
+            source: 'sale',
+            amount: sale.totalAmount ?? 0,
+            referenceId: sale.id,
+            description: `Cash Reversal for Voided Sale #${sale.invoiceNumber || sale.id}`,
+            timestamp: new Date().toISOString(),
+            status: 'active',
+            isReversal: true,
+            reversesCashEntryId: `cl-${sale.id}`,
+            postingStatus: 'POSTED'
+          });
         }
 
         // --- REVERSAL LEDGER POSTING (JV) ---
@@ -498,14 +807,22 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           });
         }
 
-        // Validate double entry
-        const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
-        const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
-        if (Math.abs(totalDebits - totalCredits) > 0.01) {
-          throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
-        }
+        // Mandatory Enterprise Journal Integrity Validation (Phase X)
+        validateJournalBalance(lines);
 
         const entryId = `le-void-sale-${sale.id}`;
+        const origEntryId = `le-sale-${sale.id}`;
+
+        // Update metadata on original entry
+        const origLedgerRef = doc(db, 'ledgerEntries', origEntryId);
+        transaction.set(origLedgerRef, {
+          isVoided: true,
+          voidedAt: new Date().toISOString(),
+          voidedBy: auth.currentUser?.email || 'admin_01@nexus.erp',
+          voidReason: 'Sales transaction voided',
+          reversalEntryId: entryId
+        }, { merge: true });
+
         const ledgerEntry: any = {
           id: entryId,
           postingNumber: jvPostingNumber,
@@ -514,7 +831,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           fiscalYear: year,
           accountingPeriod,
           sourceModule: 'SALES',
-          postingStatus: 'REVERSED',
+          postingStatus: 'POSTED',
           currency: 'USD',
           exchangeRate: 1,
           baseCurrencyCode: 'USD',
@@ -526,7 +843,11 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           createdAt: new Date().toISOString(),
           createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
           lines,
-          originalEntryId: `le-sale-${sale.id}`
+          originalEntryId: origEntryId,
+          isReversal: true,
+          reversesEntryId: origEntryId,
+          customerId: sale.customerId,
+          customerName: sale.customerName
         };
 
         const ledgerRef = doc(db, 'ledgerEntries', entryId);
@@ -565,13 +886,17 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
       });
     } catch (err: any) {
       console.error("Void operations abort:", err);
-      let errMsg = 'Failed to void the sales transaction.';
-      try {
-        handleFirestoreError(err, OperationType.UPDATE, `sales/${sale.id}`);
-      } catch (dbErr: any) {
-        errMsg = dbErr.message;
+      let errMsg = err.message || 'Failed to void the sales transaction.';
+      if (err.message && err.message.includes("Accounting validation failed")) {
+        setFeedback({ message: err.message, type: 'error' });
+      } else {
+        try {
+          handleFirestoreError(err, OperationType.UPDATE, `sales/${sale.id}`);
+        } catch (dbErr: any) {
+          errMsg = dbErr.message;
+        }
+        setFeedback({ message: `Access Abort: ${errMsg}`, type: 'error' });
       }
-      setFeedback({ message: `Access Abort: ${errMsg}`, type: 'error' });
     }
   };
 
@@ -690,12 +1015,26 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
       console.error("COA sync error in SalesManagement", error);
     });
 
+    // 6. Sync Business Profile
+    const unsubCompany = onSnapshot(doc(db, 'businessProfile', 'config'), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setCompanyProfile(data);
+        if (typeof data.taxRatePercent === 'number') {
+          setFormData(prev => ({ ...prev, taxRatePercent: String(data.taxRatePercent) }));
+        }
+      }
+    }, (err) => {
+      console.error("Company profile sync error in SalesManagement", err);
+    });
+
     return () => {
       unsubSales();
       unsubCustomers();
       unsubProducts();
       unsubPayments();
       unsubCOA();
+      unsubCompany();
     };
   }, []);
 
@@ -804,12 +1143,13 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
 
   // --- Form Modal Toggle ---
   const openForm = () => {
+    const rate = companyProfile?.taxRatePercent ?? 15;
     setFormData({
       customerId: '',
       productId: '',
       quantity: '1',
       sellingPrice: '',
-      taxRatePercent: '15',
+      taxRatePercent: String(rate),
       paymentType: 'Cash',
       saleDate: new Date().toISOString().split('T')[0]
     });
@@ -820,7 +1160,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
         quantity: 1,
         unitPrice: 0,
         subtotal: 0,
-        taxRatePercent: 15,
+        taxRatePercent: rate,
         taxAmount: 0,
         totalAmount: 0,
       }
@@ -841,7 +1181,21 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
     }
 
     const taxRatePercent = parseFloat(formData.taxRatePercent) || 0;
-    const totalsSummary = calculateTransactionTotals(lineItems);
+
+    // PHASE 1: Recalculate ALL Line Items using CURRENT formData.taxRatePercent
+    const freshLineItems: LineItem[] = lineItems.map((item) => {
+      const lineTotals = calculateLineTotals(item.quantity, item.unitPrice, taxRatePercent);
+      return {
+        ...item,
+        subtotal: lineTotals.subtotal,
+        taxRatePercent,
+        taxAmount: lineTotals.taxAmount,
+        totalAmount: lineTotals.totalAmount,
+      };
+    });
+
+    // PHASE 2: Single Source of Truth - derive ONE final totals object
+    const totalsSummary = calculateTransactionTotals(freshLineItems);
     const subtotal = totalsSummary.subtotal;
     const taxAmount = totalsSummary.taxAmount;
     const totalAmount = totalsSummary.totalAmount;
@@ -862,14 +1216,14 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
 
         // First deduct stock for all items
         const offlineAggregated: Record<string, number> = {};
-        lineItems.forEach(item => {
+        freshLineItems.forEach(item => {
           offlineAggregated[item.productId] = (offlineAggregated[item.productId] || 0) + item.quantity;
         });
 
         for (const [prodId, reqQty] of Object.entries(offlineAggregated)) {
           const testProductIndex = productsList.findIndex(p => p.id === prodId);
           if (testProductIndex === -1) {
-            const firstItem = lineItems.find(item => item.productId === prodId);
+            const firstItem = freshLineItems.find(item => item.productId === prodId);
             throw new Error(`Product "${firstItem?.productName || 'Unknown'}" no longer exists locally.`);
           }
           const prodData = productsList[testProductIndex];
@@ -887,6 +1241,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
         const customerSnapshot = {
           id: chosenCust.id,
           name: chosenCust.name,
+          nameArabic: chosenCust.nameArabic || "",
           phone: chosenCust.phone,
           address: chosenCust.address,
           customerType: chosenCust.customerType,
@@ -896,17 +1251,18 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
 
         // Create company snapshot
         let companySnapshot = {
-          name: "Apex Global Supply Ltd.",
-          address: "740 Industrial Boulevard, Suite C, Austin, TX 78701",
-          phone: "+1 (512) 555-0193",
-          email: "billing@apexsupply.com",
-          website: "www.apexsupply.com",
-          taxRegistrationId: "VAT-US948301140B",
-          taxRatePercent: 15,
-          tradeName: "Apex Global Supply",
-          ownerName: "Apex Global LLC",
-          crNumber: "CR-1010349283",
-          logo: ""
+          name: companyProfile?.name || companyProfile?.companyName || "Apex Global Supply Ltd.",
+          companyNameArabic: companyProfile?.companyNameArabic || "",
+          address: companyProfile?.address || "740 Industrial Boulevard, Suite C, Austin, TX 78701",
+          phone: companyProfile?.phone || "+1 (512) 555-0193",
+          email: companyProfile?.email || "billing@apexsupply.com",
+          website: companyProfile?.website || "www.apexsupply.com",
+          taxRegistrationId: companyProfile?.taxRegistrationId || "VAT-US948301140B",
+          taxRatePercent: companyProfile?.taxRatePercent ?? 15,
+          tradeName: companyProfile?.tradeName || "Apex Global Supply",
+          ownerName: companyProfile?.ownerName || "Apex Global LLC",
+          crNumber: companyProfile?.crNumber || "CR-1010349283",
+          logo: companyProfile?.logo || ""
         };
 
         const savedCompany = localStorage.getItem('invoice_company_profile');
@@ -924,24 +1280,38 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
         const invoiceNumber = `INV-2026-${indexPart.length > 5 ? indexPart.substring(indexPart.length - 5) : indexPart}`;
 
         // Create items array with snap values and product snapshots
-        const itemsWithSnap = lineItems.map(item => {
+        const itemsWithSnap = freshLineItems.map(item => {
+          const lineTotals = calculateLineTotals(item.quantity, item.unitPrice, taxRatePercent);
           const prod = productsList.find(p => p.id === item.productId);
           const purchasePriceAtSale = prod?.purchasePrice ?? 0;
           const costOfGoodsSold = purchasePriceAtSale * item.quantity;
-          const grossProfit = item.subtotal - costOfGoodsSold;
+          const grossProfit = lineTotals.subtotal - costOfGoodsSold;
+          const productNameArabic = item.productNameArabic || prod?.nameArabic || "";
           const productSnapshot = prod ? {
             id: prod.id,
             name: prod.name,
+            nameArabic: prod.nameArabic || "",
             sku: prod.sku,
             category: prod.category,
-            description: prod.description || ""
+            description: prod.description || "",
+            unitId: prod.unitId,
+            unitCode: prod.unitCode,
+            unitName: prod.unitName
           } : undefined;
 
           return {
             ...item,
+            productNameArabic,
+            subtotal: lineTotals.subtotal,
+            taxRatePercent,
+            taxAmount: lineTotals.taxAmount,
+            totalAmount: lineTotals.totalAmount,
             purchasePriceAtSale,
             costOfGoodsSold,
             grossProfit,
+            unitId: item.unitId || prod?.unitId,
+            unitCode: item.unitCode || prod?.unitCode,
+            unitName: item.unitName || prod?.unitName,
             productSnapshot
           };
         });
@@ -953,11 +1323,14 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           id: saleId,
           customerId: chosenCust.id,
           customerName: chosenCust.name,
-          productId: lineItems[0].productId,
-          productName: lineItems.length > 1 ? `${lineItems[0].productName} + ${lineItems.length - 1} items` : lineItems[0].productName,
-          quantity: lineItems.reduce((sum, item) => sum + item.quantity, 0),
-          sellingPrice: lineItems[0].unitPrice,
-          unitPrice: lineItems[0].unitPrice,
+          customerNameArabic: chosenCust.nameArabic || "",
+          companyNameArabic: companySnapshot.companyNameArabic || "",
+          productId: freshLineItems[0].productId,
+          productName: freshLineItems.length > 1 ? `${freshLineItems[0].productName} + ${freshLineItems.length - 1} items` : freshLineItems[0].productName,
+          productNameArabic: itemsWithSnap[0]?.productNameArabic || "",
+          quantity: freshLineItems.reduce((sum, item) => sum + item.quantity, 0),
+          sellingPrice: freshLineItems[0].unitPrice,
+          unitPrice: freshLineItems[0].unitPrice,
           subtotal: subtotal,
           taxRatePercent: taxRatePercent,
           taxAmount: taxAmount,
@@ -966,9 +1339,12 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           saleDate: new Date(formData.saleDate).toISOString(),
           timestamp: new Date(formData.saleDate).toISOString(),
           productPurchasePriceAtSale: itemsWithSnap[0]?.purchasePriceAtSale ?? 0,
-          productSellingPriceAtSale: lineItems[0].unitPrice,
+          productSellingPriceAtSale: freshLineItems[0].unitPrice,
           costOfGoodsSold: totalCOGS,
           grossProfit: totalGrossProfit,
+          unitId: freshLineItems[0].unitId || itemsWithSnap[0]?.unitId,
+          unitCode: freshLineItems[0].unitCode || itemsWithSnap[0]?.unitCode,
+          unitName: freshLineItems[0].unitName || itemsWithSnap[0]?.unitName,
           items: itemsWithSnap,
           customerSnapshot,
           companySnapshot,
@@ -1014,29 +1390,34 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
         setCustomersState(customersList);
 
         setFeedback({
-          message: `Successfully logged offline multi-line sale of $${totalAmount.toFixed(2)} to "${chosenCust.name}".`,
+          message: `Successfully logged offline multi-line sale of ${formatCurrency(totalAmount)} to "${chosenCust.name}".`,
           type: 'success'
         });
         setIsFormOpen(false);
         setIsSaving(false);
+        setPendingBarcodeSale(finalizedSaleWithSnapshot);
+        setShowSalesPrintOfferModal(true);
         return;
       }
+
+      let completedSaleRecord: Sale | null = null;
 
       // Execute Atomic Database Updates
       await runTransaction(db, async (transaction) => {
         // Retrieve company profile configuration live inside the transaction (READ PHASE - must occur before any writes)
         let companySnapshot = {
-          name: "Apex Global Supply Ltd.",
-          address: "740 Industrial Boulevard, Suite C, Austin, TX 78701",
-          phone: "+1 (512) 555-0193",
-          email: "billing@apexsupply.com",
-          website: "www.apexsupply.com",
-          taxRegistrationId: "VAT-US948301140B",
-          taxRatePercent: 15,
-          tradeName: "Apex Global Supply",
-          ownerName: "Apex Global LLC",
-          crNumber: "CR-1010349283",
-          logo: ""
+          name: companyProfile?.name || companyProfile?.companyName || "Apex Global Supply Ltd.",
+          companyNameArabic: companyProfile?.companyNameArabic || "",
+          address: companyProfile?.address || "740 Industrial Boulevard, Suite C, Austin, TX 78701",
+          phone: companyProfile?.phone || "+1 (512) 555-0193",
+          email: companyProfile?.email || "billing@apexsupply.com",
+          website: companyProfile?.website || "www.apexsupply.com",
+          taxRegistrationId: companyProfile?.taxRegistrationId || "VAT-US948301140B",
+          taxRatePercent: companyProfile?.taxRatePercent ?? 15,
+          tradeName: companyProfile?.tradeName || "Apex Global Supply",
+          ownerName: companyProfile?.ownerName || "Apex Global LLC",
+          crNumber: companyProfile?.crNumber || "CR-1010349283",
+          logo: companyProfile?.logo || ""
         };
 
         const companyConfigRef = doc(db, 'businessProfile', 'config');
@@ -1045,6 +1426,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           const bizData = companyConfigSnap.data();
           companySnapshot = {
             name: bizData.name || companySnapshot.name,
+            companyNameArabic: bizData.companyNameArabic || bizData.nameArabic || companySnapshot.companyNameArabic || "",
             address: bizData.address || companySnapshot.address,
             phone: bizData.phone || companySnapshot.phone,
             email: bizData.email || companySnapshot.email,
@@ -1071,7 +1453,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
         // A. Verify and read Product stock live in transaction
         // Aggregate all quantities by productId first to enforce a product-level aggregated quantity map
         const aggregatedQuantities: Record<string, number> = {};
-        lineItems.forEach(item => {
+        freshLineItems.forEach(item => {
           aggregatedQuantities[item.productId] = (aggregatedQuantities[item.productId] || 0) + item.quantity;
         });
 
@@ -1097,7 +1479,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           const totalReqQty = aggregatedQuantities[prodId];
 
           if (!snap.exists()) {
-            const firstItem = lineItems.find(item => item.productId === prodId);
+            const firstItem = freshLineItems.find(item => item.productId === prodId);
             throw new Error(`Product "${firstItem?.productName || 'Unknown'}" no longer exists.`);
           }
           const productData = snap.data() as Product;
@@ -1163,6 +1545,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
         const customerSnapshot = {
           id: chosenCust.id,
           name: chosenCust.name,
+          nameArabic: chosenCust.nameArabic || "",
           phone: chosenCust.phone,
           address: chosenCust.address,
           customerType: chosenCust.customerType,
@@ -1172,26 +1555,40 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
 
         // Utilizing sequential transaction-safe invoiceNumber allocated from posting_sequences during READ phase
 
-        const itemsWithSnap = lineItems.map((item) => {
+        const itemsWithSnap = freshLineItems.map((item) => {
+          const lineTotals = calculateLineTotals(item.quantity, item.unitPrice, taxRatePercent);
           const pPrice = uniqueProductUpdates[item.productId].purchasePrice;
           const costOfGoodsSold = pPrice * item.quantity;
-          const grossProfit = item.subtotal - costOfGoodsSold;
+          const grossProfit = lineTotals.subtotal - costOfGoodsSold;
           
           const snap = productSnapsMap[item.productId];
           const productData = snap?.exists() ? snap.data() as Product : null;
+          const productNameArabic = item.productNameArabic || productData?.nameArabic || "";
           const productSnapshot = productData ? {
             id: productData.id || item.productId,
             name: productData.name,
+            nameArabic: productData.nameArabic || "",
             sku: productData.sku,
             category: productData.category,
-            description: productData.description || ""
+            description: productData.description || "",
+            unitId: productData.unitId,
+            unitCode: productData.unitCode,
+            unitName: productData.unitName
           } : undefined;
 
           return {
             ...item,
+            productNameArabic,
+            subtotal: lineTotals.subtotal,
+            taxRatePercent,
+            taxAmount: lineTotals.taxAmount,
+            totalAmount: lineTotals.totalAmount,
             purchasePriceAtSale: pPrice,
             costOfGoodsSold,
             grossProfit,
+            unitId: item.unitId || productData?.unitId,
+            unitCode: item.unitCode || productData?.unitCode,
+            unitName: item.unitName || productData?.unitName,
             productSnapshot
           };
         });
@@ -1204,11 +1601,14 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           id: saleId,
           customerId: chosenCust.id,
           customerName: chosenCust.name,
-          productId: lineItems[0].productId,
-          productName: lineItems.length > 1 ? `${lineItems[0].productName} + ${lineItems.length - 1} items` : lineItems[0].productName,
-          quantity: lineItems.reduce((sum, item) => sum + item.quantity, 0),
-          sellingPrice: lineItems[0].unitPrice,
-          unitPrice: lineItems[0].unitPrice,
+          customerNameArabic: chosenCust.nameArabic || "",
+          companyNameArabic: companySnapshot.companyNameArabic || "",
+          productId: freshLineItems[0].productId,
+          productName: freshLineItems.length > 1 ? `${freshLineItems[0].productName} + ${freshLineItems.length - 1} items` : freshLineItems[0].productName,
+          productNameArabic: itemsWithSnap[0]?.productNameArabic || "",
+          quantity: freshLineItems.reduce((sum, item) => sum + item.quantity, 0),
+          sellingPrice: freshLineItems[0].unitPrice,
+          unitPrice: freshLineItems[0].unitPrice,
           subtotal: subtotal,
           taxRatePercent: taxRatePercent,
           taxAmount: taxAmount,
@@ -1217,9 +1617,12 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           saleDate: new Date(formData.saleDate).toISOString(),
           timestamp: new Date(formData.saleDate).toISOString(),
           productPurchasePriceAtSale: itemsWithSnap[0]?.purchasePriceAtSale ?? 0,
-          productSellingPriceAtSale: lineItems[0].unitPrice,
+          productSellingPriceAtSale: freshLineItems[0].unitPrice,
           costOfGoodsSold: totalCOGS,
           grossProfit: totalGrossProfit,
+          unitId: freshLineItems[0].unitId || itemsWithSnap[0]?.unitId,
+          unitCode: freshLineItems[0].unitCode || itemsWithSnap[0]?.unitCode,
+          unitName: freshLineItems[0].unitName || itemsWithSnap[0]?.unitName,
           items: itemsWithSnap,
           customerSnapshot,
           companySnapshot,
@@ -1228,6 +1631,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
 
         const saleRef = doc(db, 'sales', saleId);
         transaction.set(saleRef, finalizedSaleWithSnapshot);
+        completedSaleRecord = finalizedSaleWithSnapshot;
 
         if (formData.paymentType === 'Cash') {
           const cashLedgerId = `cl-${saleId}`;
@@ -1238,7 +1642,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
             source: 'sale',
             amount: totalAmount,
             referenceId: saleId,
-            description: `Cash sale of ${lineItems.length} items to "${chosenCust.name}"`,
+            description: `Cash sale of ${freshLineItems.length} items to "${chosenCust.name}"`,
             timestamp: new Date(formData.saleDate).toISOString()
           });
         }
@@ -1246,7 +1650,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
         // --- AUTOMATIC LEDGER POSTING (SV) ---
         const periodMonth = String(new Date(formData.saleDate).getMonth() + 1).padStart(2, '0');
         const accountingPeriod = `${year}-${periodMonth}`;
-        const narration = `${formData.paymentType} Sale of ${lineItems.length} items to "${chosenCust.name}". Invoice #${invoiceNumber}`;
+        const narration = `${formData.paymentType} Sale of ${freshLineItems.length} items to "${chosenCust.name}". Invoice #${invoiceNumber}`;
 
         const lines: any[] = [];
 
@@ -1330,12 +1734,23 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           });
         }
 
-        // Validate double entry
-        const totalDebits = lines.reduce((sum, l) => sum + l.debit, 0);
-        const totalCredits = lines.reduce((sum, l) => sum + l.credit, 0);
-        if (Math.abs(totalDebits - totalCredits) > 0.01) {
-          throw new Error(`Double-entry unbalanced error: Total Debits ($${totalDebits}) does not match Total Credits ($${totalCredits}).`);
+        // Phase 3: General Ledger Validation - verify AR (or Cash) Debit == Revenue Credit + VAT Credit
+        const mainDebitLine = lines.find(l => l.accountId === (formData.paymentType === 'Cash' ? cashAcc.id : arAcc.id));
+        const revLine = lines.find(l => l.accountId === salesRevenueAcc.id);
+        const vatLine = lines.find(l => l.accountId === outputVatAcc.id);
+
+        const debitVal = mainDebitLine ? mainDebitLine.debit : 0;
+        const revVal = revLine ? revLine.credit : 0;
+        const vatVal = vatLine ? vatLine.credit : 0;
+
+        if (Math.abs(debitVal - (revVal + vatVal)) >= 0.01) {
+          throw new Error(
+            `Accounting validation failed: Accounts Receivable / Cash Debit (${debitVal}) does not equal Revenue Credit (${revVal}) + VAT Credit (${vatVal}).`
+          );
         }
+
+        // Mandatory Enterprise Journal Integrity Validation (Phase X)
+        validateJournalBalance(lines);
 
         const entryId = `le-sale-${saleId}`;
         const ledgerEntry: any = {
@@ -1357,7 +1772,9 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
           postingDate: new Date(formData.saleDate).toISOString(),
           createdAt: new Date().toISOString(),
           createdBy: auth.currentUser?.email || 'admin_01@nexus.erp',
-          lines
+          lines,
+          customerId: chosenCust.id,
+          customerName: chosenCust.name
         };
 
         const ledgerRef = doc(db, 'ledgerEntries', entryId);
@@ -1409,7 +1826,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
       // Log activity to the Logs collection
       await logSystemActivity(
         "Sale completed",
-        `Completed multi-line sale of ${lineItems.length} items to "${chosenCust.name}" (Subtotal: $${subtotal.toFixed(2)}, VAT Applied: $${taxAmount.toFixed(2)}, Total: $${totalAmount.toFixed(2)}, Payment: ${formData.paymentType})`
+        `Completed multi-line sale of ${lineItems.length} items to "${chosenCust.name}" (Subtotal: ${formatCurrency(subtotal)}, VAT Applied: ${formatCurrency(taxAmount)}, Total: ${formatCurrency(totalAmount)}, Payment: ${formData.paymentType})`
       );
       
       for (const item of lineItems) {
@@ -1423,19 +1840,27 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
       }
 
       setFeedback({
-        message: `Atomically recorded multi-line sale of ${lineItems.length} items to "${chosenCust.name}". Net amount with VAT: $${totalAmount.toFixed(2)}`,
+        message: `Atomically recorded multi-line sale of ${lineItems.length} items to "${chosenCust.name}". Net amount with VAT: ${formatCurrency(totalAmount)}`,
         type: 'success'
       });
       setIsFormOpen(false);
+      if (completedSaleRecord) {
+        setPendingBarcodeSale(completedSaleRecord);
+        setShowSalesPrintOfferModal(true);
+      }
     } catch (err: any) {
       console.error("Save sale transaction error:", err);
-      let errMsg = 'Failed to post sale transaction.';
-      try {
-        handleFirestoreError(err, OperationType.WRITE, `sales/${saleId}`);
-      } catch (dbErr: any) {
-        errMsg = dbErr.message;
+      let errMsg = err.message || 'Failed to post sale transaction.';
+      if (err.message && err.message.includes("Accounting validation failed")) {
+        setFeedback({ message: err.message, type: 'error' });
+      } else {
+        try {
+          handleFirestoreError(err, OperationType.WRITE, `sales/${saleId}`);
+        } catch (dbErr: any) {
+          errMsg = dbErr.message;
+        }
+        setFeedback({ message: `Database Abort: ${errMsg}`, type: 'error' });
       }
-      setFeedback({ message: `Database Abort: ${errMsg}`, type: 'error' });
     } finally {
       setIsSaving(false);
     }
@@ -1492,61 +1917,55 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
       </AnimatePresence>
 
       {/* THREE BENTO METRICS FOR SALES INTELLIGENCE */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:gap-6 sm:grid-cols-3">
         {/* Total revenue */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Net Sales Revenue</span>
-              <TrendingUp className="h-4 w-4 text-emerald-500" />
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Net Sales Revenue</span>
+              <TrendingUp className="h-4 w-4 text-emerald-500 shrink-0" />
             </div>
-            <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-              ${totalSalesRevenue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </p>
+            <ResponsiveKPIValue value={formatCurrency(totalSalesRevenue)} className="text-slate-900" />
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center gap-1.5 justify-between">
-            <span className="font-medium">Combined registers: {totalSalesCount} entries</span>
-            <span className="text-indigo-600 font-bold">{totalItemsSold} stock units distributed</span>
+            <span className="font-medium truncate">Combined: {totalSalesCount} entries</span>
+            <span className="text-indigo-600 font-bold shrink-0">{totalItemsSold} units</span>
           </div>
         </div>
 
         {/* Cash registers ledger breakdown */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Cash Receipts</span>
-              <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-emerald-50 border border-emerald-100 text-emerald-700 uppercase">
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Cash Receipts</span>
+              <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-emerald-50 border border-emerald-100 text-emerald-700 uppercase shrink-0">
                 Liquidity
               </span>
             </div>
-            <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-              ${cashSalesTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </p>
+            <ResponsiveKPIValue value={formatCurrency(cashSalesTotal)} className="text-slate-900" />
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center justify-between">
-            <span>Instant settled trades</span>
-            <span className="font-semibold text-slate-650 text-slate-700">
+            <span className="truncate">Instant settled trades</span>
+            <span className="font-semibold text-slate-700 shrink-0">
               {totalSalesRevenue > 0 ? Math.round((cashSalesTotal / totalSalesRevenue) * 100) : 0}% of net
             </span>
           </div>
         </div>
 
         {/* Credit registries outstanding billing */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Total Credit Sales</span>
-              <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-blue-50 border border-blue-100 text-blue-700 uppercase">
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Total Credit Sales</span>
+              <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-blue-50 border border-blue-100 text-blue-700 uppercase shrink-0">
                 Receivables
               </span>
             </div>
-            <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">
-              ${creditSalesTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </p>
+            <ResponsiveKPIValue value={formatCurrency(creditSalesTotal)} className="text-slate-900" />
           </div>
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex justify-between items-center">
-            <span>Customer due invoice ledger</span>
-            <span className="font-semibold text-amber-700">
+            <span className="truncate">Customer due invoice ledger</span>
+            <span className="font-semibold text-amber-700 shrink-0">
               {totalSalesRevenue > 0 ? Math.round((creditSalesTotal / totalSalesRevenue) * 105) / 1.05 : 0}% of net
             </span>
           </div>
@@ -1736,14 +2155,18 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                               {/* Customer & Product */}
                               <td className="py-4 px-5 whitespace-nowrap">
                                 <div className="font-extrabold text-slate-900 capitalize">{sale.customerName}</div>
-                                <div className="text-[11px] text-slate-500 font-normal flex items-center gap-1 mt-0.5">
+                                <div className="text-[11px] text-slate-500 font-normal flex items-center gap-1.5 mt-0.5">
                                   <span>{sale.productName}</span>
+                                  <UnitBadge unitCode={sale.unitCode} unitName={sale.unitName} size="sm" />
                                 </div>
                               </td>
 
                               {/* Qty & Unit Price */}
                               <td className="py-4 px-5 font-mono whitespace-nowrap text-slate-700">
-                                <span className="font-bold text-slate-900">x{sale.quantity}</span> @ ${sale.sellingPrice.toFixed(2)}
+                                <span className="font-bold text-slate-900 bg-slate-100/80 px-2 py-0.5 rounded-md border border-slate-200/60 mr-1.5">
+                                  {formatQuantity(sale.quantity, sale.unitCode)}
+                                </span>
+                                @ {formatUnitPrice(sale.sellingPrice, sale.unitCode)}
                               </td>
 
                               {/* Settlement */}
@@ -1791,8 +2214,8 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                                       ></div>
                                     </div>
                                     <div className="flex justify-between font-mono text-[9px] text-slate-400">
-                                      <span>Paid: ${creditInfo.amountPaid.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
-                                      <span>Bal: ${creditInfo.remainingBalance.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                                      <span>Paid: {formatCurrency(creditInfo.amountPaid)}</span>
+                                      <span>Bal: {formatCurrency(creditInfo.remainingBalance)}</span>
                                     </div>
                                   </div>
                                 ) : (
@@ -1805,7 +2228,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
 
                               {/* Total Price */}
                               <td className="py-4 px-5 text-right font-black font-mono text-sm text-indigo-600 whitespace-nowrap">
-                                ${sale.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                {formatCurrency(sale.totalAmount)}
                               </td>
 
                               {/* Actions */}
@@ -1818,6 +2241,15 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                                   >
                                     <FileText className="h-3.5 w-3.5" />
                                     <span>Tax Invoice</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => openBarcodePrintForSale(sale)}
+                                    className="inline-flex items-center gap-1 rounded-xl border border-indigo-200 bg-indigo-50/50 hover:bg-indigo-100 px-3 py-1.5 text-[11px] font-bold text-indigo-700 hover:text-indigo-800 transition cursor-pointer"
+                                    title="Print Barcode Labels for sold items"
+                                  >
+                                    <Tag className="h-3.5 w-3.5" />
+                                    <span>Barcode Labels</span>
                                   </button>
                                   {isVoided ? (
                                     <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 border border-slate-200 px-2.5 py-1 text-[9px] font-mono font-bold text-slate-400 select-none">
@@ -1962,7 +2394,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                               <option value="">-- Choose Customer profile --</option>
                               {customers.filter(cust => !isInactiveStatus(cust.status)).map((cust) => (
                                 <option key={cust.id} value={cust.id}>
-                                  {cust.name} ({cust.customerType} - Due: ${cust.dueBalance.toFixed(2)})
+                                  {cust.name} ({cust.customerType} - Due: {formatCurrency(cust.dueBalance)})
                                 </option>
                               ))}
                             </select>
@@ -2085,19 +2517,19 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                                 Total Line Items ({lineItems.length})
                               </span>
                               <span className="text-slate-800 font-mono font-bold">
-                                ${totalsSummary.subtotal.toFixed(2)}
+                                {formatCurrency(totalsSummary.subtotal)}
                               </span>
                             </div>
                             <div className="flex items-center justify-between font-medium text-[11px] text-slate-500 border-t border-dashed border-slate-200/60 pt-1.5">
                               <span>Total Sales Tax / VAT ({parseFloat(formData.taxRatePercent) || 0}%)</span>
                               <span className="font-mono font-semibold">
-                                ${totalsSummary.taxAmount.toFixed(2)}
+                                {formatCurrency(totalsSummary.taxAmount)}
                               </span>
                             </div>
                             <div className="flex items-center justify-between font-bold text-indigo-600 pt-1.5 border-t border-slate-200">
                               <span>Total Invoice Due (Locked)</span>
                               <span className="font-mono font-extrabold text-sm">
-                                ${totalsSummary.totalAmount.toFixed(2)}
+                                {formatCurrency(totalsSummary.totalAmount)}
                               </span>
                             </div>
                           </div>
@@ -2189,7 +2621,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                                   </span>
                                   <div className="flex justify-between items-center text-[10px] font-semibold text-slate-500 mt-1.5 border-t border-slate-100 pt-1.5">
                                     <span>Catalog Selling Price:</span>
-                                    <span className="font-bold text-slate-900 font-mono">${activeProd.sellingPrice.toFixed(2)}</span>
+                                    <span className="font-bold text-slate-900 font-mono">{formatCurrency(activeProd.sellingPrice)}</span>
                                   </div>
                                 </div>
 
@@ -2204,7 +2636,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                                     className="mx-auto block px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-sm rounded-xl transition-all shadow-xs hover:shadow-md cursor-pointer group animate-pulse"
                                     title="Click to apply to Unit Price fields"
                                   >
-                                    ${suggestion.price.toFixed(2)}
+                                    {formatCurrency(suggestion.price)}
                                     <span className="block text-[8px] font-semibold opacity-85 uppercase tracking-widest mt-0.5 group-hover:scale-105 transition-transform">
                                       {suggestion.source === 'customer_average' && '✨ Avg price paid by this customer'}
                                       {suggestion.source === 'general_last' && '✨ Last general sold price'}
@@ -2232,7 +2664,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                                           <span className="text-slate-500 font-medium">
                                             {new Date(pt.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
                                           </span>
-                                          <span className="font-mono font-black text-slate-800">${pt.price.toFixed(2)}</span>
+                                          <span className="font-mono font-black text-slate-800">{formatCurrency(pt.price)}</span>
                                         </div>
                                       ))}
                                     </div>
@@ -2250,15 +2682,15 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                                     <div className="bg-slate-100 border border-slate-200 rounded-2xl p-3 grid grid-cols-3 text-center gap-1.5 shadow-4xs">
                                       <div>
                                         <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider block">Min Paid</span>
-                                        <span className="font-mono text-[10px] font-bold text-slate-700">${minPrice.toFixed(2)}</span>
+                                        <span className="font-mono text-[10px] font-bold text-slate-700">{formatCurrency(minPrice)}</span>
                                       </div>
                                       <div className="border-x border-slate-200">
                                         <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider block">Average</span>
-                                        <span className="font-mono text-[10px] font-bold text-slate-800">${avgPrice.toFixed(2)}</span>
+                                        <span className="font-mono text-[10px] font-bold text-slate-800">{formatCurrency(avgPrice)}</span>
                                       </div>
                                       <div>
                                         <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider block">Max Paid</span>
-                                        <span className="font-mono text-[10px] font-bold text-slate-700">${maxPrice.toFixed(2)}</span>
+                                        <span className="font-mono text-[10px] font-bold text-slate-700">{formatCurrency(maxPrice)}</span>
                                       </div>
                                     </div>
                                   );
@@ -2281,7 +2713,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                                             <span className="font-bold text-slate-600 block truncate">{pt.customerName}</span>
                                             <span className="text-[9px] text-slate-400">{new Date(pt.date).toLocaleDateString()}</span>
                                           </div>
-                                          <span className="font-mono font-bold text-slate-700 whitespace-nowrap">${pt.price.toFixed(2)}</span>
+                                          <span className="font-mono font-bold text-slate-700 whitespace-nowrap">{formatCurrency(pt.price)}</span>
                                         </div>
                                       ))}
                                     </div>
@@ -2332,6 +2764,273 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
         )}
       </AnimatePresence>
 
+      {/* Enterprise Sales Completed Print Offer Modal (Sprint 11.1A Integration) */}
+      <AnimatePresence>
+        {showSalesPrintOfferModal && pendingBarcodeSale && (
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-md rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-xl text-center space-y-6"
+            >
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600 border border-emerald-100">
+                <CheckCircle2 className="h-7 w-7" />
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="font-sans text-lg font-black tracking-tight text-slate-900">
+                  Sales Completed Successfully
+                </h3>
+                <p className="text-xs text-slate-500 font-medium">
+                  Invoice #{pendingBarcodeSale.invoiceNumber || pendingBarcodeSale.id.substring(0, 12)} • Customer: <span className="font-bold text-slate-700">{pendingBarcodeSale.customerName}</span>
+                </p>
+                <div className="pt-2 text-xs font-bold text-slate-700 bg-slate-50 py-2.5 px-3 rounded-xl border border-slate-100">
+                  What would you like to print?
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSalesPrintOfferModal(false);
+                    setPendingBarcodeSale(null);
+                  }}
+                  className="w-full sm:w-auto rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const sale = pendingBarcodeSale;
+                    setShowSalesPrintOfferModal(false);
+                    setSelectedSaleForInvoice(sale);
+                  }}
+                  className="w-full sm:w-auto rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100 transition cursor-pointer shadow-xs flex items-center justify-center gap-2"
+                >
+                  <FileText className="w-4 h-4 text-indigo-600" />
+                  <span>🖨 Print Tax Invoice</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const sale = pendingBarcodeSale;
+                    setShowSalesPrintOfferModal(false);
+                    openBarcodePrintForSale(sale);
+                  }}
+                  className="w-full sm:w-auto rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition cursor-pointer shadow-xs flex items-center justify-center gap-2"
+                >
+                  <Printer className="w-4 h-4 text-white" />
+                  <span>🏷 Print Barcode Labels</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Main Barcode Print Dialog Modal for Sales */}
+      <AnimatePresence>
+        {showBarcodePrintDialog && pendingBarcodeSale && (
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-sm overflow-y-auto">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-3xl rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-8 shadow-2xl my-8"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between pb-5 border-b border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600 border border-indigo-100">
+                    <Printer className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-extrabold text-slate-900">Sales Barcode Print Dialog</h2>
+                    <p className="text-xs text-slate-500">
+                      Invoice #{pendingBarcodeSale.invoiceNumber || pendingBarcodeSale.id.substring(0, 15)} • Customer: {pendingBarcodeSale.customerName}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isPrintingBatch) cancelBatchRef.current = true;
+                    setShowBarcodePrintDialog(false);
+                  }}
+                  className="p-2 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Printing Parameters Bar */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 my-5 bg-slate-50 p-4 rounded-2xl border border-slate-200/80">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">Target Printer</label>
+                  <input
+                    type="text"
+                    value={selectedPrinter}
+                    onChange={(e) => setSelectedPrinter(e.target.value)}
+                    placeholder="MZ Thermal Printer ZD421"
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">Label Template</label>
+                  <select
+                    value={selectedTemplate}
+                    onChange={(e) => setSelectedTemplate(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="STD_PRODUCT_38X25MM">Standard Product Label (38x25mm)</option>
+                    <option value="COMPACT_PRICE_25X15MM">Compact Price Tag (25x15mm)</option>
+                    <option value="SHIPPING_TAG_50X30MM">Shipping Tag (50x30mm)</option>
+                    <option value="LARGE_PALLET_100X150MM">Large Pallet Label (100x150mm)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Products Selection List */}
+              <div className="space-y-3 mb-6">
+                <div className="flex items-center justify-between px-1">
+                  <span className="text-xs font-bold text-slate-700">Sold Items in Transaction</span>
+                  <div className="flex gap-2 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setPrintableItems(prev => prev.map(i => ({ ...i, selected: true })))}
+                      className="text-indigo-600 hover:underline font-semibold cursor-pointer"
+                    >
+                      ☑ Select All
+                    </button>
+                    <span className="text-slate-300">•</span>
+                    <button
+                      type="button"
+                      onClick={() => setPrintableItems(prev => prev.map(i => ({ ...i, selected: false })))}
+                      className="text-slate-500 hover:underline font-semibold cursor-pointer"
+                    >
+                      ☐ Unselect All
+                    </button>
+                  </div>
+                </div>
+
+                <div className="border border-slate-200 rounded-2xl overflow-hidden divide-y divide-slate-100 max-h-60 overflow-y-auto">
+                  {printableItems.map((item, idx) => (
+                    <div key={idx} className={`p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition ${item.selected ? 'bg-indigo-50/20' : 'bg-white opacity-60'}`}>
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={item.selected}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            setPrintableItems(prev => prev.map((it, i) => i === idx ? { ...it, selected: checked } : it));
+                          }}
+                          className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300 cursor-pointer"
+                        />
+                        <div>
+                          <div className="text-xs font-extrabold text-slate-900">{item.productName}</div>
+                          <div className="flex items-center gap-2 sm:gap-3 text-[10px] font-mono text-slate-500 mt-0.5 flex-wrap">
+                            <span>SKU: {item.sku}</span>
+                            <span>•</span>
+                            <span>Barcode: {item.barcodeValue}</span>
+                            <span>•</span>
+                            <span className="bg-slate-100 px-1.5 py-0.5 rounded text-slate-700 font-bold">{item.barcodeType}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-3 shrink-0 ml-7 sm:ml-0">
+                        <div>
+                          <label className="block text-[9px] font-bold text-slate-500 uppercase">Quantity Sold</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={item.quantityToPrint}
+                            onChange={(e) => {
+                              const val = Math.max(1, parseInt(e.target.value) || 1);
+                              setPrintableItems(prev => prev.map((it, i) => i === idx ? { ...it, quantityToPrint: val } : it));
+                            }}
+                            className="w-20 bg-white border border-slate-200 rounded-lg px-2.5 py-1 text-xs font-bold text-slate-800 text-center"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[9px] font-bold text-slate-500 uppercase">Copies</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={item.copies}
+                            onChange={(e) => {
+                              const val = Math.max(1, parseInt(e.target.value) || 1);
+                              setPrintableItems(prev => prev.map((it, i) => i === idx ? { ...it, copies: val } : it));
+                            }}
+                            className="w-16 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs font-bold text-slate-800 text-center"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Batch Progress Bar if active */}
+              {batchProgress && (
+                <div className="mb-6 p-4 bg-indigo-50/60 rounded-2xl border border-indigo-100 space-y-2">
+                  <div className="flex justify-between items-center text-xs font-bold text-indigo-900">
+                    <span>{batchProgress.statusMessage}</span>
+                    <span>{batchProgress.current} / {batchProgress.total} Labels</span>
+                  </div>
+                  <div className="w-full bg-indigo-200/80 rounded-full h-2 overflow-hidden">
+                    <div
+                      className="bg-indigo-600 h-2 rounded-full transition-all duration-200"
+                      style={{ width: `${batchProgress.total > 0 ? (batchProgress.current / batchProgress.total) * 100 : 0}%` }}
+                    ></div>
+                  </div>
+                  <div className="flex justify-between text-[10px] font-mono text-indigo-700 pt-1">
+                    <span>Success: {batchProgress.completed} | Failed: {batchProgress.failed} | Skipped: {batchProgress.skipped}</span>
+                    {batchProgress.lastJobId && <span>Job: {batchProgress.lastJobId}</span>}
+                  </div>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="flex items-center justify-between pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isPrintingBatch) cancelBatchRef.current = true;
+                    setShowBarcodePrintDialog(false);
+                  }}
+                  className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+                >
+                  {isPrintingBatch ? 'Cancel Printing' : 'Close'}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isPrintingBatch || printableItems.filter(i => i.selected && i.quantityToPrint > 0).length === 0}
+                  onClick={executeBatchPrintForSale}
+                  className="rounded-xl bg-indigo-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 disabled:opacity-50 transition cursor-pointer shadow-md flex items-center gap-2"
+                >
+                  {isPrintingBatch ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Printing Labels...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Printer className="w-4 h-4" />
+                      <span>Print Selected Labels ({printableItems.filter(i => i.selected).reduce((sum, i) => sum + i.quantityToPrint, 0)})</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {selectedSaleForInvoice && (
           <TaxInvoiceModal 
@@ -2369,7 +3068,7 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                     <div><span className="font-bold">Transaction ID:</span> {voidConfirmationSale.id}</div>
                     <div><span className="font-bold">Customer:</span> {voidConfirmationSale.customerName}</div>
                     <div><span className="font-bold">Product:</span> {voidConfirmationSale.productName} (x{voidConfirmationSale.quantity})</div>
-                    <div><span className="font-bold">Total Amount:</span> ${voidConfirmationSale.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                    <div><span className="font-bold">Total Amount:</span> {formatCurrency(voidConfirmationSale.totalAmount)}</div>
                   </div>
                 </div>
               </div>
@@ -2391,6 +3090,58 @@ export default function SalesManagement({ userRole = 'admin' }: { userRole?: Use
                   className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 transition cursor-pointer shadow-xs"
                 >
                   Yes, Void Transaction
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {blockedVoidInfo && (
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-xs">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-md rounded-[2.5rem] border border-rose-200 bg-white p-6 sm:p-8 shadow-2xl space-y-5"
+            >
+              <div className="flex items-start gap-4">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-rose-100 text-rose-600 ring-4 ring-rose-50">
+                  <AlertTriangle className="h-6 w-6" />
+                </div>
+                <div className="space-y-1.5">
+                  <h3 className="font-sans text-base font-bold tracking-tight text-slate-900">
+                    Cannot Void Sale Transaction
+                  </h3>
+                  <p className="text-xs text-slate-600 leading-relaxed font-medium">
+                    Cannot void this sale because customer payment(s) have already been applied. Please void all related settlement transactions before voiding this sale.
+                  </p>
+                </div>
+              </div>
+
+              <div className="text-xs font-mono text-slate-700 bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-2">
+                <div className="flex justify-between border-b border-slate-200/60 pb-1.5">
+                  <span className="text-slate-500 font-sans">Invoice Amount:</span>
+                  <span className="font-bold text-slate-900">{formatCurrency(blockedVoidInfo.invoiceAmount)}</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-200/60 pb-1.5">
+                  <span className="text-slate-500 font-sans">Settled Amount:</span>
+                  <span className="font-bold text-emerald-600">{formatCurrency(blockedVoidInfo.settledAmount)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 font-sans">Outstanding Balance:</span>
+                  <span className="font-bold text-rose-600">{formatCurrency(blockedVoidInfo.outstandingBalance)}</span>
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={() => setBlockedVoidInfo(null)}
+                  className="w-full sm:w-auto rounded-xl bg-slate-900 px-6 py-2.5 text-xs font-bold text-white hover:bg-slate-800 transition cursor-pointer shadow-sm"
+                >
+                  Acknowledge & Close
                 </button>
               </div>
             </motion.div>

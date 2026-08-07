@@ -18,13 +18,19 @@ import {
   TrendingUp,
   ChevronRight,
   Package,
-  FileText
+  FileText,
+  CheckCircle2,
+  AlertCircle
 } from 'lucide-react';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from '../lib/firebase';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { Supplier } from '../types';
+import { ResponsiveKPIValue } from './MetricCard';
 import { isInactiveStatus } from '../lib/utils';
 import { usePermission, UserRole } from '../hooks/usePermission';
+import { formatCurrency } from '../utils/currencyFormatter';
+import { EnterpriseIdentityValidationService } from '../services/validation/EnterpriseIdentityValidationService';
+import { TranslationService } from '../services/translation/TranslationService';
 
 export default function SupplierManagement({ userRole = 'admin' }: { userRole?: UserRole }) {
   const { permissions } = usePermission({ role: userRole });
@@ -44,6 +50,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
   // --- Form Fields State ---
   const [formData, setFormData] = useState({
     name: '',
+    nameArabic: '',
     phone: '',
     email: '',
     vatNumber: '',
@@ -55,6 +62,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
   
   // --- Validation Errors State ---
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [translationNotice, setTranslationNotice] = useState<{ type: 'success' | 'warning'; message: string } | null>(null);
 
   const [purchases, setPurchases] = useState<any[]>([]);
   const [supplierPayments, setSupplierPayments] = useState<any[]>([]);
@@ -164,6 +172,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       setEditingSupplier(supplier);
       setFormData({
         name: supplier.name,
+        nameArabic: supplier.nameArabic || '',
         phone: supplier.phone,
         email: supplier.email || '',
         vatNumber: supplier.vatNumber || '',
@@ -176,6 +185,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       setEditingSupplier(null);
       setFormData({
         name: '',
+        nameArabic: '',
         phone: '',
         email: '',
         vatNumber: '',
@@ -190,7 +200,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
   };
 
   // --- Form Validation ---
-  const validateForm = () => {
+  const validateForm = async () => {
     const newErrors: Record<string, string> = {};
     if (!formData.name.trim()) newErrors.name = 'Supplier name is required';
     if (formData.name.length > 200) newErrors.name = 'Name must be 200 characters or less';
@@ -212,39 +222,20 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       newErrors.dueBalance = 'Due balance cannot be negative';
     }
 
-    // Uniqueness Checks
-    const normName = formData.name.trim().toLowerCase();
-    const normPhone = formData.phone.trim();
+    // Centralized Enterprise Identity Validation
+    const validationResult = await EnterpriseIdentityValidationService.validateIdentity({
+      name: formData.name,
+      phone: formData.phone,
+      email: formData.email,
+      vatNumber: formData.vatNumber,
+      currentEntityId: editingSupplier ? editingSupplier.id : undefined,
+      currentCollection: 'suppliers',
+      localSuppliers: suppliers
+    });
 
-    const nameExists = suppliers.some(s => 
-      s.name.trim().toLowerCase() === normName && 
-      (!editingSupplier || s.id !== editingSupplier.id)
-    );
-    if (nameExists) {
-      newErrors.name = 'Supplier name already exists.';
-    }
-
-    const phoneExists = suppliers.some(s => 
-      s.phone.trim() === normPhone && 
-      (!editingSupplier || s.id !== editingSupplier.id)
-    );
-    if (phoneExists) {
-      newErrors.phone = 'Supplier phone already exists.';
-    }
-
-    const formVat = formData.vatNumber.trim().toLowerCase();
-    if (formVat) {
-      const vatExists = suppliers.some(s => 
-        s.vatNumber && s.vatNumber.trim().toLowerCase() === formVat && 
-        (!editingSupplier || s.id !== editingSupplier.id)
-      );
-      if (vatExists) {
-        newErrors.vatNumber = 'Supplier VAT number already exists.';
-      }
-    }
-
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    const combinedErrors = { ...newErrors, ...validationResult.errors };
+    setErrors(combinedErrors);
+    return Object.keys(combinedErrors).length === 0;
   };
 
   // --- Submit Create / Edit ---
@@ -273,40 +264,21 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       newErrors.dueBalance = 'Due balance cannot be negative';
     }
 
-    // Uniqueness Checks
-    const normName = formData.name.trim().toLowerCase();
-    const normPhone = formData.phone.trim();
+    // Centralized Enterprise Identity Validation
+    const validationResult = await EnterpriseIdentityValidationService.validateIdentity({
+      name: formData.name,
+      phone: formData.phone,
+      email: formData.email,
+      vatNumber: formData.vatNumber,
+      currentEntityId: editingSupplier ? editingSupplier.id : undefined,
+      currentCollection: 'suppliers',
+      localSuppliers: suppliers
+    });
 
-    const nameExists = suppliers.some(s => 
-      s.name.trim().toLowerCase() === normName && 
-      (!editingSupplier || s.id !== editingSupplier.id)
-    );
-    if (nameExists) {
-      newErrors.name = 'Supplier name already exists.';
-    }
-
-    const phoneExists = suppliers.some(s => 
-      s.phone.trim() === normPhone && 
-      (!editingSupplier || s.id !== editingSupplier.id)
-    );
-    if (phoneExists) {
-      newErrors.phone = 'Supplier phone already exists.';
-    }
-
-    const formVat = formData.vatNumber.trim().toLowerCase();
-    if (formVat) {
-      const vatExists = suppliers.some(s => 
-        s.vatNumber && s.vatNumber.trim().toLowerCase() === formVat && 
-        (!editingSupplier || s.id !== editingSupplier.id)
-      );
-      if (vatExists) {
-        newErrors.vatNumber = 'Supplier VAT number already exists.';
-      }
-    }
-
-    setErrors(newErrors);
-    if (Object.keys(newErrors).length > 0) {
-      const firstError = Object.values(newErrors)[0];
+    const combinedErrors = { ...newErrors, ...validationResult.errors };
+    setErrors(combinedErrors);
+    if (Object.keys(combinedErrors).length > 0) {
+      const firstError = Object.values(combinedErrors)[0];
       setFeedback({ message: firstError, type: 'error' });
       return;
     }
@@ -321,6 +293,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       ...editingSupplier,
       id: supplierId,
       name: formData.name.trim(),
+      nameArabic: formData.nameArabic.trim() ? formData.nameArabic.trim() : undefined,
       phone: formData.phone.trim(),
       email: formData.email.trim() ? formData.email.trim() : undefined,
       vatNumber: formData.vatNumber.trim() ? formData.vatNumber.trim() : undefined,
@@ -408,7 +381,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       const reasons: string[] = [];
       if (hasPurchases) reasons.push("purchase history");
       if (hasPayments) reasons.push("payment history");
-      if (hasBalance) reasons.push(`outstanding balance due ($${(supplierToDelete.dueBalance ?? 0).toFixed(2)})`);
+      if (hasBalance) reasons.push(`outstanding balance due (${formatCurrency(supplierToDelete.dueBalance ?? 0)})`);
 
       const reasonText = reasons.join(", ");
       setFeedback({ 
@@ -511,75 +484,73 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
       </AnimatePresence>
 
       {/* METRIC BENTO CARDS */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:gap-6 sm:grid-cols-3">
         {/* Total Suppliers */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between animate-fade-in">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Total Suppliers</span>
-              <div className="p-1 px-2.5 rounded-full text-[10px] font-extrabold bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center gap-1">
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0 animate-fade-in">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Total Suppliers</span>
+              <div className="p-1 px-2.5 rounded-full text-[10px] font-extrabold bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center gap-1 shrink-0">
                 Active <ChevronRight className="h-2.5 w-2.5" />
               </div>
             </div>
             {loading ? (
-              <div className="h-9 w-12 bg-slate-100 rounded-lg animate-pulse mt-2"></div>
+              <div className="h-8 w-12 bg-slate-100 rounded-lg animate-pulse"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-slate-900 mt-2">{suppliers.filter(s => !isInactiveStatus(s.status)).length}</p>
+              <ResponsiveKPIValue value={suppliers.filter(s => !isInactiveStatus(s.status)).length} className="text-slate-900" />
             )}
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400">
+          <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 truncate">
             Registered procurement channels
           </div>
         </div>
 
         {/* Due Portfolio Balance */}
-        <div className="bg-rose-50 rounded-[2rem] p-6 sm:p-8 border border-rose-100 flex flex-col justify-between animate-fade-in">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-rose-600 uppercase tracking-widest leading-none">Total Unpaid Balance</span>
-              <span className="flex h-1.5 w-1.5 rounded-full bg-rose-500"></span>
+        <div className="bg-rose-50 rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-rose-100 flex flex-col justify-between w-full min-w-0 animate-fade-in">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-rose-600 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Total Unpaid Balance</span>
+              <span className="flex h-1.5 w-1.5 rounded-full bg-rose-500 shrink-0"></span>
             </div>
             {loading ? (
-              <div className="h-9 w-28 bg-rose-200/50 rounded-lg animate-pulse mt-2"></div>
+              <div className="h-8 w-28 bg-rose-200/50 rounded-lg animate-pulse"></div>
             ) : (
-              <p className="text-3xl font-bold font-sans tracking-tight text-rose-900 mt-2">
-                ${outstandingCostTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </p>
+              <ResponsiveKPIValue value={formatCurrency(outstandingCostTotal)} className="text-rose-900" />
             )}
           </div>
-          <div className="mt-4 pt-3 border-t border-rose-200/50 text-[11px] text-rose-700/80">
+          <div className="mt-4 pt-3 border-t border-rose-200/50 text-[11px] text-rose-700/80 truncate">
             Aggregate active trade payable credit
           </div>
         </div>
 
         {/* Account Distribution */}
-        <div className="bg-white rounded-[2rem] p-6 sm:p-8 border border-slate-200 shadow-xs flex flex-col justify-between animate-fade-in">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">Payment Terms</span>
-              <CreditCard className="h-4 w-4 text-indigo-500" />
+        <div className="bg-white rounded-2xl sm:rounded-[2rem] p-4 sm:p-6 lg:p-7 border border-slate-200/90 shadow-2xs flex flex-col justify-between w-full min-w-0 animate-fade-in">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1 gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none whitespace-nowrap truncate min-w-0">Payment Terms</span>
+              <CreditCard className="h-4 w-4 text-indigo-500 shrink-0" />
             </div>
             <div className="grid grid-cols-2 gap-2 mt-2">
-              <div>
-                <p className="text-xs text-slate-400 font-bold uppercase leading-none">Cash</p>
+              <div className="min-w-0">
+                <p className="text-[10px] text-slate-400 font-bold uppercase leading-none truncate">Cash</p>
                 {loading ? (
                   <div className="h-7 w-10 bg-slate-100 rounded-lg animate-pulse mt-1"></div>
                 ) : (
-                  <p className="text-xl font-bold text-slate-800 mt-1">{cashAccountsCount}</p>
+                  <p className="text-lg sm:text-xl font-bold text-slate-800 mt-1 truncate">{cashAccountsCount}</p>
                 )}
               </div>
-              <div className="border-l border-slate-100 pl-4">
-                <p className="text-xs text-slate-400 font-bold uppercase leading-none">Credit</p>
+              <div className="border-l border-slate-100 pl-3 min-w-0">
+                <p className="text-[10px] text-slate-400 font-bold uppercase leading-none truncate">Credit</p>
                 {loading ? (
                   <div className="h-7 w-10 bg-slate-100 rounded-lg animate-pulse mt-1"></div>
                 ) : (
-                  <p className="text-xl font-bold text-slate-800 mt-1">{creditAccountsCount}</p>
+                  <p className="text-lg sm:text-xl font-bold text-slate-800 mt-1 truncate">{creditAccountsCount}</p>
                 )}
               </div>
             </div>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-indigo-600 font-bold flex items-center gap-1">
-            <TrendingUp className="h-3 w-3" /> Supply channel settlement
+          <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-indigo-600 font-bold flex items-center gap-1 truncate">
+            <TrendingUp className="h-3 w-3 shrink-0" /> Supply channel settlement
           </div>
         </div>
       </div>
@@ -803,7 +774,7 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
                             <td className={`py-4 px-5 text-right font-black font-mono whitespace-nowrap text-sm ${
                               (supplier.dueBalance ?? 0) > 0 ? 'text-amber-600' : 'text-slate-700'
                             }`}>
-                              ${(supplier.dueBalance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              {formatCurrency(supplier.dueBalance ?? 0)}
                             </td>
                             <td className="py-4 px-6 text-center whitespace-nowrap">
                               <div className="flex items-center justify-center gap-1.5">
@@ -967,6 +938,69 @@ export default function SupplierManagement({ userRole = 'admin' }: { userRole?: 
                     <div className="mt-2 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-3xs animate-fade-in">
                       <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />
                       <span>{errors.name}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Supplier Name (Arabic) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label htmlFor="form-supplier-name-arabic-field" className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                      Supplier Name (Arabic)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setTranslationNotice(null);
+                        const sourceName = (formData.name || '').trim();
+                        if (!sourceName) {
+                          setTranslationNotice({ type: 'warning', message: 'Please enter a Supplier Name first.' });
+                          return;
+                        }
+                        const res = await TranslationService.translateToArabic(sourceName);
+                        if (res.success && res.translatedText) {
+                          setFormData(prev => ({ ...prev, nameArabic: res.translatedText }));
+                          setTranslationNotice({ type: 'success', message: `Arabic name generated: ${res.translatedText}` });
+                        } else {
+                          setTranslationNotice({ type: 'warning', message: res.message || 'Translation not found in offline dictionary.' });
+                        }
+                      }}
+                      className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2 py-0.5 rounded-md transition border border-indigo-100/80 cursor-pointer"
+                    >
+                      Generate Arabic
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    id="form-supplier-name-arabic-field"
+                    dir="rtl"
+                    disabled={isSaving}
+                    value={formData.nameArabic}
+                    onChange={(e) => setFormData({ ...formData, nameArabic: e.target.value })}
+                    placeholder="اسم المورد (اختياري)"
+                    className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs font-semibold focus:outline-none transition-all focus:ring-1 focus:ring-indigo-600 focus:border-indigo-650 h-[42px] text-right font-sans"
+                  />
+                  {translationNotice && (
+                    <div className={`mt-1.5 text-[11px] font-semibold px-3 py-2 rounded-xl flex items-center justify-between border shadow-3xs transition-all ${
+                      translationNotice.type === 'success'
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200/80'
+                        : 'bg-amber-50 text-amber-800 border-amber-200/80'
+                    }`}>
+                      <div className="flex items-center gap-1.5">
+                        {translationNotice.type === 'success' ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                        ) : (
+                          <AlertCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                        )}
+                        <span>{translationNotice.message}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setTranslationNotice(null)}
+                        className="text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
                     </div>
                   )}
                 </div>

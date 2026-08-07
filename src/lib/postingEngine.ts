@@ -1,13 +1,57 @@
-import { db } from './firebase';
+import { db, auth } from './firebase';
 import { doc, setDoc } from 'firebase/firestore';
 import { LedgerEntry, LedgerEntryLine } from '../types';
+import { INITIAL_CHART_OF_ACCOUNTS } from '../data';
+import { 
+  getNextPostingNumber as getNextPostingNumberFromEngine, 
+  commitNextPostingNumber as commitNextPostingNumberFromEngine,
+  syncSequenceCounters,
+  VoucherType as EngineVoucherType 
+} from '../services/sequence/sequenceEngine';
 
 // Voucher type definition
-export type VoucherType = 'JV' | 'RV' | 'PV' | 'SV' | 'CV' | 'INV';
+export type VoucherType = EngineVoucherType;
+
+export { syncSequenceCounters };
+
+/**
+ * Enterprise Journal Integrity Validation (Phase X)
+ * Mandatory validation for every financial posting before committing an accounting transaction.
+ * Validates that Total Debit == Total Credit.
+ * If NOT balanced:
+ *   - Aborts transaction / throws Error (causing Firestore transaction rollback)
+ *   - Prevents saving Sale, Purchases, Payments, Ledger Entries, Inventory
+ *   - Displays exact error message:
+ *     "Accounting validation failed.
+ *
+ *      Debits and Credits are not balanced.
+ *
+ *      The transaction has been cancelled."
+ */
+export function validateJournalBalance(lines: { debit?: number; credit?: number }[]): void {
+  if (!lines || !Array.isArray(lines) || lines.length === 0) {
+    throw new Error(
+      "Accounting validation failed.\n\nDebits and Credits are not balanced.\n\nThe transaction has been cancelled."
+    );
+  }
+
+  const totalDebits = parseFloat(
+    lines.reduce((sum, line) => sum + (Number(line.debit) || 0), 0).toFixed(2)
+  );
+  const totalCredits = parseFloat(
+    lines.reduce((sum, line) => sum + (Number(line.credit) || 0), 0).toFixed(2)
+  );
+
+  if (Math.abs(totalDebits - totalCredits) >= 0.01) {
+    throw new Error(
+      "Accounting validation failed.\n\nDebits and Credits are not balanced.\n\nThe transaction has been cancelled."
+    );
+  }
+}
 
 // Standard predefined accounts matching the preset Chart of Accounts
 export const SYSTEM_ACCOUNTS = {
-  CASH: { id: 'coa-1100', code: '1100', name: 'Cash in Hand' },
+  CASH: { id: 'coa-1010', code: '1010', name: 'Cash' },
   AR: { id: 'coa-1200', code: '1200', name: 'Accounts Receivable' },
   INVENTORY: { id: 'coa-1300', code: '1300', name: 'Inventory Asset' },
   AP: { id: 'coa-2100', code: '2100', name: 'Accounts Payable' },
@@ -71,7 +115,7 @@ export function resolveSystemAccount(
   coa: any[] = []
 ): { id: string; code: string; name: string } {
   const normRole = role.toUpperCase().trim();
-  const activeCoa = Array.isArray(coa) ? coa.filter(acc => acc && acc.status === 'active') : [];
+  const activeCoa = Array.isArray(coa) ? coa.filter(acc => acc && (acc.status === 'ACTIVE' || acc.status === 'active' || !acc.status)) : [];
 
   // Match 1: Search active Chart of Accounts with an exact match on systemRole
   let matched = activeCoa.find(acc => acc.systemRole?.toUpperCase() === normRole);
@@ -143,19 +187,7 @@ export async function getNextPostingNumber(
   voucherType: VoucherType,
   year: number = 2026
 ): Promise<{ postingNumber: string; nextVal: number }> {
-  const counterRef = doc(db, 'counters', 'posting_sequences');
-  const counterSnap = await transaction.get(counterRef);
-  
-  let currentSequences = { JV: 0, RV: 0, PV: 0, SV: 0, CV: 0, INV: 0 };
-  if (counterSnap.exists()) {
-    currentSequences = { ...currentSequences, ...counterSnap.data() };
-  }
-  
-  const nextVal = (currentSequences[voucherType] || 0) + 1;
-  const paddingSize = voucherType === 'INV' ? 5 : 6;
-  const postingNumber = `${voucherType}-${year}-${String(nextVal).padStart(paddingSize, '0')}`;
-  
-  return { postingNumber, nextVal };
+  return getNextPostingNumberFromEngine(transaction, voucherType, year);
 }
 
 /**
@@ -165,12 +197,10 @@ export async function getNextPostingNumber(
 export function commitNextPostingNumber(
   transaction: any,
   voucherType: VoucherType,
-  nextVal: number
-) {
-  const counterRef = doc(db, 'counters', 'posting_sequences');
-  transaction.set(counterRef, {
-    [voucherType]: nextVal
-  }, { merge: true });
+  nextVal: number,
+  onWrite?: (path: string, payload: any, setFn: () => void) => void
+): void {
+  commitNextPostingNumberFromEngine(transaction, voucherType, nextVal, onWrite);
 }
 
 /**
@@ -178,87 +208,100 @@ export function commitNextPostingNumber(
  * if not, returns a list of operations/documents to create them to ensure
  * they are searchable and reportable.
  */
-export async function ensureSystemAccountsExist(transaction: any, currentCoaIds: string[]) {
-  const missingAccounts = [];
-  
-  // Let's verify Input VAT (1400) and Output VAT (2400)
-  if (!currentCoaIds.includes(SYSTEM_ACCOUNTS.INPUT_VAT.id)) {
-    missingAccounts.push({
+export async function ensureSystemAccountsExist(
+  transaction: any,
+  currentCoaIds: string[],
+  onWrite?: (path: string, payload: any, setFn: () => void) => void
+) {
+  const currentUser = auth?.currentUser;
+
+  const REQUIRED_SYSTEM_ACCOUNTS = [
+    ...INITIAL_CHART_OF_ACCOUNTS,
+    {
       id: SYSTEM_ACCOUNTS.INPUT_VAT.id,
       code: SYSTEM_ACCOUNTS.INPUT_VAT.code,
       name: SYSTEM_ACCOUNTS.INPUT_VAT.name,
       type: 'Asset',
       parentAccount: '1000',
       normalBalance: 'Debit',
-      status: 'active',
+      status: 'ACTIVE',
       description: 'VAT paid on business procurements and expenses, recoverable from tax authorities.',
-      isSystem: true,
-      editable: false,
-      systemRole: 'INPUT_VAT',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    });
-  }
-
-  if (!currentCoaIds.includes(SYSTEM_ACCOUNTS.OUTPUT_VAT.id)) {
-    missingAccounts.push({
+      isSystem: true
+    },
+    {
       id: SYSTEM_ACCOUNTS.OUTPUT_VAT.id,
       code: SYSTEM_ACCOUNTS.OUTPUT_VAT.code,
       name: SYSTEM_ACCOUNTS.OUTPUT_VAT.name,
       type: 'Liability',
       parentAccount: '2000',
       normalBalance: 'Credit',
-      status: 'active',
+      status: 'ACTIVE',
       description: 'VAT collected on taxable customer sales, payable to tax authorities.',
-      isSystem: true,
-      editable: false,
-      systemRole: 'OUTPUT_VAT',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    });
-  }
+      isSystem: true
+    },
+    ...Object.values(EXPENSE_CATEGORY_MAPPINGS).map(exp => ({
+      id: exp.id,
+      code: exp.code,
+      name: exp.name,
+      type: 'Expense',
+      parentAccount: '6100',
+      normalBalance: 'Debit',
+      status: 'ACTIVE',
+      description: `${exp.name} for regular operating overheads.`,
+      isSystem: true
+    }))
+  ];
 
-  // Verify Owner Capital (3100)
-  if (!currentCoaIds.includes(SYSTEM_ACCOUNTS.CAPITAL.id)) {
-    missingAccounts.push({
-      id: SYSTEM_ACCOUNTS.CAPITAL.id,
-      code: SYSTEM_ACCOUNTS.CAPITAL.code,
-      name: SYSTEM_ACCOUNTS.CAPITAL.name,
-      type: 'Equity',
-      parentAccount: '3000',
-      normalBalance: 'Credit',
-      status: 'active',
-      description: 'Owner equity capital injections into the enterprise.',
-      isSystem: true,
-      editable: false,
-      systemRole: 'OWNER_CAPITAL',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    });
-  }
-
-  // Also make sure all standard expense accounts exist in the COA
-  Object.values(EXPENSE_CATEGORY_MAPPINGS).forEach(exp => {
-    if (!currentCoaIds.includes(exp.id)) {
-      missingAccounts.push({
-        id: exp.id,
-        code: exp.code,
-        name: exp.name,
-        type: 'Expense',
-        parentAccount: '6000',
-        normalBalance: 'Debit',
-        status: 'active',
-        description: `${exp.name} for regular operating overheads.`,
-        isSystem: true,
-        editable: false,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      });
+  // Helper to build a clean doc strictly adhering to isValidChartOfAccount in Firestore Rules
+  const buildCleanDoc = (acc: any) => {
+    const now = new Date().toISOString();
+    let type = acc.type || 'Expense';
+    if (!['Asset', 'Liability', 'Equity', 'Revenue', 'Expense'].includes(type)) {
+      type = 'Expense';
     }
-  });
+    let normalBalance = acc.normalBalance;
+    if (!['Debit', 'Credit'].includes(normalBalance)) {
+      normalBalance = (type === 'Asset' || type === 'Expense') ? 'Debit' : 'Credit';
+    }
+    let status = (acc.status || 'ACTIVE').toUpperCase();
+    if (!['ACTIVE', 'INACTIVE', 'ARCHIVED'].includes(status)) {
+      status = 'ACTIVE';
+    }
 
-  for (const acc of missingAccounts) {
-    const ref = doc(db, 'chartOfAccounts', acc.id);
-    transaction.set(ref, acc, { merge: true });
+    const clean: Record<string, any> = {
+      id: String(acc.id),
+      code: String(acc.code),
+      name: String(acc.name),
+      type,
+      normalBalance,
+      status,
+      isSystem: acc.isSystem !== undefined ? Boolean(acc.isSystem) : true,
+      createdAt: acc.createdAt || now,
+      updatedAt: now
+    };
+
+    if (acc.description) {
+      clean.description = String(acc.description);
+    }
+    if (acc.parentAccount) {
+      clean.parentAccount = String(acc.parentAccount);
+    }
+
+    return clean;
+  };
+
+  const missingAccounts = REQUIRED_SYSTEM_ACCOUNTS
+    .filter(acc => !currentCoaIds.includes(acc.id))
+    .map(acc => buildCleanDoc(acc));
+
+  for (const accountDocument of missingAccounts) {
+    const chartAccountRef = doc(db, 'chartOfAccounts', accountDocument.id);
+    if (onWrite) {
+      onWrite(chartAccountRef.path, accountDocument, () => {
+        transaction.set(chartAccountRef, accountDocument);
+      });
+    } else {
+      transaction.set(chartAccountRef, accountDocument);
+    }
   }
 }

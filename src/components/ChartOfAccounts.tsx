@@ -4,6 +4,7 @@ import { collection, onSnapshot, doc, setDoc, deleteDoc, updateDoc } from 'fireb
 import { ChartOfAccount, Sale, Product, Customer, Supplier, Capital, CashLedgerEntry, Purchase, CustomerPayment, SupplierPayment, LedgerEntry } from '../types';
 import { INITIAL_CHART_OF_ACCOUNTS } from '../data';
 import { calculateCustomerLedger, isVoidStatus, isInactiveStatus } from '../lib/utils';
+import { formatCurrency } from '../utils/currencyFormatter';
 import { getSaleSummary } from '../types';
 import { 
   Plus, 
@@ -317,6 +318,41 @@ export default function ChartOfAccounts({ userRole, permissions: propPermissions
           updatedAt: new Date().toISOString()
         });
       }
+      
+      // Also seed Input VAT (1400)
+      await setDoc(doc(db, 'chartOfAccounts', 'coa-1400'), {
+        id: 'coa-1400',
+        code: '1400',
+        name: 'Input VAT Receivable',
+        type: 'Asset',
+        parentAccount: '1000',
+        normalBalance: 'Debit',
+        status: 'active',
+        description: 'VAT paid on business procurements and expenses, recoverable from tax authorities.',
+        isSystem: true,
+        editable: false,
+        systemRole: 'INPUT_VAT',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+
+      // Also seed Output VAT (2400)
+      await setDoc(doc(db, 'chartOfAccounts', 'coa-2400'), {
+        id: 'coa-2400',
+        code: '2400',
+        name: 'Output VAT Payable',
+        type: 'Liability',
+        parentAccount: '2000',
+        normalBalance: 'Credit',
+        status: 'active',
+        description: 'VAT collected on taxable customer sales, payable to tax authorities.',
+        isSystem: true,
+        editable: false,
+        systemRole: 'OUTPUT_VAT',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+
       showFeedback("Chart of Accounts successfully initialized with standard corporate profiles.", "success");
     } catch (err) {
       console.error("Failed to seed chartOfAccounts:", err);
@@ -728,7 +764,7 @@ export default function ChartOfAccounts({ userRole, permissions: propPermissions
           </div>
           <div className="mt-3">
             <h3 className="text-lg font-black text-slate-900 font-mono">
-              ${typeBalances.Asset.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(typeBalances.Asset)}
             </h3>
             <p className="text-[9px] text-slate-400 mt-0.5">Debit Normal Balance</p>
           </div>
@@ -743,7 +779,7 @@ export default function ChartOfAccounts({ userRole, permissions: propPermissions
           </div>
           <div className="mt-3">
             <h3 className="text-lg font-black text-slate-900 font-mono">
-              ${typeBalances.Liability.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(typeBalances.Liability)}
             </h3>
             <p className="text-[9px] text-slate-400 mt-0.5">Credit Normal Balance</p>
           </div>
@@ -758,7 +794,7 @@ export default function ChartOfAccounts({ userRole, permissions: propPermissions
           </div>
           <div className="mt-3">
             <h3 className="text-lg font-black text-slate-900 font-mono">
-              ${typeBalances.Equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(typeBalances.Equity)}
             </h3>
             <p className="text-[9px] text-slate-400 mt-0.5">Credit Normal Balance</p>
           </div>
@@ -773,7 +809,7 @@ export default function ChartOfAccounts({ userRole, permissions: propPermissions
           </div>
           <div className="mt-3">
             <h3 className="text-lg font-black text-slate-900 font-mono">
-              ${typeBalances.Revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(typeBalances.Revenue)}
             </h3>
             <p className="text-[9px] text-slate-400 mt-0.5">Credit Normal Balance</p>
           </div>
@@ -788,7 +824,7 @@ export default function ChartOfAccounts({ userRole, permissions: propPermissions
           </div>
           <div className="mt-3">
             <h3 className="text-lg font-black text-slate-900 font-mono">
-              ${typeBalances.Expense.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(typeBalances.Expense)}
             </h3>
             <p className="text-[9px] text-slate-400 mt-0.5">Debit Normal Balance</p>
           </div>
@@ -977,13 +1013,13 @@ export default function ChartOfAccounts({ userRole, permissions: propPermissions
                       <td className="py-3 px-4 text-slate-500 font-medium">{acc.subType || 'General Account'}</td>
                       <td className="py-3 px-4 text-slate-500 font-bold">{acc.normalBalance}</td>
                       <td className="py-3 px-4 text-right font-mono text-slate-600 font-medium">
-                        ${totalDebits.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        {formatCurrency(totalDebits)}
                       </td>
                       <td className="py-3 px-4 text-right font-mono text-slate-600 font-medium">
-                        ${totalCredits.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        {formatCurrency(totalCredits)}
                       </td>
                       <td className="py-3 px-4 text-right font-mono font-black text-slate-900 text-sm">
-                        ${liveBal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        {formatCurrency(liveBal)}
                       </td>
                       <td className="py-3 px-4 text-center text-slate-500 font-mono text-[11px]">
                         {lastAct ? new Date(lastAct).toLocaleDateString() : <span className="text-slate-300 italic">-</span>}

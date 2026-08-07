@@ -1,7 +1,11 @@
 import React, { useState } from 'react';
 import { X, Printer, FileText, CheckCircle2, AlertTriangle, Info, Building2, User, Package } from 'lucide-react';
 import { jsPDF } from 'jspdf';
+import { applyEnterprisePdfFont, formatPdfText, formatPdfCurrency, setPdfFont } from '../utils/pdfHelper';
 import { Purchase, Supplier, Product, CompanySnapshot } from '../types';
+import { formatCurrency } from '../utils/currencyFormatter';
+import { formatQuantity, formatUnitPrice } from '../lib/utils';
+import { UnitBadge } from './ui/UnitBadge';
 
 interface PurchaseDetailModalProps {
   purchase: Purchase;
@@ -74,8 +78,9 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
   };
 
   // Reconcile monetary calculations
-  const totalVAT = purchase.vatAmount ?? (purchase.totalAmount * 15 / 115);
-  const totalSubtotal = purchase.totalAmount - totalVAT;
+  const taxRate = purchase.taxRatePercent ?? snapCompany.taxRatePercent ?? 15;
+  const totalSubtotal = purchase.subtotal ?? (purchase.totalAmount / (1 + taxRate / 100));
+  const totalVAT = purchase.vatAmount ?? (purchase.totalAmount - totalSubtotal);
   const totalDiscount = purchase.discountAmount ?? 0;
 
   // Handle Print Action
@@ -144,6 +149,7 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
                   <th>Product Details / SKU</th>
                   <th>Category</th>
                   <th style="text-align: center;">Quantity</th>
+                  <th style="text-align: center;">Unit</th>
                   <th style="text-align: right;">Unit Purchase Price</th>
                   <th style="text-align: right;">Subtotal Amount</th>
                 </tr>
@@ -155,9 +161,13 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
                     <span style="font-size: 11px; color: #64748b;">SKU: ${snapProduct.sku}</span>
                   </td>
                   <td>${snapProduct.category}</td>
-                  <td style="text-align: center;">${purchase.quantity}</td>
-                  <td style="text-align: right;">$${purchase.purchasePrice.toFixed(2)}</td>
-                  <td style="text-align: right;">$${(purchase.quantity * purchase.purchasePrice).toFixed(2)}</td>
+                  <td style="text-align: center;">
+                    ${purchase.enteredQuantity !== undefined && purchase.enteredUnitCode ? `${purchase.enteredQuantity} ${purchase.enteredUnitCode}` : formatQuantity(purchase.quantity, purchase.unitCode || snapProduct.unitCode)}
+                    ${purchase.isAlternateUnit && purchase.baseQuantity !== undefined ? `<br/><small style="color: #4f46e5; font-weight: bold;">(${purchase.baseQuantity} ${purchase.baseUnitCode})</small>` : ''}
+                  </td>
+                  <td style="text-align: center;"><span style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-weight:bold; font-size:11px;">${purchase.enteredUnitCode || purchase.unitCode || snapProduct.unitCode || 'PCS'}</span></td>
+                  <td style="text-align: right;">${formatUnitPrice(purchase.purchasePrice, purchase.unitCode || snapProduct.unitCode)}</td>
+                  <td style="text-align: right;">${formatCurrency(purchase.quantity * purchase.purchasePrice)}</td>
                 </tr>
               </tbody>
             </table>
@@ -166,19 +176,19 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
           <div class="summary-box">
             <div class="summary-row">
               <span>Gross Subtotal:</span>
-              <span>$${totalSubtotal.toFixed(2)}</span>
+              <span>${formatCurrency(totalSubtotal)}</span>
             </div>
             <div class="summary-row">
               <span>VAT (${snapCompany.taxRatePercent}%):</span>
-              <span>$${totalVAT.toFixed(2)}</span>
+              <span>${formatCurrency(totalVAT)}</span>
             </div>
             <div class="summary-row">
               <span>Discounts:</span>
-              <span style="color: #dc2626;">-$${totalDiscount.toFixed(2)}</span>
+              <span style="color: #dc2626;">-${formatCurrency(totalDiscount)}</span>
             </div>
             <div class="summary-row total">
               <span>Grand Total:</span>
-              <span>$${purchase.totalAmount.toFixed(2)}</span>
+              <span>${formatCurrency(purchase.totalAmount)}</span>
             </div>
           </div>
 
@@ -203,26 +213,23 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
   // Handle PDF Generation using jsPDF
   const handleGeneratePDF = () => {
     const doc = new jsPDF();
-    
-    // Set Document Properties
-    doc.setFont('helvetica', 'normal');
+    applyEnterprisePdfFont(doc);
     
     // Header Banner
     doc.setFillColor(15, 23, 42);
     doc.rect(15, 15, 180, 25, 'F');
     
-    doc.setFont('helvetica', 'bold');
     doc.setFontSize(14);
     doc.setTextColor(255, 255, 255);
-    doc.text(snapCompany.name, 20, 25);
+    doc.text(formatPdfText(snapCompany.name), 20, 25);
     
-    doc.setFont('helvetica', 'normal');
+    setPdfFont(doc, 'normal');
     doc.setFontSize(7.5);
     doc.text(`Tax Registration ID: ${snapCompany.taxRegistrationId} | CR: ${snapCompany.crNumber || 'N/A'}`, 20, 31);
     doc.text(`${snapCompany.address}`, 20, 35);
 
     // Title Block
-    doc.setFont('helvetica', 'bold');
+    setPdfFont(doc, 'bold');
     doc.setFontSize(11);
     doc.setTextColor(15, 23, 42);
     doc.text("PROCUREMENT PURCHASE VOUCHER", 125, 48);
@@ -235,22 +242,22 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
     doc.line(15, 58, 195, 58);
 
     // Supplier & Metadata
-    doc.setFont('helvetica', 'bold');
+    setPdfFont(doc, 'bold');
     doc.setFontSize(8.5);
     doc.text("Supplier Snapshot Portfolio:", 15, 65);
     
-    doc.setFont('helvetica', 'normal');
+    setPdfFont(doc, 'normal');
     doc.setFontSize(8);
     doc.text(`Name: ${snapSupplier.name}`, 15, 71);
     doc.text(`Category: ${snapSupplier.category}`, 15, 76);
     doc.text(`Phone: ${snapSupplier.phone || 'N/A'}`, 15, 81);
     doc.text(`Address: ${snapSupplier.address || 'N/A'}`, 15, 86);
 
-    doc.setFont('helvetica', 'bold');
+    setPdfFont(doc, 'bold');
     doc.setFontSize(8.5);
     doc.text("Voucher Audit Trail:", 125, 65);
     
-    doc.setFont('helvetica', 'normal');
+    setPdfFont(doc, 'normal');
     doc.setFontSize(8);
     doc.text(`Purchase Date: ${purchaseDateStr}`, 125, 71);
     doc.text(`Settlement Mode: ${purchase.paymentType}`, 125, 76);
@@ -261,17 +268,17 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
     doc.setFillColor(5, 150, 105);
     doc.rect(15, 93, 180, 8, 'F');
     
-    doc.setFont('helvetica', 'bold');
+    setPdfFont(doc, 'bold');
     doc.setFontSize(8);
     doc.setTextColor(255, 255, 255);
     doc.text("PRODUCT SUMMARY", 18, 98.5);
     doc.text("CATEGORY", 85, 98.5);
     doc.text("QTY", 125, 98.5);
     doc.text("UNIT PRICE", 145, 98.5);
-    doc.text("TOTAL ($)", 175, 98.5);
+    doc.text("TOTAL", 175, 98.5);
 
     // Table Body
-    doc.setFont('helvetica', 'normal');
+    setPdfFont(doc, 'normal');
     doc.setFontSize(8);
     doc.setTextColor(51, 65, 85);
     
@@ -279,42 +286,42 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
     doc.text(snapProduct.name.length > 32 ? snapProduct.name.substring(0, 32) + '...' : snapProduct.name, 18, rowY);
     doc.text(snapProduct.category, 85, rowY);
     doc.text(purchase.quantity.toString(), 125, rowY);
-    doc.text(`$${purchase.purchasePrice.toFixed(2)}`, 145, rowY);
-    doc.text(`$${(purchase.quantity * purchase.purchasePrice).toFixed(2)}`, 175, rowY);
+    doc.text(formatPdfCurrency(purchase.purchasePrice), 145, rowY);
+    doc.text(formatPdfCurrency(purchase.quantity * purchase.purchasePrice), 175, rowY);
     
     doc.line(15, rowY + 4, 195, rowY + 4);
 
     // Summary Box
     const sumY = rowY + 12;
-    doc.setFont('helvetica', 'normal');
+    setPdfFont(doc, 'normal');
     doc.setTextColor(71, 85, 105);
     doc.text("Gross Subtotal Amount:", 125, sumY);
-    doc.text(`$${totalSubtotal.toFixed(2)}`, 175, sumY);
+    doc.text(formatPdfCurrency(totalSubtotal), 175, sumY);
 
     doc.text(`VAT (${snapCompany.taxRatePercent}%):`, 125, sumY + 5);
-    doc.text(`$${totalVAT.toFixed(2)}`, 175, sumY + 5);
+    doc.text(formatPdfCurrency(totalVAT), 175, sumY + 5);
 
     doc.text("Discounts applied:", 125, sumY + 10);
-    doc.text(`-$${totalDiscount.toFixed(2)}`, 175, sumY + 10);
+    doc.text(formatPdfCurrency(-Math.abs(totalDiscount)), 175, sumY + 10);
 
-    doc.setFont('helvetica', 'bold');
+    setPdfFont(doc, 'bold');
     doc.setTextColor(15, 23, 42);
     doc.text("Grand Settlement Total:", 125, sumY + 16);
-    doc.text(`$${purchase.totalAmount.toFixed(2)}`, 175, sumY + 16);
+    doc.text(formatPdfCurrency(purchase.totalAmount), 175, sumY + 16);
 
     if (isVoid) {
       doc.setDrawColor(220, 38, 38);
       doc.setFillColor(254, 242, 242);
       doc.rect(15, sumY + 25, 180, 12, 'FD');
       
-      doc.setFont('helvetica', 'bold');
+      setPdfFont(doc, 'bold');
       doc.setFontSize(9);
       doc.setTextColor(220, 38, 38);
       doc.text("VOIDED TRANSACTION - INBOUND PROCUREMENT DISPATCH CANCELLED", 35, sumY + 33);
     }
 
     // Footnotes
-    doc.setFont('helvetica', 'normal');
+    setPdfFont(doc, 'normal');
     doc.setFontSize(7);
     doc.setTextColor(148, 163, 184);
     doc.text("This PDF file constitutes a certified digital audit snapshot generated in real-time.", 15, 275);
@@ -492,6 +499,7 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
                       <th className="py-3 px-5">Catalog Product SKU & Name</th>
                       <th className="py-3 px-5">Category</th>
                       <th className="py-3 px-5 text-center">Procured Qty</th>
+                      <th className="py-3 px-5 text-center">Unit</th>
                       <th className="py-3 px-5 text-right">Unit Price</th>
                       <th className="py-3 px-5 text-right">Raw Subtotal</th>
                     </tr>
@@ -503,9 +511,23 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
                         <span className="text-[10px] text-indigo-600 font-mono font-semibold">SKU: {snapProduct.sku}</span>
                       </td>
                       <td className="py-4 px-5 text-slate-500 capitalize">{snapProduct.category}</td>
-                      <td className="py-4 px-5 text-center font-bold text-slate-900">{purchase.quantity}</td>
-                      <td className="py-4 px-5 text-right font-mono font-semibold text-slate-600">${purchase.purchasePrice.toFixed(2)}</td>
-                      <td className="py-4 px-5 text-right font-mono font-bold text-slate-900">${(purchase.quantity * purchase.purchasePrice).toFixed(2)}</td>
+                      <td className="py-4 px-5 text-center font-bold text-slate-900">
+                        {purchase.enteredQuantity !== undefined && purchase.enteredUnitCode ? (
+                          <div className="flex flex-col items-center">
+                            <span>{purchase.enteredQuantity} {purchase.enteredUnitCode}</span>
+                            {purchase.isAlternateUnit && purchase.baseQuantity !== undefined && (
+                              <span className="text-[10px] text-indigo-600 font-extrabold">({purchase.baseQuantity} {purchase.baseUnitCode})</span>
+                            )}
+                          </div>
+                        ) : (
+                          formatQuantity(purchase.quantity, purchase.unitCode || snapProduct.unitCode)
+                        )}
+                      </td>
+                      <td className="py-4 px-5 text-center">
+                        <UnitBadge unitCode={purchase.unitCode || snapProduct.unitCode} unitName={purchase.unitName || snapProduct.unitName} size="sm" />
+                      </td>
+                      <td className="py-4 px-5 text-right font-mono font-semibold text-slate-600">{formatUnitPrice(purchase.purchasePrice, purchase.unitCode || snapProduct.unitCode)}</td>
+                      <td className="py-4 px-5 text-right font-mono font-bold text-slate-900">{formatCurrency(purchase.quantity * purchase.purchasePrice)}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -519,19 +541,19 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
                   <div className="w-full md:w-80 space-y-2 text-xs font-sans font-medium text-slate-700">
                     <div className="flex justify-between">
                       <span>Subtotal (VAT Excl.):</span>
-                      <span className="font-mono font-bold text-slate-800">${totalSubtotal.toFixed(2)}</span>
+                      <span className="font-mono font-bold text-slate-800">{formatCurrency(totalSubtotal)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span>VAT (15%):</span>
-                      <span className="font-mono font-bold text-slate-800">${totalVAT.toFixed(2)}</span>
+                      <span className="font-mono font-bold text-slate-800">{formatCurrency(totalVAT)}</span>
                     </div>
                     <div className="flex justify-between text-rose-600">
                       <span>Discount (Snapshot):</span>
-                      <span className="font-mono font-bold">-${totalDiscount.toFixed(2)}</span>
+                      <span className="font-mono font-bold">-{formatCurrency(totalDiscount)}</span>
                     </div>
                     <div className="flex justify-between border-t border-slate-200 pt-2 text-sm font-black text-slate-900">
                       <span>Settled Grand Total:</span>
-                      <span className="font-mono font-black text-emerald-600">${purchase.totalAmount.toFixed(2)}</span>
+                      <span className="font-mono font-black text-emerald-600">{formatCurrency(purchase.totalAmount)}</span>
                     </div>
                   </div>
                 </div>
@@ -628,19 +650,19 @@ export const PurchaseDetailModal: React.FC<PurchaseDetailModalProps> = ({
 
                   <div className="bg-slate-50 border border-slate-100 p-4 rounded-xl">
                     <span className="text-slate-400 font-bold block uppercase text-[9px] tracking-wider">Historical Procurement Rate</span>
-                    <span className="text-emerald-700 font-mono font-black block mt-1">${purchase.purchasePrice.toFixed(2)}</span>
+                    <span className="text-emerald-700 font-mono font-black block mt-1">{formatCurrency(purchase.purchasePrice)}</span>
                   </div>
 
                   <div className="bg-slate-50 border border-slate-100 p-4 rounded-xl">
                     <span className="text-slate-400 font-bold block uppercase text-[9px] tracking-wider">Snapshot Target Margin</span>
                     <span className="text-slate-900 font-mono font-bold block mt-1">
-                      ${((snapProduct.sellingPrice || 0) - (purchase.purchasePrice || 0)).toFixed(2)} (Markup: {purchase.purchasePrice > 0 ? (((snapProduct.sellingPrice || 0) - (purchase.purchasePrice || 0)) / purchase.purchasePrice * 100).toFixed(1) : 0}%)
+                      {formatCurrency((snapProduct.sellingPrice || 0) - (purchase.purchasePrice || 0))} (Markup: {purchase.purchasePrice > 0 ? (((snapProduct.sellingPrice || 0) - (purchase.purchasePrice || 0)) / purchase.purchasePrice * 100).toFixed(1) : 0}%)
                     </span>
                   </div>
 
                   <div className="bg-slate-50 border border-slate-100 p-4 rounded-xl">
                     <span className="text-slate-400 font-bold block uppercase text-[9px] tracking-wider">Snapshot Retail Target</span>
-                    <span className="text-indigo-600 font-mono font-black block mt-1">${(snapProduct.sellingPrice || 0).toFixed(2)}</span>
+                    <span className="text-indigo-600 font-mono font-black block mt-1">{formatCurrency(snapProduct.sellingPrice || 0)}</span>
                   </div>
                 </div>
               </div>

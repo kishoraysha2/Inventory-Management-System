@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { db, auth } from '../lib/firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { calculateCustomerLedger, isVoidStatus, isInactiveStatus } from '../lib/utils';
+import { formatCurrency } from '../utils/currencyFormatter';
 import { 
   Scale, 
   DollarSign, 
@@ -381,13 +382,13 @@ export default function BalanceSheet() {
               </span>
             </div>
             <h2 className="text-4xl font-extrabold text-slate-850 mt-4 tracking-tight">
-              ${cashInHand.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(cashInHand)}
             </h2>
             <p className="text-xs text-slate-400 mt-1">Real-time consolidated Cash In Hand</p>
           </div>
           <div className="border-t border-slate-100 mt-4 pt-3 flex items-center justify-between text-[11px] font-semibold text-slate-500">
-            <span>Inflows: <span className="text-slate-850 font-bold">${totalCashInflows.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></span>
-            <span>Outflows: <span className="text-slate-850 font-bold">${totalCashOutflows.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></span>
+            <span>Inflows: <span className="text-slate-850 font-bold">{formatCurrency(totalCashInflows)}</span></span>
+            <span>Outflows: <span className="text-slate-850 font-bold">{formatCurrency(totalCashOutflows)}</span></span>
           </div>
         </div>
 
@@ -401,18 +402,18 @@ export default function BalanceSheet() {
               </span>
             </div>
             <h2 className={`text-4xl font-extrabold mt-4 tracking-tight ${netProfit >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-              ${netProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(netProfit)}
             </h2>
             <p className="text-xs text-slate-400 mt-1">Net Earnings (Metadata Snapshot Based)</p>
           </div>
           <div className="border-t border-slate-100 mt-4 pt-3 flex flex-col gap-1 text-[11px] font-semibold text-slate-500">
             <div className="flex justify-between">
-              <span>Total Rev: <span className="text-slate-850 font-bold">${totalRevenue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></span>
-              <span>Total COGS: <span className="text-slate-850 font-bold">${totalCOGS.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></span>
+              <span>Total Rev: <span className="text-slate-850 font-bold">{formatCurrency(totalRevenue)}</span></span>
+              <span>Total COGS: <span className="text-slate-850 font-bold">{formatCurrency(totalCOGS)}</span></span>
             </div>
             <div className="flex justify-between border-t border-dashed border-slate-100 pt-1.5 mt-1">
-              <span>Gross Profit: <span className="text-slate-850 font-bold">${grossProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></span>
-              <span>OpEx: <span className="text-rose-600 font-bold">${totalExpenses.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></span>
+              <span>Gross Profit: <span className="text-slate-850 font-bold">{formatCurrency(grossProfit)}</span></span>
+              <span>OpEx: <span className="text-rose-600 font-bold">{formatCurrency(totalExpenses)}</span></span>
             </div>
           </div>
         </div>
@@ -427,13 +428,13 @@ export default function BalanceSheet() {
               </span>
             </div>
             <h2 className={`text-4xl font-extrabold mt-4 tracking-tight ${netPosition >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
-              ${netPosition.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(netPosition)}
             </h2>
-            <p className="text-xs text-slate-505 mt-1">Valuation Position (Current Assets − Liabilities)</p>
+            <p className="text-xs text-slate-555 mt-1">Valuation Position (Current Assets − Liabilities)</p>
           </div>
           <div className="border-t border-slate-200/40 mt-4 pt-3 flex items-center justify-between text-[11px] font-semibold text-slate-600">
-            <span>Assets: <span className="font-bold text-emerald-600">${totalCurrentAssets.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></span>
-            <span>Payables: <span className="font-bold text-slate-700">${totalSupplierOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></span>
+            <span>Assets: <span className="font-bold text-emerald-600">{formatCurrency(totalCurrentAssets)}</span></span>
+            <span>Payables: <span className="font-bold text-slate-700">{formatCurrency(totalSupplierOutstanding)}</span></span>
           </div>
         </div>
       </div>
@@ -453,21 +454,21 @@ export default function BalanceSheet() {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Current Assets</span>
-              <span className="text-xs font-black text-emerald-600">${totalCurrentAssets.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+              <span className="text-xs font-black text-emerald-600">{formatCurrency(totalCurrentAssets)}</span>
             </div>
             
             <div className="space-y-2">
               <div className="flex justify-between text-xs p-2 bg-slate-50 rounded-xl">
                 <span className="text-slate-600 font-medium">Cash in Hand</span>
-                <span className="font-bold font-mono text-slate-800">${cashInHand.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                <span className="font-bold font-mono text-slate-800">{formatCurrency(cashInHand)}</span>
               </div>
               <div className="flex justify-between text-xs p-2 bg-slate-50 rounded-xl">
                 <span className="text-slate-600 font-medium">Inventory Asset Value</span>
-                <span className="font-bold font-mono text-slate-800">${inventoryAssetValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                <span className="font-bold font-mono text-slate-800">{formatCurrency(inventoryAssetValue)}</span>
               </div>
               <div className="flex justify-between text-xs p-2 bg-slate-50 rounded-xl">
                 <span className="text-slate-600 font-medium">Customer Receivables</span>
-                <span className="font-bold font-mono text-slate-800">${totalCustomerOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                <span className="font-bold font-mono text-slate-800">{formatCurrency(totalCustomerOutstanding)}</span>
               </div>
             </div>
           </div>
@@ -476,13 +477,13 @@ export default function BalanceSheet() {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Current Liabilities</span>
-              <span className="text-xs font-black text-slate-700">${totalSupplierOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+              <span className="text-xs font-black text-slate-700">{formatCurrency(totalSupplierOutstanding)}</span>
             </div>
 
             <div className="space-y-2">
               <div className="flex justify-between text-xs p-2 bg-slate-50 rounded-xl">
                 <span className="text-slate-600 font-medium">Supplier Payables</span>
-                <span className="font-bold font-mono text-slate-800">${totalSupplierOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                <span className="font-bold font-mono text-slate-800">{formatCurrency(totalSupplierOutstanding)}</span>
               </div>
               <div className="p-2 border border-dashed border-slate-100 rounded-xl text-[10px] text-slate-400 leading-tight">
                 Outstanding credit dues reconciled from active supplier purchase ledgers.
@@ -494,14 +495,14 @@ export default function BalanceSheet() {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Equity & Net Worth</span>
-              <span className={`text-xs font-black ${netPosition >= 0 ? 'text-indigo-600' : 'text-rose-600'}`}>${netPosition.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+              <span className={`text-xs font-black ${netPosition >= 0 ? 'text-indigo-600' : 'text-rose-600'}`}>{formatCurrency(netPosition)}</span>
             </div>
 
             <div className="space-y-2">
               <div className="p-3 rounded-2xl border border-indigo-100 bg-indigo-50/10 space-y-1.5">
                 <div className="flex justify-between text-xs">
                   <span className="text-indigo-900 font-semibold">Net Business Position</span>
-                  <span className={`font-black font-mono ${netPosition >= 0 ? 'text-indigo-600' : 'text-rose-600'}`}>${netPosition.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                  <span className={`font-black font-mono ${netPosition >= 0 ? 'text-indigo-600' : 'text-rose-600'}`}>{formatCurrency(netPosition)}</span>
                 </div>
                 <p className="text-[10px] text-slate-400 leading-normal">
                   Reflects standard GAAP compliant business liquidity: Total Current Assets (Cash + Stock Value + Receivables) minus Total Payables.
@@ -527,7 +528,7 @@ export default function BalanceSheet() {
             </div>
             <div className="text-right">
               <div className="text-xs font-extrabold text-amber-600">
-                ${totalCustomerOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                {formatCurrency(totalCustomerOutstanding)}
               </div>
               <div className="text-[9px] text-slate-400 uppercase font-bold tracking-wider font-mono">Combined Outstanding</div>
             </div>
@@ -547,7 +548,7 @@ export default function BalanceSheet() {
                     <div className="text-[10px] text-slate-400 font-mono">Cust ID: {cust.id}</div>
                   </div>
                   <div className="text-right">
-                    <div className="text-xs font-bold text-amber-600">${cust.dueBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                    <div className="text-xs font-bold text-amber-600">{formatCurrency(cust.dueBalance)}</div>
                     <div className="text-[9px] bg-amber-50 border border-amber-100/50 rounded-md px-1.5 py-0.5 text-amber-700 inline-block font-mono font-bold">OUTSTANDING</div>
                   </div>
                 </div>
@@ -568,7 +569,7 @@ export default function BalanceSheet() {
             </div>
             <div className="text-right">
               <div className="text-xs font-extrabold text-slate-755">
-                ${totalSupplierOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                {formatCurrency(totalSupplierOutstanding)}
               </div>
               <div className="text-[9px] text-slate-400 uppercase font-bold tracking-wider font-mono">Supplier Balances</div>
             </div>
@@ -588,7 +589,7 @@ export default function BalanceSheet() {
                     <div className="text-[10px] text-slate-400 font-mono">Supplier ID: {supp.id}</div>
                   </div>
                   <div className="text-right">
-                    <div className="text-xs font-bold text-slate-700">${(supp.dueBalance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                    <div className="text-xs font-bold text-slate-700">{formatCurrency(supp.dueBalance ?? 0)}</div>
                     <div className="text-[9px] bg-slate-100 border border-slate-200 rounded-md px-1.5 py-0.5 text-slate-600 inline-block font-mono font-bold">PAYABLE OUTSTANDING</div>
                   </div>
                 </div>

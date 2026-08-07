@@ -44,9 +44,10 @@ import {
   BookOpen
 } from 'lucide-react';
 
-import { Product, ActivityLog, Supplier, CashLedgerEntry, Capital } from './types';
+import { Product, ActivityLog, Supplier, CashLedgerEntry, Capital, UnitMaster } from './types';
 import { isInactiveStatus } from './lib/utils';
-import { INITIAL_PRODUCTS, INITIAL_LOGS, INITIAL_SUPPLIERS, INITIAL_CASH_LEDGER, INITIAL_CAPITAL } from './data';
+import { INITIAL_PRODUCTS, INITIAL_LOGS, INITIAL_SUPPLIERS, INITIAL_CASH_LEDGER, INITIAL_CAPITAL, INITIAL_CHART_OF_ACCOUNTS } from './data';
+import { INITIAL_UNITS } from './data/defaultUnits';
 import MetricCard from './components/MetricCard';
 import ItemForm from './components/ItemForm';
 import ActivityHistory from './components/ActivityHistory';
@@ -65,12 +66,16 @@ import CompanySettings from './components/CompanySettings';
 import PrivilegeMatrix from './components/PrivilegeMatrix';
 import ExpenseManagement from './components/ExpenseManagement';
 import ProductLedger from './components/ProductLedger';
+import UnitManagement from './components/UnitManagement';
 import SetupWizard from './components/SetupWizard';
+import EnterpriseShell from './components/layout/EnterpriseShell';
+import { runOpeningInventoryMigration } from './services/migration/openingInventoryMigration';
 import { usePermission, AppPermissions, seedRolePermissions, UserRole } from './hooks/usePermission';
 import { db, auth, OperationType, handleFirestoreError, logSystemActivity } from './lib/firebase';
 import { getVisibleModules } from './core/moduleRegistry';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, getDoc, updateDoc, query, where, limit, getDocs } from 'firebase/firestore';
 import { signOut, onAuthStateChanged, User, GoogleAuthProvider, signInWithPopup, signInAnonymously, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
+import { setGlobalCompanyProfile, formatCurrency } from './utils/currencyFormatter';
 
 export default function App() {
   // --- Core Persistent State ---
@@ -99,6 +104,11 @@ export default function App() {
     return saved ? JSON.parse(saved) : [];
   });
 
+  const [units, setUnits] = useState<UnitMaster[]>(() => {
+    const saved = localStorage.getItem('nexus_units');
+    return saved ? JSON.parse(saved) : INITIAL_UNITS;
+  });
+
   // --- Search, Filter & Sort State ---
   const [search, setSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
@@ -112,12 +122,13 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports' | 'balancesheet' | 'chart_of_accounts' | 'users' | 'company_settings' | 'expenses' | 'product_ledger'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'customers' | 'suppliers' | 'ledger' | 'products' | 'sales' | 'procurement' | 'reports' | 'balancesheet' | 'chart_of_accounts' | 'users' | 'company_settings' | 'expenses' | 'product_ledger' | 'units'>('dashboard');
   
   const isModuleAccessible = (modId: string) => {
     if (modId === 'expenses') return !!permissions.viewExpenses;
     if (modId === 'users') return !!permissions.viewUsers;
     if (modId === 'company_settings') return !!(permissions.viewSettings || permissions.voidPayment);
+    if (modId === 'units') return !!(permissions.viewSettings || permissions.viewProducts || userRole === 'owner' || userRole === 'admin');
     return true;
   };
   const [userAccessTab, setUserAccessTab] = useState<'users' | 'matrix'>('users');
@@ -135,6 +146,8 @@ export default function App() {
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [isFirstInstallation, setIsFirstInstallation] = useState<boolean | null>(null);
   const [isAuthChecked, setIsAuthChecked] = useState<boolean>(false);
+  const [isOwnerProfileMissing, setIsOwnerProfileMissing] = useState<boolean>(false);
+  const [companyProfileState, setCompanyProfileState] = useState<any>(null);
   const [usersList, setUsersList] = useState<any[]>([]);
   const [usersLoading, setUsersLoading] = useState(true);
   const [usersError, setUsersError] = useState<string | null>(null);
@@ -212,6 +225,21 @@ export default function App() {
     }
   }, [currentUser, userRole]);
 
+  // --- Trigger One-Time Opening Inventory Backfill Migration ---
+  useEffect(() => {
+    let isSubscribed = true;
+    const triggerMigration = async () => {
+      try {
+        const report = await runOpeningInventoryMigration();
+        // Silent backfill check completed
+      } catch (err) {
+        console.error("Opening Inventory Backfill Migration error:", err);
+      }
+    };
+    triggerMigration();
+    return () => { isSubscribed = false; };
+  }, [currentUser]);
+
   // --- Observe Authentication State ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -239,6 +267,11 @@ export default function App() {
             const role = data.role || 'viewer';
             const name = data.name || user.displayName || user.email?.split('@')[0] || 'User';
             const email = data.email || user.email || '';
+            
+            // Cache role in localStorage
+            localStorage.setItem('nexus_role_' + user.uid, role);
+            setIsOwnerProfileMissing(false);
+
             setCurrentUserProfile({
               role,
               name,
@@ -257,26 +290,71 @@ export default function App() {
               return;
             }
 
-            const defaultRole = 'viewer';
-            await setDoc(userRef, {
-              name: user.displayName || user.email?.split('@')[0] || 'User',
-              email: user.email || '',
-              role: defaultRole,
-              createdAt: new Date().toISOString()
-            });
+            // ENTERPRISE USER BOOTSTRAP FLOW
+            // The document users/{currentUser.uid} does not exist. Provision it automatically.
+            const cachedRole = localStorage.getItem('nexus_role_' + user.uid);
+            let isOwnerEmail = false;
+            try {
+              const configSnap = await getDoc(doc(db, 'businessProfile', 'config'));
+              if (configSnap.exists()) {
+                const configData = configSnap.data();
+                if (configData.email === user.email || configData.ownerEmail === user.email || configData.ownerName === user.displayName) {
+                  isOwnerEmail = true;
+                }
+              }
+            } catch (configErr) {
+              console.error("Failed to fetch business config to check owner email status:", configErr);
+            }
 
-            const name = user.displayName || user.email?.split('@')[0] || 'User';
-            const email = user.email || '';
+            const targetRole: UserRole = (cachedRole === 'owner' || isOwnerEmail) ? 'owner' : 'viewer';
+            const nowIso = new Date().toISOString();
+            const userName = user.displayName || user.email?.split('@')[0] || 'User';
+            const userEmail = user.email || '';
+
+            const userPayload = {
+              uid: user.uid,
+              name: userName,
+              displayName: userName,
+              email: userEmail,
+              role: targetRole,
+              status: 'active',
+              createdAt: nowIso,
+              updatedAt: nowIso
+            };
+
+            try {
+              await setDoc(userRef, userPayload);
+            } catch (provisionErr) {
+              // Fallback to 'viewer' if owner self-creation is restricted by Firestore rules after bootstrap initialization
+              if (targetRole !== 'viewer') {
+                userPayload.role = 'viewer';
+                await setDoc(userRef, userPayload);
+              } else {
+                throw provisionErr;
+              }
+            }
+
+            // Reload user profile after successful provisioning
+            const reSnap = await getDoc(userRef);
+            const data = reSnap.exists() ? reSnap.data() : userPayload;
+            const role = (data.role || 'viewer') as UserRole;
+            const name = data.name || userName;
+            const email = data.email || userEmail;
+
+            localStorage.setItem('nexus_role_' + user.uid, role);
+            setIsOwnerProfileMissing(false);
+
             setCurrentUserProfile({
-              role: defaultRole,
+              role,
               name,
               email
             });
-            await checkAndLogLogin(user.uid, email, name, defaultRole);
+            await checkAndLogLogin(user.uid, email, name, role);
           }
         } catch (err) {
-          console.error("Failed to load user profile document:", err);
-          const role = 'viewer';
+          console.error("Failed to load or provision user profile document:", err);
+          const cachedRole = localStorage.getItem('nexus_role_' + user.uid);
+          const role = (cachedRole as UserRole) || 'viewer';
           const name = user.displayName || user.email?.split('@')[0] || 'User';
           const email = user.email || '';
           setCurrentUserProfile({
@@ -288,6 +366,7 @@ export default function App() {
         }
       } else {
         setCurrentUserProfile(null);
+        setIsOwnerProfileMissing(false);
       }
       setIsAuthChecked(true);
     });
@@ -520,25 +599,71 @@ export default function App() {
       const changedByUserName = currentUserProfile?.name || auth.currentUser?.displayName || auth.currentUser?.email || 'Anonymous Admin';
       const timestampString = new Date().toISOString();
 
-      // FEATURE 5: Admin behavior checks - Admin cannot update owner and cannot update to owner
-      if (userRole === 'admin') {
-        if (previousRole === 'owner') {
-          setFeedback({ message: 'Access Denied: Administrators are not authorized to modify Owner profiles.', type: 'error' });
+      // Ensure a user cannot change their own role
+      if (targetUid === auth.currentUser?.uid) {
+        setFeedback({ message: 'Access Denied: Users are not authorized to modify their own security clearance or role.', type: 'error' });
+        return;
+      }
+
+      // Enforce Owner Promotion rules: Only existing Owners may promote someone to Owner or modify an Owner
+      if (userRole !== 'owner') {
+        if (newRole === 'owner') {
+          setFeedback({ message: 'Access Denied: Only an existing Owner may promote another user to Owner.', type: 'error' });
           return;
         }
-        if (newRole === 'owner') {
-          setFeedback({ message: 'Access Denied: Administrators cannot grant Owner status.', type: 'error' });
+        if (previousRole === 'owner') {
+          setFeedback({ message: 'Access Denied: Only an existing Owner may modify or demote Owner profiles.', type: 'error' });
           return;
         }
       }
 
-      // FEATURE 6: Protection rules - At least 1 Owner must always remain
+      // Admin Restrictions
+      if (userRole === 'admin') {
+        if (previousRole === 'owner' || newRole === 'owner') {
+          setFeedback({ message: 'Access Denied: Administrators are not authorized to grant, demote, or modify Owner roles.', type: 'error' });
+          return;
+        }
+      }
+
+      // Count active Owners in the directory
+      const activeOwners = usersList.filter(u => u.role === 'owner');
+      const ownerCount = activeOwners.length;
+
+      // Owner Limit Protection: Max 5 Owners
+      if (newRole === 'owner' && previousRole !== 'owner') {
+        if (ownerCount >= 5) {
+          setFeedback({ message: 'Maximum Owner limit reached.', type: 'error' });
+          return;
+        }
+      }
+
+      // Last Owner Protection: Min 1 Owner
       if (previousRole === 'owner' && newRole !== 'owner') {
-        const ownerCount = usersList.filter(u => u.role === 'owner').length;
         if (ownerCount <= 1) {
           setFeedback({ message: 'Owner Lockout Protection: At least one Owner must remain registered at all times.', type: 'error' });
           return;
         }
+      }
+
+      // Confirmation Dialogs with clear consequences explanation
+      if (newRole === 'owner') {
+        const confirmed = window.confirm(
+          `WARNING: PROMOTING TO OWNER STATUS\n\n` +
+          `You are about to promote ${targetName} (${targetEmail}) to Owner.\n` +
+          `This will grant them absolute system-wide permissions, including modifying other Owner profiles and company settings.\n\n` +
+          `Are you sure you want to proceed?`
+        );
+        if (!confirmed) return;
+      }
+
+      if (previousRole === 'owner' && newRole !== 'owner') {
+        const confirmed = window.confirm(
+          `WARNING: DEMOTING OWNER STATUS\n\n` +
+          `You are about to demote ${targetName} (${targetEmail}) to ${newRole.toUpperCase()}.\n` +
+          `This will immediately revoke their absolute system control and remove their Owner clearances.\n\n` +
+          `Are you sure you want to proceed?`
+        );
+        if (!confirmed) return;
       }
 
       const userRef = doc(db, 'users', targetUid);
@@ -573,17 +698,9 @@ export default function App() {
   // --- Admin User Listing Sync ---
   useEffect(() => {
     if (!currentUser || !auth.currentUser || !permissions.viewUsers) {
-      if (currentUser && permissions.viewUsers) {
-        setUsersList([
-          { uid: currentUser.uid, name: currentUser.displayName || 'Kishor Aysha (Admin Bypass)', email: currentUser.email, role: 'admin', createdAt: new Date().toISOString() }
-        ]);
-        setUsersLoading(false);
-        setUsersError(null);
-      } else {
-        setUsersList([]);
-        setUsersLoading(false);
-        setUsersError(null);
-      }
+      setUsersList([]);
+      setUsersLoading(false);
+      setUsersError(null);
       return;
     }
 
@@ -592,9 +709,42 @@ export default function App() {
 
     const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
       const list: any[] = [];
+      const seenUids = new Set<string>();
+
       snapshot.forEach((docSnap) => {
-        list.push({ uid: docSnap.id, ...docSnap.data() });
+        const uid = docSnap.id;
+        if (!uid || seenUids.has(uid)) return; // Prevent duplicate rendering
+
+        const data = docSnap.data();
+        if (!data) return;
+
+        const email = data.email || '';
+        const role = data.role || '';
+        const name = data.name || '';
+        const createdAt = data.createdAt || '';
+
+        // Profile Validation: Ignore completely invalid user documents
+        if (!email || !email.includes('@')) {
+          console.warn(`User Directory: Filtered out invalid profile with missing/invalid email for UID ${uid}`);
+          return;
+        }
+
+        // Gracefully handle missing role, name, and timestamps
+        const validatedRole = (role || 'viewer').toLowerCase();
+        const validatedName = name || email.split('@')[0] || 'User';
+        const validatedTimestamp = createdAt || new Date().toISOString();
+
+        seenUids.add(uid);
+        list.push({
+          uid,
+          name: validatedName,
+          email: email,
+          role: validatedRole,
+          createdAt: validatedTimestamp,
+          phone: data.phone || ''
+        });
       });
+
       setUsersList(list);
       setUsersError(null);
       setUsersLoading(false);
@@ -606,6 +756,35 @@ export default function App() {
 
     return () => unsubUsers();
   }, [currentUser, userRole, permissions?.viewUsers]);
+
+  // --- Units Collection Sync ---
+  useEffect(() => {
+    if (!currentUser || !auth.currentUser) {
+      return;
+    }
+
+    const unsubUnits = onSnapshot(
+      collection(db, 'units'),
+      (snapshot) => {
+        if (!snapshot.empty) {
+          const loadedUnits = snapshot.docs.map((docSnap) => ({
+            id: docSnap.id,
+            ...docSnap.data(),
+          })) as UnitMaster[];
+          setUnits(loadedUnits);
+          localStorage.setItem('nexus_units', JSON.stringify(loadedUnits));
+        } else {
+          setUnits(INITIAL_UNITS);
+          localStorage.setItem('nexus_units', JSON.stringify(INITIAL_UNITS));
+        }
+      },
+      (error) => {
+        console.warn('Units Sync Warning:', error);
+      }
+    );
+
+    return () => unsubUnits();
+  }, [currentUser]);
 
   // --- Reference Nodes ---
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -701,12 +880,24 @@ export default function App() {
        }
      });
 
+    // 6. Company Settings Sync
+    const unsubCompanyProfile = onSnapshot(doc(db, 'businessProfile', 'config'), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setGlobalCompanyProfile(data);
+        setCompanyProfileState(data);
+      }
+    }, (error) => {
+      console.error("Company Settings Sync Error", error);
+    });
+
     return () => {
       unsubProducts();
       unsubSuppliers();
       unsubLogs();
       unsubCashLedger();
       unsubCapital();
+      unsubCompanyProfile();
     };
   }, [currentUser]);
 
@@ -743,6 +934,87 @@ export default function App() {
 
     performProductMigration();
   }, [currentUser, products, userRole]);
+
+  // --- Task 3: Safe Idempotent Chart of Accounts Bootstrapping ---
+  useEffect(() => {
+    if (!currentUser || !auth.currentUser) return;
+
+    const bootstrapChartOfAccounts = async () => {
+      const alreadyRun = sessionStorage.getItem('nexus_coa_bootstrapped_v1');
+      if (alreadyRun === 'true') return;
+
+      try {
+        const coaSnap = await getDocs(collection(db, 'chartOfAccounts'));
+        const existingIds = coaSnap.docs.map(doc => doc.id);
+        const existingCodes = coaSnap.docs.map(doc => doc.data().code);
+
+        let createdCount = 0;
+
+        // 1. Seed standard accounts from INITIAL_CHART_OF_ACCOUNTS
+        for (const account of INITIAL_CHART_OF_ACCOUNTS) {
+          if (!existingIds.includes(account.id) && !existingCodes.includes(account.code)) {
+            await setDoc(doc(db, 'chartOfAccounts', account.id), {
+              ...account,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            });
+            createdCount++;
+            existingIds.push(account.id);
+            existingCodes.push(account.code);
+          }
+        }
+
+        // 2. Seed Input VAT (1400) if missing
+        if (!existingIds.includes('coa-1400') && !existingCodes.includes('1400')) {
+          await setDoc(doc(db, 'chartOfAccounts', 'coa-1400'), {
+            id: 'coa-1400',
+            code: '1400',
+            name: 'Input VAT Receivable',
+            type: 'Asset',
+            parentAccount: '1000',
+            normalBalance: 'Debit',
+            status: 'active',
+            description: 'VAT paid on business procurements and expenses, recoverable from tax authorities.',
+            isSystem: true,
+            editable: false,
+            systemRole: 'INPUT_VAT',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          });
+          createdCount++;
+        }
+
+        // 3. Seed Output VAT (2400) if missing
+        if (!existingIds.includes('coa-2400') && !existingCodes.includes('2400')) {
+          await setDoc(doc(db, 'chartOfAccounts', 'coa-2400'), {
+            id: 'coa-2400',
+            code: '2400',
+            name: 'Output VAT Payable',
+            type: 'Liability',
+            parentAccount: '2000',
+            normalBalance: 'Credit',
+            status: 'active',
+            description: 'VAT collected on taxable customer sales, payable to tax authorities.',
+            isSystem: true,
+            editable: false,
+            systemRole: 'OUTPUT_VAT',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          });
+          createdCount++;
+        }
+
+        sessionStorage.setItem('nexus_coa_bootstrapped_v1', 'true');
+        if (createdCount > 0) {
+          console.log(`[Bootstrap] Idempotent Chart of Accounts bootstrapping completed. Created ${createdCount} missing system accounts.`);
+        }
+      } catch (err) {
+        console.error("[Bootstrap] Failed to bootstrap Chart of Accounts:", err);
+      }
+    };
+
+    bootstrapChartOfAccounts();
+  }, [currentUser]);
 
   // --- Autosave to LocalStorage for offline resilience ---
   useEffect(() => {
@@ -937,8 +1209,10 @@ export default function App() {
       }
       const newProductId = `prod-${Date.now()}`;
       const newProduct: Product = {
+        ...formData,
         id: newProductId,
         name: formData.name,
+        nameArabic: formData.nameArabic || '',
         sku: formData.sku,
         category: formData.category,
         sellingPrice: formData.sellingPrice,
@@ -1024,7 +1298,8 @@ export default function App() {
         item.name.toLowerCase().includes(query) ||
         item.sku.toLowerCase().includes(query) ||
         (item.location || '').toLowerCase().includes(query) ||
-        (item.supplierName || '').toLowerCase().includes(query);
+        (item.supplierName || '').toLowerCase().includes(query) ||
+        (item.barcode || '').toLowerCase().includes(query);
 
       const matchesCategory = selectedCategory === 'All' || item.category === selectedCategory;
 
@@ -1316,6 +1591,45 @@ export default function App() {
     );
   }
 
+  if (isOwnerProfileMissing) {
+    return (
+      <div id="owner-profile-missing-screen" className="min-h-screen bg-slate-950 flex items-center justify-center p-4 sm:p-6 lg:p-8 text-white">
+        <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-[2.5rem] p-8 sm:p-12 shadow-2xl space-y-8 text-center animate-fade-in">
+          <div className="w-16 h-16 bg-rose-950 border border-rose-500 rounded-3xl flex items-center justify-center text-rose-500 shadow-md mx-auto animate-pulse">
+            <Shield className="h-8 w-8" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="font-sans text-xl sm:text-2xl font-black tracking-tight text-white uppercase">
+              Profile Missing
+            </h1>
+            <p className="text-[10px] text-rose-400 font-extrabold uppercase tracking-widest">
+              Owner Profile Protection Active
+            </p>
+          </div>
+          <div className="text-slate-300 text-xs px-2 leading-relaxed space-y-3">
+            <p>
+              Your authenticated session is active, but your corresponding Firestore Owner user profile document could not be located.
+            </p>
+            <p className="font-semibold text-rose-300">
+              To preserve system integrity, your permissions have NOT been automatically downgraded to Viewer.
+            </p>
+            <p className="text-[11px] text-slate-400 bg-slate-850 p-4 rounded-2xl border border-slate-800">
+              Please contact an active Owner to restore or recreate your profile, or sign out below.
+            </p>
+          </div>
+          <button
+            id="owner-recovery-signout"
+            type="button"
+            onClick={handleSignOut}
+            className="w-full inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-800 hover:bg-slate-750 text-white px-5 py-3 text-xs font-bold transition border border-slate-700 cursor-pointer"
+          >
+            Sign Out of Workstation
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!currentUser) {
     return (
       <div id="unauthenticated-gate" className="min-h-screen bg-slate-50 flex items-center justify-center p-4 sm:p-6 lg:p-8">
@@ -1502,186 +1816,24 @@ export default function App() {
   }
 
   return (
-    <div id="inventory-app-container" className="mx-auto max-w-7xl px-3 py-4 sm:px-6 lg:px-8 space-y-5 sm:space-y-8 pb-24 sm:pb-8">
-      {/* THREE-ROW RESPONSIVE HEADER SECTION */}
-      <div id="dashboard-header-section" className="print:hidden space-y-4">
-        {/* ROW 1: Logo, App Name, User Information, Admin/Role Badge, Hamburger */}
-        <div className="bg-white border border-slate-200/80 rounded-2xl p-4 sm:p-5 flex flex-row items-center justify-between gap-4 shadow-3xs hover:border-slate-350 transition-all duration-200 w-full">
-          
-          {/* Logo & App Name Area - Left Aligned */}
-          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 sm:flex-initial">
-            <div className="w-9 h-9 sm:w-10 sm:h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-xs shrink-0">
-              <Box className="h-4.5 w-4.5 sm:h-5 sm:w-5" />
-            </div>
-            <div className="min-w-0">
-              <h1 className="font-sans text-base sm:text-xl lg:text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-1.5 sm:gap-2 leading-none">
-                <span className="truncate">NEXUS INVENTORY</span>
-                <span className="text-slate-400 font-normal text-[9px] sm:text-xs uppercase tracking-widest bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded-full shrink-0">v4.2.1</span>
-              </h1>
-            </div>
-          </div>
-
-          {/* User Information, Admin Badge, Log out & Hamburger - Right Aligned */}
-          <div className="flex items-center gap-2 sm:gap-4 shrink-0 min-w-0">
-            {/* User Info email & name (visible on larger mobile sm and above) */}
-            <div className="hidden sm:flex flex-col items-end text-right min-w-0">
-              <span className="text-slate-800 font-bold text-xs sm:text-sm leading-none truncate max-w-[120px] md:max-w-xs">
-                {currentUserProfile?.name || currentUser?.email?.split('@')[0]}
-              </span>
-              <span className="text-slate-400 font-mono text-[10px] sm:text-[11px] font-bold truncate max-w-[150px] md:max-w-xs mt-1">
-                {currentUser?.email}
-              </span>
-            </div>
-
-            {/* Admin Badge */}
-            <span id="user-role-badge" className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[9px] sm:text-[10px] font-extrabold uppercase border shadow-3xs select-none shrink-0 ${
-              userRole === 'owner'
-                ? 'bg-gradient-to-r from-amber-500 to-yellow-500 text-white border-amber-400 font-extrabold shadow-[0_0_12px_rgba(245,158,11,0.45)]'
-                : userRole === 'admin' 
-                ? 'bg-emerald-50 border-emerald-150 text-emerald-700' 
-                : userRole === 'accountant'
-                ? 'bg-blue-50 border-blue-200 text-blue-700'
-                : userRole === 'cashier'
-                ? 'bg-amber-50 border-amber-100 text-amber-700'
-                : 'bg-slate-50 border-slate-100 text-slate-600'
-            }`}>
-              {userRole === 'owner' ? (
-                <Crown className="w-3 h-3 text-white fill-amber-100 shrink-0 animate-pulse" />
-              ) : (
-                <Shield className="w-2.5 h-2.5 shrink-0" />
-              )}
-              <span className="leading-none">{userRole}</span>
-            </span>
-
-            {/* Log Out button */}
-            <button
-              type="button"
-              onClick={handleSignOut}
-              className="font-sans font-bold text-rose-500 hover:text-rose-700 hover:bg-rose-50 p-1.5 sm:px-2.5 sm:py-1.5 rounded-xl transition flex items-center gap-1 cursor-pointer shrink-0"
-              title="Log Out"
-            >
-              <LogOut className="w-4 h-4 hover:rotate-12 transition-transform" />
-              <span className="hidden sm:inline text-xs">Log Out</span>
-            </button>
-
-            {/* Hamburger button visible only on mobile & tablet */}
-            <button
-              id="mobile-navigation-hamburger"
-              type="button"
-              onClick={() => setIsMobileMenuOpen(true)}
-              className="md:hidden p-2 rounded-xl text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 active:scale-95 transition cursor-pointer border border-slate-200 bg-white shadow-3xs shrink-0"
-              title="Open Navigation"
-            >
-              <Menu className="h-4.5 w-4.5 sm:h-5 sm:w-5" />
-            </button>
-          </div>
-
-        </div>
-
-        {/* ROW 2: Register Product, Load Demo, Export Backup, Import JSON - Action buttons on separate row */}
-        <div className="bg-white border border-slate-200/85 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-start gap-2.5 sm:gap-2 shadow-3xs w-full">
-          
-          {/* Main Primary Registration Button */}
-          {permissions.canEditProduct && (
-            <button
-              id="register-new-item-button"
-              type="button"
-              onClick={() => {
-                setProductToEdit(null);
-                setIsFormOpen(true);
-              }}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4.5 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs hover:shadow-md cursor-pointer"
-            >
-              <Plus className="h-4 w-4" />
-              <span>Register Product</span>
-            </button>
-          )}
-
-          {/* Load Demo */}
-          {permissions.manageSettings && (
-            <button
-              id="reset-demo-data-button"
-              type="button"
-              onClick={handleResetDemoData}
-              title="Restore default product catalog"
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-705 border-slate-200 hover:border-slate-300 transition cursor-pointer"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              <span>Load Demo</span>
-            </button>
-          )}
-
-          {/* Export Backup */}
-          {permissions.manageSettings && (
-            <button
-              id="export-backup-json-button"
-              type="button"
-              onClick={handleExportJSON}
-              title="Download full catalog backup in JSON"
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-705 border-slate-200 hover:border-slate-300 transition cursor-pointer"
-            >
-              <Download className="h-3.5 w-3.5" />
-              <span>Export Backup</span>
-            </button>
-          )}
-
-          {/* Import JSON */}
-          {permissions.manageSettings && (
-            <button
-              id="import-backup-toggle-button"
-              type="button"
-              onClick={() => setShowImport((prev) => !prev)}
-              title="Import inventory data from JSON backup"
-              className={`w-full sm:w-auto inline-flex items-center justify-center gap-1.5 rounded-xl border px-3.5 py-2.5 text-xs font-semibold transition cursor-pointer ${
-                showImport
-                  ? 'bg-slate-100 text-slate-700 border-slate-350 shadow-3xs'
-                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-705 border-slate-200 hover:border-slate-300'
-              }`}
-            >
-              <Upload className="h-3.5 w-3.5" />
-              <span>Import JSON</span>
-            </button>
-          )}
-
-        </div>
-      </div>
-
-      {/* PRIMARY NAVIGATION TABS */}
-      <div className="print:hidden hidden md:flex bg-slate-100 p-1 rounded-2xl max-w-7xl border border-slate-200 overflow-x-auto">
-        {getVisibleModules().filter(mod => isModuleAccessible(mod.id)).map(mod => {
-          const Icon = mod.icon;
-          const routeKey = mod.routeKey || mod.id;
-          const isActive = activeTab === routeKey;
-          const activeColor = mod.id === 'expenses' ? 'text-rose-600' : 'text-indigo-600';
-          
-          let minWidthClass = '';
-          if (mod.id === 'dashboard') minWidthClass = 'min-w-[100px]';
-          else if (mod.id === 'inventory') minWidthClass = 'min-w-[110px]';
-          else if (mod.id === 'product_ledger') minWidthClass = 'min-w-[115px]';
-          else if (mod.id === 'expenses') minWidthClass = 'min-w-[100px]';
-          else if (mod.id === 'balancesheet') minWidthClass = 'min-w-[120px]';
-          else if (mod.id === 'chartOfAccounts') minWidthClass = 'min-w-[145px]';
-          else if (mod.id === 'users') minWidthClass = 'min-w-[125px]';
-          else if (mod.id === 'company_settings') minWidthClass = 'min-w-[130px]';
-          
-          return (
-            <button
-              key={mod.id}
-              id={mod.id === 'users' ? 'open-user-access-tab' : mod.id === 'company_settings' ? 'open-company-settings-tab' : undefined}
-              type="button"
-              onClick={() => setActiveTab(routeKey as any)}
-              className={`flex-1 ${minWidthClass} flex items-center justify-center gap-2 py-2.5 text-xs font-bold rounded-xl transition ${
-                isActive
-                  ? `bg-white ${activeColor} shadow-xs border border-slate-200/50`
-                  : 'text-slate-500 hover:text-slate-800'
-              }`}
-            >
-              <Icon className="h-4 w-4" />
-              <span>{mod.displayName}</span>
-            </button>
-          );
-        })}
-      </div>
+    <EnterpriseShell
+      currentUser={currentUser}
+      currentUserProfile={currentUserProfile}
+      userRole={userRole}
+      activeTab={activeTab}
+      setActiveTab={setActiveTab}
+      onSignOut={handleSignOut}
+      permissions={permissions}
+      isModuleAccessible={isModuleAccessible}
+      onOpenForm={() => {
+        setProductToEdit(null);
+        setIsFormOpen(true);
+      }}
+      onResetDemoData={handleResetDemoData}
+      onExportJSON={handleExportJSON}
+      onToggleImport={() => setShowImport((prev) => !prev)}
+      showImport={showImport}
+    >
 
       {/* FEEDBACK STATUS BANNER */}
       <AnimatePresence>
@@ -1767,7 +1919,7 @@ export default function App() {
           <div id="metrics-bento-grid" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <MetricCard
               title="Consolidated Portfolio Value"
-              value={`$${totalValuation.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              value={formatCurrency(totalValuation)}
               icon={<DollarSign className="h-5 w-5 text-emerald-600" />}
               subtext="Net stock asset valuation face"
               trend="Real-Time"
@@ -2264,6 +2416,10 @@ export default function App() {
         <SafeTabWrapper tab="chart_of_accounts" userRole={userRole} permissions={permissions}>
           <ChartOfAccounts userRole={userRole} permissions={permissions} />
         </SafeTabWrapper>
+      ) : activeTab === 'units' ? (
+        <SafeTabWrapper tab="units" userRole={userRole} permissions={permissions}>
+          <UnitManagement userRole={userRole} permissions={permissions} units={units} setUnits={setUnits} products={products} />
+        </SafeTabWrapper>
       ) : (
         <SafeTabWrapper tab="company_settings" userRole={userRole} permissions={permissions}>
           <CompanySettings userRole={userRole} permissions={permissions} />
@@ -2279,6 +2435,7 @@ export default function App() {
         categories={categories.filter((cat) => cat !== 'All')}
         products={products}
         permissions={permissions}
+        units={units}
       />
 
       {/* INVENTORY ADJUSTMENT MODAL */}
@@ -2542,16 +2699,7 @@ export default function App() {
         );
       })()}
 
-      {/* Footer Bar */}
-      <footer className="mt-8 pt-6 border-t border-slate-200 flex flex-wrap justify-between items-center gap-4 text-[10px] text-slate-400 font-bold uppercase tracking-widest leading-none">
-        <div className="flex gap-6">
-          <span>System: Online</span>
-          <span>Sync: 0.04s Latency</span>
-          <span>Region: Europe-West3</span>
-        </div>
-        <div>© 2026 Nexus Intelligence Systems Inc.</div>
-      </footer>
-    </div>
+    </EnterpriseShell>
   );
 }
 
@@ -2583,6 +2731,7 @@ function SafeTabWrapper({ children, tab, userRole, permissions }: SafeTabWrapper
   else if (tab === 'reports') isAccessible = permissions.viewReports;
   else if (tab === 'expenses') isAccessible = permissions.viewExpenses;
   else if (tab === 'company_settings') isAccessible = permissions.viewSettings || permissions.voidPayment;
+  else if (tab === 'units') isAccessible = permissions.viewSettings || permissions.viewProducts || userRole === 'owner' || userRole === 'admin';
   
   if (!isAccessible) {
     return (
